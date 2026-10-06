@@ -200,6 +200,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     clipboard.request_paste(&connection, window)?;
                                     continue;
                                 }
+                                if key.state.contains(KeyButMask::CONTROL)
+                                    && key.state.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, Some(0xff50 | 0xff57))
+                                {
+                                    if sym == Some(0xff50) {
+                                        terminal.scrollback_top();
+                                    } else {
+                                        terminal.jump_to_bottom();
+                                    }
+                                    invalidated = true;
+                                    continue;
+                                }
                                 if key.state.contains(KeyButMask::SHIFT)
                                     && matches!(sym, Some(0xff55 | 0xff56))
                                 {
@@ -225,6 +237,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::ButtonPress(button) => {
                                 if terminal.modes().mouse_tracking == MouseTracking::Off
+                                    && matches!(button.detail, 4 | 5)
+                                {
+                                    if button.detail == 4 {
+                                        terminal.scroll_view_up(3);
+                                    } else {
+                                        terminal.scroll_view_down(3);
+                                    }
+                                    invalidated = true;
+                                } else if terminal.modes().mouse_tracking == MouseTracking::Off
                                     && button.detail == 1
                                 {
                                     let point = selection_point(
