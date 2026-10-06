@@ -1,4 +1,8 @@
+use std::collections::VecDeque;
 use std::ops::Range;
+
+const DEFAULT_SCROLLBACK_ROWS: usize = 10_000;
+type ReflowCell = (Cell, Option<String>, Option<u32>);
 
 /// Bit flags describing terminal-cell presentation and wide-cell structure.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,9 +40,8 @@ impl CellFlags {
 
 /// Semantic content and rendition attributes for one terminal column.
 ///
-/// `content` is a Unicode scalar value when nonzero; zero represents an empty cell.
-/// Color words are intentionally opaque to the grid so color encoding can evolve
-/// without coupling terminal storage to the renderer.
+/// `content` stores the leading Unicode scalar; a row sidecar retains additional grapheme scalars.
+/// Zero represents an empty cell. Color words remain opaque to avoid renderer coupling.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct Cell {
@@ -89,6 +92,8 @@ pub struct Cursor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     cells: Box<[Cell]>,
+    graphemes: Vec<Option<String>>,
+    hyperlinks: Vec<Option<u32>>,
     wrapped: bool,
     dirty: bool,
 }
@@ -97,6 +102,8 @@ impl Row {
     fn new(width: usize) -> Self {
         Self {
             cells: vec![Cell::EMPTY; width].into_boxed_slice(),
+            graphemes: vec![None; width],
+            hyperlinks: vec![None; width],
             wrapped: false,
             dirty: true,
         }
@@ -104,6 +111,19 @@ impl Row {
 
     pub fn cells(&self) -> &[Cell] {
         &self.cells
+    }
+
+    pub fn grapheme_at(&self, column: usize) -> Option<String> {
+        let cell = *self.cells.get(column)?;
+        if cell.is_wide_spacer() {
+            return Some(String::new());
+        }
+        if cell.content == 0 {
+            return None;
+        }
+        self.graphemes[column]
+            .clone()
+            .or_else(|| char::from_u32(cell.content).map(|ch| ch.to_string()))
     }
 
     /// Whether this row continues the logical line from its preceding row.
@@ -131,6 +151,8 @@ pub struct Grid {
     rows: Vec<Row>,
     base_row: usize,
     cursor: Cursor,
+    scrollback: VecDeque<Row>,
+    viewport_offset: usize,
 }
 
 impl Grid {
@@ -149,6 +171,8 @@ impl Grid {
             rows: (0..height).map(|_| Row::new(width)).collect(),
             base_row: 0,
             cursor: Cursor::default(),
+            scrollback: VecDeque::new(),
+            viewport_offset: 0,
         };
         grid.mark_all_dirty();
         Ok(grid)
@@ -216,8 +240,126 @@ impl Grid {
         self.row(row)
     }
 
+    /// Returns the row currently shown at a viewport coordinate.
+    pub fn viewport_row(&self, row: usize) -> Option<&Row> {
+        if row >= self.height {
+            return None;
+        }
+        let total = self.scrollback.len() + self.height;
+        let end = total.saturating_sub(self.viewport_offset);
+        let start = end.saturating_sub(self.height);
+        let index = start + row;
+        if index < self.scrollback.len() {
+            self.scrollback.get(index)
+        } else {
+            self.row(index - self.scrollback.len())
+        }
+    }
+
+    pub const fn viewport_offset(&self) -> usize {
+        self.viewport_offset
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Moves the viewport into history without changing the live cursor or screen.
+    pub fn set_viewport_offset(&mut self, offset: usize) {
+        let clamped = offset.min(self.scrollback.len());
+        if clamped != self.viewport_offset {
+            self.viewport_offset = clamped;
+            self.mark_all_dirty();
+        }
+    }
+
+    /// Records rows displaced by full-screen output scroll before recycling them.
+    pub fn scroll_up_recording(&mut self, count: usize) -> bool {
+        let amount = count.min(self.height);
+        if amount == 0 {
+            return true;
+        }
+        for row in 0..amount {
+            self.scrollback
+                .push_back(self.row(row).expect("visible row").clone());
+            if self.scrollback.len() > DEFAULT_SCROLLBACK_ROWS {
+                self.scrollback.pop_front();
+                self.viewport_offset = self.viewport_offset.saturating_sub(1);
+            }
+        }
+        if self.viewport_offset != 0 {
+            self.viewport_offset = (self.viewport_offset + amount).min(self.scrollback.len());
+        }
+        self.scroll_up(0, self.height - 1, amount)
+    }
+
     pub fn cell(&self, row: usize, column: usize) -> Option<Cell> {
         self.row(row)?.cells.get(column).copied()
+    }
+
+    /// Returns the full Unicode grapheme stored at a cell, preserving combining sequences.
+    pub fn grapheme(&self, row: usize, column: usize) -> Option<String> {
+        let cell = self.cell(row, column)?;
+        if cell.is_wide_spacer() {
+            return Some(String::new());
+        }
+        if cell.content == 0 {
+            return None;
+        }
+        let row = self.row(row)?;
+        if let Some(text) = row.graphemes[column].as_ref() {
+            return Some(text.clone());
+        }
+        char::from_u32(cell.content).map(|ch| ch.to_string())
+    }
+
+    pub fn stored_grapheme(&self, row: usize, column: usize) -> Option<&str> {
+        self.row(row)?.graphemes.get(column)?.as_deref()
+    }
+
+    pub fn hyperlink(&self, row: usize, column: usize) -> Option<u32> {
+        self.row(row)?.hyperlinks.get(column).copied().flatten()
+    }
+
+    pub fn set_hyperlink(&mut self, row: usize, column: usize, link: Option<u32>) -> bool {
+        if row >= self.height || column >= self.width {
+            return false;
+        }
+        let target = self.row_mut(row).expect("validated row");
+        if target.cells[column].content == 0 {
+            return false;
+        }
+        target.hyperlinks[column] = link;
+        if target.cells[column].is_wide_leading() {
+            target.hyperlinks[column + 1] = link;
+        }
+        target.dirty = true;
+        true
+    }
+
+    /// Stores one grapheme without making grid content depend on a font or GPU glyph ID.
+    pub fn set_grapheme(&mut self, row: usize, column: usize, text: &str, cell: Cell) -> bool {
+        let Some(ch) = text.chars().next() else {
+            return false;
+        };
+        if row >= self.height
+            || column >= self.width
+            || cell.is_wide_leading()
+            || cell.is_wide_spacer()
+        {
+            return false;
+        }
+        self.clear_cell_pair(row, column);
+        let target = self.row_mut(row).expect("validated row");
+        target.cells[column] = Cell {
+            content: ch as u32,
+            flags: cell.flags().without_wide().bits(),
+            ..cell
+        };
+        target.graphemes[column] = multi_scalar_grapheme(text);
+        target.hyperlinks[column] = None;
+        target.dirty = true;
+        true
     }
 
     /// Writes a normal cell. Wide structure can only be created with `set_wide_cell`.
@@ -235,12 +377,28 @@ impl Grid {
             flags: cell.flags().without_wide().bits(),
             ..cell
         };
+        target.graphemes[column] = None;
+        target.hyperlinks[column] = None;
         target.dirty = true;
         true
     }
 
     /// Writes a leading cell and its spacer atomically, clearing any overlapped pairs.
-    pub fn set_wide_cell(&mut self, row: usize, column: usize, mut leading: Cell) -> bool {
+    pub fn set_wide_cell(&mut self, row: usize, column: usize, leading: Cell) -> bool {
+        let grapheme = char::from_u32(leading.content)
+            .unwrap_or('\u{fffd}')
+            .to_string();
+        self.set_wide_grapheme(row, column, &grapheme, leading)
+    }
+
+    /// Writes a two-column grapheme and spacer atomically.
+    pub fn set_wide_grapheme(
+        &mut self,
+        row: usize,
+        column: usize,
+        text: &str,
+        mut leading: Cell,
+    ) -> bool {
         if row >= self.height || column.checked_add(1).is_none_or(|end| end >= self.width) {
             return false;
         }
@@ -256,6 +414,10 @@ impl Grid {
         let target = self.row_mut(row).expect("validated row");
         target.cells[column] = leading;
         target.cells[column + 1] = spacer;
+        target.graphemes[column] = multi_scalar_grapheme(text);
+        target.graphemes[column + 1] = None;
+        target.hyperlinks[column] = None;
+        target.hyperlinks[column + 1] = None;
         target.dirty = true;
         true
     }
@@ -280,11 +442,15 @@ impl Grid {
         let target = self.row_mut(row).expect("validated row");
         if target.cells[column] != Cell::EMPTY {
             target.cells[column] = Cell::EMPTY;
+            target.graphemes[column] = None;
+            target.hyperlinks[column] = None;
             target.dirty = true;
         }
         if let Some(partner) = partner {
             if target.cells[partner] != Cell::EMPTY {
                 target.cells[partner] = Cell::EMPTY;
+                target.graphemes[partner] = None;
+                target.hyperlinks[partner] = None;
                 target.dirty = true;
             }
         }
@@ -319,8 +485,16 @@ impl Grid {
         let width = self.width;
         let target = self.row_mut(row).expect("validated row");
         target.cells.copy_within(at..width - amount, at + amount);
+        let shifted = target.graphemes[at..width - amount].to_vec();
+        target.graphemes[at + amount..width].clone_from_slice(&shifted);
         target.cells[at..at + amount].fill(Cell::EMPTY);
+        target.graphemes[at..at + amount].fill(None);
+        let shifted_links = target.hyperlinks[at..width - amount].to_vec();
+        target.hyperlinks[at + amount..width].clone_from_slice(&shifted_links);
+        target.hyperlinks[at..at + amount].fill(None);
         repair_wide_pairs(&mut target.cells);
+        clear_orphan_graphemes(&target.cells, &mut target.graphemes);
+        clear_orphan_hyperlinks(&target.cells, &mut target.hyperlinks);
         target.dirty = true;
         true
     }
@@ -338,8 +512,16 @@ impl Grid {
         let width = self.width;
         let target = self.row_mut(row).expect("validated row");
         target.cells.copy_within(at + amount..width, at);
+        let shifted = target.graphemes[at + amount..width].to_vec();
+        target.graphemes[at..width - amount].clone_from_slice(&shifted);
         target.cells[width - amount..].fill(Cell::EMPTY);
+        target.graphemes[width - amount..].fill(None);
+        let shifted_links = target.hyperlinks[at + amount..width].to_vec();
+        target.hyperlinks[at..width - amount].clone_from_slice(&shifted_links);
+        target.hyperlinks[width - amount..].fill(None);
         repair_wide_pairs(&mut target.cells);
+        clear_orphan_graphemes(&target.cells, &mut target.graphemes);
+        clear_orphan_hyperlinks(&target.cells, &mut target.hyperlinks);
         target.dirty = true;
         true
     }
@@ -349,6 +531,8 @@ impl Grid {
             return false;
         };
         target.cells.fill(Cell::EMPTY);
+        target.graphemes.fill(None);
+        target.hyperlinks.fill(None);
         target.wrapped = false;
         target.dirty = true;
         true
@@ -386,6 +570,8 @@ impl Grid {
     pub fn clear_all(&mut self) {
         for row in &mut self.rows {
             row.cells.fill(Cell::EMPTY);
+            row.graphemes.fill(None);
+            row.hyperlinks.fill(None);
             row.wrapped = false;
             row.dirty = true;
         }
@@ -475,6 +661,8 @@ impl Grid {
     fn reset_row(&mut self, logical_row: usize) {
         let row = self.row_mut(logical_row).expect("valid row");
         row.cells.fill(Cell::EMPTY);
+        row.graphemes.fill(None);
+        row.hyperlinks.fill(None);
         row.wrapped = false;
         row.dirty = true;
     }
@@ -538,24 +726,138 @@ impl Grid {
         }
         validate_dimensions(new_width, new_height)?;
 
-        let keep_height = self.height.min(new_height);
-        let keep_width = self.width.min(new_width);
-        let mut rows = Vec::with_capacity(new_height);
-        for logical in 0..keep_height {
-            let old = self.row(logical).expect("visible row");
-            let mut row = Row::new(new_width);
-            row.cells[..keep_width].copy_from_slice(&old.cells[..keep_width]);
-            row.wrapped = old.wrapped;
-            repair_wide_pairs(&mut row.cells);
-            rows.push(row);
+        let old_cursor_row = self.cursor.row;
+        let mut source: Vec<Row> = self.scrollback.iter().cloned().collect();
+        source.extend((0..self.height).map(|row| self.row(row).expect("visible row").clone()));
+        let cursor_source_row = self.scrollback.len() + old_cursor_row;
+        let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
+        let mut cursor_position = None;
+        let mut source_line = 0;
+        for (index, row) in source.iter().enumerate() {
+            let source_offset;
+            if logical_lines.is_empty() || !row.wrapped {
+                logical_lines.push(Vec::new());
+                source_line = logical_lines.len() - 1;
+                source_offset = 0;
+            } else {
+                source_offset = logical_lines[source_line].len();
+            }
+            if index == cursor_source_row {
+                cursor_position = Some((source_line, source_offset + self.cursor.column));
+            }
+            let continues = source.get(index + 1).is_some_and(|next| next.wrapped);
+            let mut used = if continues {
+                self.width
+            } else {
+                row.cells
+                    .iter()
+                    .rposition(|cell| cell.content != 0)
+                    .map_or(0, |last| last + 1)
+            };
+            if index == cursor_source_row {
+                used = used.max(self.cursor.column + 1);
+            }
+            if used > 0 && row.cells[used - 1].is_wide_leading() {
+                used = (used + 1).min(self.width);
+            }
+            logical_lines[source_line].extend((0..used).map(|column| {
+                (
+                    row.cells[column],
+                    row.graphemes[column].clone(),
+                    row.hyperlinks[column],
+                )
+            }));
         }
-        rows.extend((keep_height..new_height).map(|_| Row::new(new_width)));
+
+        let mut reflowed = Vec::new();
+        let mut new_cursor = None;
+        for (line_index, line) in logical_lines.iter().enumerate() {
+            let mut offset = 0;
+            let mut continuation = false;
+            if line.is_empty() {
+                reflowed.push(Row::new(new_width));
+                if cursor_position == Some((line_index, 0)) {
+                    new_cursor = Some((reflowed.len() - 1, 0));
+                }
+            }
+            while offset < line.len() {
+                let mut row = Row::new(new_width);
+                row.wrapped = continuation;
+                let row_index = reflowed.len();
+                let mut column = 0;
+                while offset < line.len() && column < new_width {
+                    let (cell, grapheme, hyperlink) = &line[offset];
+                    if cell.is_wide_leading() {
+                        if new_width == 1 {
+                            row.cells[0] = Cell::new(
+                                '\u{fffd}' as u32,
+                                cell.fg,
+                                cell.bg,
+                                cell.flags().without_wide(),
+                            );
+                            row.graphemes[0] = Some("\u{fffd}".to_owned());
+                            offset += 2;
+                            column = 1;
+                            continue;
+                        }
+                        if column + 1 >= new_width {
+                            break;
+                        }
+                        row.cells[column] = *cell;
+                        row.graphemes[column] = grapheme.clone();
+                        row.hyperlinks[column] = *hyperlink;
+                        if let Some((spacer, _, spacer_link)) = line.get(offset + 1) {
+                            row.cells[column + 1] = *spacer;
+                            row.hyperlinks[column + 1] = *spacer_link;
+                        }
+                        if cursor_position == Some((line_index, offset)) {
+                            new_cursor = Some((row_index, column));
+                        }
+                        offset += 2;
+                        column += 2;
+                    } else {
+                        row.cells[column] = *cell;
+                        row.graphemes[column] = grapheme.clone();
+                        row.hyperlinks[column] = *hyperlink;
+                        if cursor_position == Some((line_index, offset)) {
+                            new_cursor = Some((row_index, column));
+                        }
+                        offset += 1;
+                        column += 1;
+                    }
+                }
+                if offset < line.len() && column == 0 {
+                    let (cell, grapheme, hyperlink) = &line[offset];
+                    row.cells[0] = *cell;
+                    row.graphemes[0] = grapheme.clone();
+                    row.hyperlinks[0] = *hyperlink;
+                    offset += 1;
+                }
+                reflowed.push(row);
+                continuation = true;
+            }
+        }
+        let desired_start = reflowed.len().saturating_sub(new_height);
+        let start = new_cursor.map_or(desired_start, |(row, _)| desired_start.min(row));
+        let mut scrollback: VecDeque<Row> = reflowed.drain(..start).collect();
+        while scrollback.len() > DEFAULT_SCROLLBACK_ROWS {
+            scrollback.pop_front();
+        }
+        let cursor_row = new_cursor.map_or(0, |(row, _)| row.saturating_sub(start));
+        let cursor_column = new_cursor
+            .map_or(self.cursor.column.min(new_width - 1), |(_, column)| {
+                column.min(new_width - 1)
+            });
+        let mut rows: Vec<Row> = reflowed.into_iter().take(new_height).collect();
+        rows.resize_with(new_height, || Row::new(new_width));
         self.width = new_width;
         self.height = new_height;
         self.rows = rows;
         self.base_row = 0;
-        self.cursor.column = self.cursor.column.min(new_width - 1);
-        self.cursor.row = self.cursor.row.min(new_height - 1);
+        self.scrollback = scrollback;
+        self.viewport_offset = 0;
+        self.cursor.column = cursor_column;
+        self.cursor.row = cursor_row.min(new_height - 1);
         self.mark_all_dirty();
         Ok(())
     }
@@ -630,8 +932,29 @@ fn repair_wide_pairs(cells: &mut [Cell]) {
             || (cells[column].is_wide_spacer() && !spacer_valid)
         {
             cells[column] = Cell::EMPTY;
+            // Invalid clipped pairs cannot retain semantic text without a leading cell.
         }
     }
+}
+
+fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut [Option<String>]) {
+    for (cell, text) in cells.iter().zip(graphemes) {
+        if cell.content == 0 {
+            *text = None;
+        }
+    }
+}
+
+fn clear_orphan_hyperlinks(cells: &[Cell], hyperlinks: &mut [Option<u32>]) {
+    for (cell, link) in cells.iter().zip(hyperlinks) {
+        if cell.content == 0 {
+            *link = None;
+        }
+    }
+}
+
+fn multi_scalar_grapheme(text: &str) -> Option<String> {
+    (text.chars().count() > 1).then(|| text.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -930,7 +1253,7 @@ mod tests {
     }
 
     #[test]
-    fn resize_preserves_top_left_intersection_and_clamps_cursor() {
+    fn resize_reflows_logical_rows_and_keeps_cursor_in_bounds() {
         let mut grid = grid(3, 2);
         put_rows(&mut grid, &["abc", "def"]);
         grid.set_cursor(2, 1);
@@ -941,8 +1264,8 @@ mod tests {
             ["abc..", "def..", "....."]
         );
         grid.resize(2, 1).unwrap();
-        assert_eq!(row_text(&grid, 0), "ab");
-        assert_eq!(grid.cursor(), Cursor { column: 1, row: 0 });
+        assert_eq!(row_text(&grid, 0), "f.");
+        assert_eq!(grid.cursor(), Cursor { column: 0, row: 0 });
         assert!(!grid.take_dirty_rows().is_empty());
     }
 
@@ -1067,6 +1390,22 @@ mod tests {
             ),
             (4, 3)
         );
+    }
+
+    #[test]
+    fn grapheme_storage_moves_with_cells_and_wide_pair_clears_atomically() {
+        let mut grid = grid(5, 1);
+        assert!(grid.set_grapheme(0, 0, "e\u{301}", cell('e')));
+        assert_eq!(grid.grapheme(0, 0).as_deref(), Some("e\u{301}"));
+        assert!(grid.set_wide_grapheme(0, 2, "界", cell('界')));
+        assert_eq!(grid.grapheme(0, 2).as_deref(), Some("界"));
+        grid.insert_cells(0, 0, 1);
+        assert_eq!(grid.grapheme(0, 1).as_deref(), Some("e\u{301}"));
+        assert_eq!(grid.grapheme(0, 3).as_deref(), Some("界"));
+        grid.clear_cell(0, 4);
+        assert_eq!(grid.cell(0, 3), Some(Cell::EMPTY));
+        assert_eq!(grid.cell(0, 4), Some(Cell::EMPTY));
+        assert_eq!(grid.grapheme(0, 3), None);
     }
 
     #[test]

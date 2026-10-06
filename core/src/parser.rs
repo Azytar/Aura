@@ -508,6 +508,31 @@ mod tests {
     }
 
     #[test]
+    fn bounded_arbitrary_byte_streams_are_deterministic_across_chunking() {
+        let mut state = 0x4d59_5df4_d0f3_3173u64;
+        for _ in 0..128 {
+            let mut bytes = vec![0; 4096];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = state as u8;
+            }
+            let mut first = Parser::new();
+            let mut first_events = Vec::new();
+            first.feed(&bytes, |event| first_events.push(event));
+            let mut second = Parser::new();
+            let mut second_events = Vec::new();
+            for chunk in bytes.chunks(37) {
+                second.feed(chunk, |event| second_events.push(event));
+            }
+            assert_eq!(first_events, second_events);
+            assert!(first.string.len() <= STRING_MAX_BYTES);
+            assert!(second.string.len() <= STRING_MAX_BYTES);
+        }
+    }
+
+    #[test]
     fn parses_csi_parameters_and_private_modes() {
         assert_eq!(
             parse(b"\x1b[?1049;25h"),
