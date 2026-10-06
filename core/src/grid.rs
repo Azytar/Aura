@@ -389,10 +389,7 @@ impl Grid {
 
     /// Writes a leading cell and its spacer atomically, clearing any overlapped pairs.
     pub fn set_wide_cell(&mut self, row: usize, column: usize, leading: Cell) -> bool {
-        let grapheme = char::from_u32(leading.content)
-            .unwrap_or('\u{fffd}')
-            .to_string();
-        self.set_wide_grapheme(row, column, &grapheme, leading)
+        self.set_wide_cell_inner(row, column, leading, None)
     }
 
     /// Writes a two-column grapheme and spacer atomically.
@@ -401,7 +398,17 @@ impl Grid {
         row: usize,
         column: usize,
         text: &str,
+        leading: Cell,
+    ) -> bool {
+        self.set_wide_cell_inner(row, column, leading, multi_scalar_grapheme(text))
+    }
+
+    fn set_wide_cell_inner(
+        &mut self,
+        row: usize,
+        column: usize,
         mut leading: Cell,
+        grapheme: Option<String>,
     ) -> bool {
         if row >= self.height || column.checked_add(1).is_none_or(|end| end >= self.width) {
             return false;
@@ -418,7 +425,7 @@ impl Grid {
         let target = self.row_mut(row).expect("validated row");
         target.cells[column] = leading;
         target.cells[column + 1] = spacer;
-        target.graphemes[column] = multi_scalar_grapheme(text);
+        target.graphemes[column] = grapheme;
         target.graphemes[column + 1] = None;
         target.hyperlinks[column] = None;
         target.hyperlinks[column + 1] = None;

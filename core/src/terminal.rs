@@ -790,10 +790,9 @@ impl Terminal {
             self.rendition.bg,
             CellFlags::from_bits_retain(self.rendition.flags),
         );
-        let text = ch.to_string();
         if !self
             .active_grid_mut()
-            .set_wide_grapheme(cursor.row, cursor.column, &text, cell)
+            .set_wide_cell(cursor.row, cursor.column, cell)
         {
             return;
         }
@@ -833,7 +832,7 @@ impl Terminal {
             CellFlags::from_bits_retain(self.rendition.flags),
         );
         self.active_grid_mut()
-            .set_grapheme(cursor.row, cursor.column, &ch.to_string(), cell);
+            .set_cell(cursor.row, cursor.column, cell);
         if let Some(id) = self.current_hyperlink {
             self.active_grid_mut()
                 .set_hyperlink(cursor.row, cursor.column, Some(id));
