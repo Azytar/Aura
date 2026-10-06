@@ -1,0 +1,17 @@
+[package]
+name = "aterm-render"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aterm-core = { path = "../core" }
+aterm-font = { path = "../font" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
