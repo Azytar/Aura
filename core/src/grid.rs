@@ -726,6 +726,7 @@ impl Grid {
         }
         validate_dimensions(new_width, new_height)?;
 
+        let old_viewport_offset = self.viewport_offset;
         let old_cursor_row = self.cursor.row;
         let mut source: Vec<Row> = self.scrollback.iter().cloned().collect();
         source.extend((0..self.height).map(|row| self.row(row).expect("visible row").clone()));
@@ -855,7 +856,7 @@ impl Grid {
         self.rows = rows;
         self.base_row = 0;
         self.scrollback = scrollback;
-        self.viewport_offset = 0;
+        self.viewport_offset = old_viewport_offset.min(self.scrollback.len());
         self.cursor.column = cursor_column;
         self.cursor.row = cursor_row.min(new_height - 1);
         self.mark_all_dirty();
