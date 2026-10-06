@@ -94,6 +94,15 @@ struct FrameSetup<'a> {
     sampler: vk::Sampler,
 }
 
+struct AtlasUploadContext<'a> {
+    instance: &'a Instance,
+    device: &'a Device,
+    physical: vk::PhysicalDevice,
+    queue: vk::Queue,
+    queue_family: u32,
+    atlas: vk::Image,
+}
+
 struct FrameDraw {
     image: vk::Image,
     view: vk::ImageView,
@@ -103,6 +112,8 @@ struct FrameDraw {
     push: PushGrid,
     instances: u32,
     extent: vk::Extent2D,
+    final_layout: vk::ImageLayout,
+    readback: Option<vk::Buffer>,
 }
 
 /// Owns the surface-bound Vulkan device and all frame-in-flight resources.
@@ -139,6 +150,302 @@ pub struct Renderer {
     pending_glyph_uploads: Vec<GlyphUpload>,
     glyphs_dirty: bool,
     grid_size: Option<(usize, usize)>,
+}
+
+/// Vulkan renderer for deterministic image readback without a window system.
+pub struct OffscreenRenderer {
+    _entry: Entry,
+    instance: Instance,
+    physical: vk::PhysicalDevice,
+    device: Device,
+    queue: vk::Queue,
+    queue_family: u32,
+    descriptor_layout: vk::DescriptorSetLayout,
+    descriptor_pool: vk::DescriptorPool,
+    pipeline_layout: vk::PipelineLayout,
+    background_pipeline: vk::Pipeline,
+    text_pipeline: vk::Pipeline,
+    atlas: vk::Image,
+    atlas_memory: vk::DeviceMemory,
+    atlas_view: vk::ImageView,
+    atlas_sampler: vk::Sampler,
+    target: vk::Image,
+    target_memory: vk::DeviceMemory,
+    target_view: vk::ImageView,
+    extent: vk::Extent2D,
+    frames: Vec<Frame>,
+    atlas_uploaded: bool,
+}
+
+impl OffscreenRenderer {
+    /// Creates Vulkan 1.3 graphics resources without requesting any surface extensions.
+    pub fn new(width: u32, height: u32) -> Result<Self, String> {
+        if width == 0 || height == 0 {
+            return Err("offscreen target dimensions must be nonzero".into());
+        }
+        let entry = unsafe { Entry::load() }.map_err(|error| format!("Vulkan loader: {error}"))?;
+        let app_name = CString::new("aterm-offscreen").expect("static string has no nul");
+        let app = vk::ApplicationInfo::default()
+            .application_name(&app_name)
+            .application_version(vk::make_api_version(0, 0, 1, 0))
+            .api_version(vk::API_VERSION_1_3);
+        let instance = unsafe {
+            entry.create_instance(
+                &vk::InstanceCreateInfo::default().application_info(&app),
+                None,
+            )
+        }
+        .map_err(vk_error("offscreen Vulkan instance creation"))?;
+        let (physical, queue_family) = choose_offscreen_device(&instance)?;
+        let priority = [1.0f32];
+        let queues = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(queue_family)
+            .queue_priorities(&priority)];
+        let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
+            .dynamic_rendering(true)
+            .synchronization2(true);
+        let device_info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queues)
+            .push_next(&mut features13);
+        let device = unsafe { instance.create_device(physical, &device_info, None) }
+            .map_err(vk_error("offscreen Vulkan logical device creation"))?;
+        let queue = unsafe { device.get_device_queue(queue_family, 0) };
+        let descriptor_layout = create_descriptor_layout(&device)?;
+        let push_range = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(size_of::<PushGrid>() as u32)];
+        let pipeline_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&[descriptor_layout])
+                    .push_constant_ranges(&push_range),
+                None,
+            )
+        }
+        .map_err(vk_error("offscreen pipeline layout"))?;
+        let format = vk::Format::R8G8B8A8_UNORM;
+        let background_pipeline = create_pipeline(
+            &device,
+            pipeline_layout,
+            format,
+            include_bytes!(concat!(env!("OUT_DIR"), "/background.vert.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/background.frag.spv")),
+            false,
+        )?;
+        let text_pipeline = create_pipeline(
+            &device,
+            pipeline_layout,
+            format,
+            include_bytes!(concat!(env!("OUT_DIR"), "/text.vert.spv")),
+            include_bytes!(concat!(env!("OUT_DIR"), "/text.frag.spv")),
+            true,
+        )?;
+        let (atlas, atlas_memory, atlas_view, atlas_sampler) =
+            create_atlas(&instance, &device, physical)?;
+        let (target, target_memory, target_view) =
+            create_offscreen_target(&instance, &device, physical, width, height)?;
+        let descriptor_pool = create_descriptor_pool(&device)?;
+        let frames = create_frames(FrameSetup {
+            instance: &instance,
+            device: &device,
+            physical,
+            queue_family,
+            pool: descriptor_pool,
+            layout: descriptor_layout,
+            atlas_view,
+            sampler: atlas_sampler,
+        })?;
+        Ok(Self {
+            _entry: entry,
+            instance,
+            physical,
+            device,
+            queue,
+            queue_family,
+            descriptor_layout,
+            descriptor_pool,
+            pipeline_layout,
+            background_pipeline,
+            text_pipeline,
+            atlas,
+            atlas_memory,
+            atlas_view,
+            atlas_sampler,
+            target,
+            target_memory,
+            target_view,
+            extent: vk::Extent2D { width, height },
+            frames,
+            atlas_uploaded: false,
+        })
+    }
+
+    /// Renders the current viewport and returns tightly packed RGBA8 pixels.
+    pub fn render(&mut self, terminal: &mut Terminal, font: &mut Font) -> Result<Vec<u8>, String> {
+        let grid = terminal.active_grid();
+        let (cols, rows) = (grid.width(), grid.height());
+        let metrics = font.metrics();
+        let expected_width = (cols as u32)
+            .checked_mul(metrics.width)
+            .ok_or("offscreen grid width overflow")?;
+        let expected_height = (rows as u32)
+            .checked_mul(metrics.height)
+            .ok_or("offscreen grid height overflow")?;
+        if expected_width != self.extent.width || expected_height != self.extent.height {
+            return Err("offscreen target must exactly match terminal pixel dimensions".into());
+        }
+        let count = cols
+            .checked_mul(rows)
+            .ok_or("terminal grid size overflow")?;
+        let mut cells = vec![GpuCell::zeroed(); count];
+        let mut glyphs = vec![GpuGlyph::zeroed()];
+        let mut uploads = Vec::new();
+        for row in 0..rows {
+            for column in 0..cols {
+                let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
+                if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
+                    cells[row * cols + column] = GpuCell {
+                        glyph: u32::MAX,
+                        fg: color(cell.fg, true),
+                        bg: color(cell.bg, false),
+                        flags: cell.flags,
+                    };
+                    continue;
+                }
+                let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
+                let (pre, post) = if Font::requires_contextual_shaping(ch) {
+                    terminal.viewport_shaping_context(row, column)
+                } else {
+                    (String::new(), String::new())
+                };
+                let bold = cell.flags().contains(CellFlags::BOLD);
+                let italic = cell.flags().contains(CellFlags::ITALIC);
+                let (glyph, info, upload) = match terminal.viewport_stored_grapheme(row, column) {
+                    Some(grapheme) if pre.is_empty() && post.is_empty() => {
+                        font.glyph_text(grapheme, bold, italic)?
+                    }
+                    Some(grapheme) => {
+                        font.glyph_text_with_context(grapheme, &pre, &post, bold, italic)?
+                    }
+                    None if !pre.is_empty() || !post.is_empty() => {
+                        font.glyph_text_with_context(&ch.to_string(), &pre, &post, bold, italic)?
+                    }
+                    None => font.glyph(ch, bold, italic)?,
+                };
+                if let Some(upload) = upload {
+                    uploads.push(upload);
+                }
+                let metadata = GpuGlyph {
+                    uv: [
+                        info.uv_min[0],
+                        info.uv_min[1],
+                        info.uv_max[0],
+                        info.uv_max[1],
+                    ],
+                    size_bearing: [info.size[0], info.size[1], info.bearing[0], info.bearing[1]],
+                    bearing_advance: [info.bearing[0], info.bearing[1], info.advance, 0.0],
+                };
+                glyphs.resize(glyph as usize + 1, GpuGlyph::zeroed());
+                glyphs[glyph as usize] = metadata;
+                cells[row * cols + column] = GpuCell {
+                    glyph,
+                    fg: color(cell.fg, true),
+                    bg: color(cell.bg, false),
+                    flags: cell.flags,
+                };
+            }
+        }
+
+        let frame = &mut self.frames[0];
+        unsafe { self.device.wait_for_fences(&[frame.fence], true, u64::MAX) }
+            .map_err(vk_error("wait for offscreen frame"))?;
+        let cell_bytes = bytemuck::cast_slice(&cells);
+        let glyph_bytes = bytemuck::cast_slice(&glyphs);
+        if cell_bytes.len() as u64 > frame.cells.size
+            || glyph_bytes.len() as u64 > frame.glyphs.size
+        {
+            return Err("offscreen terminal data exceeds SSBO capacity".into());
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(cell_bytes.as_ptr(), frame.cells.mapped, cell_bytes.len());
+            ptr::copy_nonoverlapping(glyph_bytes.as_ptr(), frame.glyphs.mapped, glyph_bytes.len());
+        }
+        if !self.atlas_uploaded {
+            upload_offscreen_atlas(
+                AtlasUploadContext {
+                    instance: &self.instance,
+                    device: &self.device,
+                    physical: self.physical,
+                    queue: self.queue,
+                    queue_family: self.queue_family,
+                    atlas: self.atlas,
+                },
+                font.atlas_pixels(),
+            )?;
+            self.atlas_uploaded = true;
+        } else if !uploads.is_empty() {
+            upload_atlas_regions(
+                AtlasUploadContext {
+                    instance: &self.instance,
+                    device: &self.device,
+                    physical: self.physical,
+                    queue: self.queue,
+                    queue_family: self.queue_family,
+                    atlas: self.atlas,
+                },
+                &uploads,
+                true,
+            )?;
+        }
+        let readback = create_buffer(
+            &self.instance,
+            &self.device,
+            self.physical,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            u64::from(self.extent.width) * u64::from(self.extent.height) * 4,
+            vk::BufferUsageFlags::TRANSFER_DST,
+        )?;
+        let push = PushGrid {
+            cols: cols as u32,
+            rows: rows as u32,
+            cell_width: metrics.width as f32,
+            cell_height: metrics.height as f32,
+            ascent: metrics.ascent as f32,
+            cursor: (terminal.cursor().row * cols + terminal.cursor().column) as u32,
+            cursor_visible: 0,
+            selection_start: u32::MAX,
+            selection_end: u32::MAX,
+        };
+        record_frame(
+            &self.device,
+            frame,
+            &FrameDraw {
+                image: self.target,
+                view: self.target_view,
+                background: self.background_pipeline,
+                text: self.text_pipeline,
+                layout: self.pipeline_layout,
+                push,
+                instances: count as u32,
+                extent: self.extent,
+                final_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                readback: Some(readback.handle),
+            },
+        )?;
+        unsafe { self.device.reset_fences(&[frame.fence]) }
+            .map_err(vk_error("reset offscreen frame fence"))?;
+        let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(frame.command)];
+        let submit = [vk::SubmitInfo2::default().command_buffer_infos(&commands)];
+        unsafe { self.device.queue_submit2(self.queue, &submit, frame.fence) }
+            .map_err(vk_error("submit offscreen frame"))?;
+        unsafe { self.device.wait_for_fences(&[frame.fence], true, u64::MAX) }
+            .map_err(vk_error("wait for offscreen readback"))?;
+        let byte_count = (self.extent.width * self.extent.height * 4) as usize;
+        let pixels = unsafe { std::slice::from_raw_parts(readback.mapped, byte_count) }.to_vec();
+        destroy_buffer(&self.device, readback);
+        Ok(pixels)
+    }
 }
 
 impl Renderer {
@@ -424,6 +731,8 @@ impl Renderer {
                 push,
                 instances: count as u32,
                 extent: self.extent,
+                final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                readback: None,
             },
         )?;
         let wait = [vk::SemaphoreSubmitInfo::default()
@@ -744,6 +1053,296 @@ impl Renderer {
         destroy_buffer(&self.device, staging);
         Ok(())
     }
+}
+
+impl Drop for OffscreenRenderer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.device.device_wait_idle();
+            for frame in self.frames.drain(..) {
+                destroy_buffer(&self.device, frame.cells);
+                destroy_buffer(&self.device, frame.glyphs);
+                self.device.destroy_fence(frame.fence, None);
+                self.device.destroy_semaphore(frame.image_available, None);
+                self.device.destroy_command_pool(frame.command_pool, None);
+            }
+            self.device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+            self.device.destroy_pipeline(self.text_pipeline, None);
+            self.device.destroy_pipeline(self.background_pipeline, None);
+            self.device
+                .destroy_pipeline_layout(self.pipeline_layout, None);
+            self.device
+                .destroy_descriptor_set_layout(self.descriptor_layout, None);
+            self.device.destroy_sampler(self.atlas_sampler, None);
+            self.device.destroy_image_view(self.atlas_view, None);
+            self.device.destroy_image(self.atlas, None);
+            self.device.free_memory(self.atlas_memory, None);
+            self.device.destroy_image_view(self.target_view, None);
+            self.device.destroy_image(self.target, None);
+            self.device.free_memory(self.target_memory, None);
+            self.device.destroy_device(None);
+            self.instance.destroy_instance(None);
+        }
+    }
+}
+
+fn choose_offscreen_device(instance: &Instance) -> Result<(vk::PhysicalDevice, u32), String> {
+    for physical in unsafe { instance.enumerate_physical_devices() }
+        .map_err(vk_error("enumerate offscreen Vulkan devices"))?
+    {
+        let properties = unsafe { instance.get_physical_device_properties(physical) };
+        if properties.api_version < vk::API_VERSION_1_3 {
+            continue;
+        }
+        let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut features13);
+        unsafe { instance.get_physical_device_features2(physical, &mut features) };
+        if features13.dynamic_rendering != vk::TRUE || features13.synchronization2 != vk::TRUE {
+            continue;
+        }
+        if let Some((index, _)) =
+            unsafe { instance.get_physical_device_queue_family_properties(physical) }
+                .iter()
+                .enumerate()
+                .find(|(_, family)| family.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+        {
+            return Ok((physical, index as u32));
+        }
+    }
+    Err("no Vulkan 1.3 device has dynamic rendering, synchronization2, and a graphics queue".into())
+}
+
+fn create_offscreen_target(
+    instance: &Instance,
+    device: &Device,
+    physical: vk::PhysicalDevice,
+    width: u32,
+    height: u32,
+) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
+    let info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(vk::Format::R8G8B8A8_UNORM)
+        .extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let image = unsafe { device.create_image(&info, None) }
+        .map_err(vk_error("create offscreen color image"))?;
+    let requirements = unsafe { device.get_image_memory_requirements(image) };
+    let memory_index = memory_type(
+        instance,
+        physical,
+        requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+    let allocation = vk::MemoryAllocateInfo::default()
+        .allocation_size(requirements.size)
+        .memory_type_index(memory_index);
+    let memory = unsafe { device.allocate_memory(&allocation, None) }
+        .map_err(vk_error("allocate offscreen color image"))?;
+    unsafe { device.bind_image_memory(image, memory, 0) }
+        .map_err(vk_error("bind offscreen color image"))?;
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(vk::Format::R8G8B8A8_UNORM)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1)
+                .layer_count(1),
+        );
+    let view = unsafe { device.create_image_view(&view_info, None) }
+        .map_err(vk_error("create offscreen color view"))?;
+    Ok((image, memory, view))
+}
+
+fn upload_offscreen_atlas(context: AtlasUploadContext<'_>, pixels: &[u8]) -> Result<(), String> {
+    if pixels.len() != (ATLAS_SIZE * ATLAS_SIZE) as usize {
+        return Err("font atlas byte count does not match the Vulkan atlas extent".into());
+    }
+    let upload = GlyphUpload {
+        x: 0,
+        y: 0,
+        width: ATLAS_SIZE,
+        height: ATLAS_SIZE,
+        pixels: pixels.to_vec(),
+    };
+    upload_atlas_regions(context, &[upload], false)
+}
+
+fn upload_atlas_regions(
+    context: AtlasUploadContext<'_>,
+    uploads: &[GlyphUpload],
+    initialized: bool,
+) -> Result<(), String> {
+    let AtlasUploadContext {
+        instance,
+        device,
+        physical,
+        queue,
+        queue_family,
+        atlas,
+    } = context;
+    let mut data = Vec::new();
+    let mut regions = Vec::with_capacity(uploads.len());
+    for upload in uploads {
+        let expected = (upload.width as usize)
+            .checked_mul(upload.height as usize)
+            .ok_or("atlas upload dimensions overflow")?;
+        if upload.width == 0
+            || upload.height == 0
+            || upload.pixels.len() != expected
+            || upload
+                .x
+                .checked_add(upload.width)
+                .is_none_or(|right| right > ATLAS_SIZE)
+            || upload
+                .y
+                .checked_add(upload.height)
+                .is_none_or(|bottom| bottom > ATLAS_SIZE)
+        {
+            return Err("glyph upload is outside the grayscale atlas".into());
+        }
+        let offset = data.len().checked_add(3).ok_or("atlas offset overflow")? & !3;
+        data.resize(offset, 0);
+        data.extend_from_slice(&upload.pixels);
+        regions.push(
+            vk::BufferImageCopy::default()
+                .buffer_offset(offset as u64)
+                .image_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .layer_count(1),
+                )
+                .image_offset(vk::Offset3D {
+                    x: upload.x as i32,
+                    y: upload.y as i32,
+                    z: 0,
+                })
+                .image_extent(vk::Extent3D {
+                    width: upload.width,
+                    height: upload.height,
+                    depth: 1,
+                }),
+        );
+    }
+    let staging = create_buffer(
+        instance,
+        device,
+        physical,
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        data.len().max(1) as u64,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+    )?;
+    unsafe { ptr::copy_nonoverlapping(data.as_ptr(), staging.mapped, data.len()) };
+    let pool = unsafe {
+        device.create_command_pool(
+            &vk::CommandPoolCreateInfo::default()
+                .queue_family_index(queue_family)
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT),
+            None,
+        )
+    }
+    .map_err(vk_error("create atlas upload command pool"))?;
+    let command = unsafe {
+        device.allocate_command_buffers(
+            &vk::CommandBufferAllocateInfo::default()
+                .command_pool(pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1),
+        )
+    }
+    .map_err(vk_error("allocate atlas upload command buffer"))?[0];
+    unsafe {
+        device.begin_command_buffer(
+            command,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        )
+    }
+    .map_err(vk_error("begin atlas upload command buffer"))?;
+    let to_copy = [vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(if initialized {
+            vk::PipelineStageFlags2::FRAGMENT_SHADER
+        } else {
+            vk::PipelineStageFlags2::NONE
+        })
+        .src_access_mask(if initialized {
+            vk::AccessFlags2::SHADER_SAMPLED_READ
+        } else {
+            vk::AccessFlags2::NONE
+        })
+        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .old_layout(if initialized {
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        } else {
+            vk::ImageLayout::UNDEFINED
+        })
+        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .image(atlas)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1)
+                .layer_count(1),
+        )];
+    unsafe {
+        device.cmd_pipeline_barrier2(
+            command,
+            &vk::DependencyInfo::default().image_memory_barriers(&to_copy),
+        );
+        device.cmd_copy_buffer_to_image(
+            command,
+            staging.handle,
+            atlas,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &regions,
+        );
+    }
+    let to_sample = [vk::ImageMemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+        .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+        .image(atlas)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .level_count(1)
+                .layer_count(1),
+        )];
+    unsafe {
+        device.cmd_pipeline_barrier2(
+            command,
+            &vk::DependencyInfo::default().image_memory_barriers(&to_sample),
+        );
+        device.end_command_buffer(command)
+    }
+    .map_err(vk_error("finish atlas upload command buffer"))?;
+    let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(command)];
+    let submits = [vk::SubmitInfo2::default().command_buffer_infos(&commands)];
+    unsafe {
+        device
+            .queue_submit2(queue, &submits, vk::Fence::null())
+            .and_then(|_| device.queue_wait_idle(queue))
+    }
+    .map_err(vk_error("submit atlas upload"))?;
+    unsafe { device.destroy_command_pool(pool, None) };
+    destroy_buffer(device, staging);
+    Ok(())
 }
 
 impl Drop for Renderer {
@@ -1307,6 +1906,8 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
         push,
         instances,
         extent,
+        final_layout,
+        readback,
     } = draw;
     unsafe { device.reset_command_buffer(frame.command, vk::CommandBufferResetFlags::empty()) }
         .map_err(vk_error("reset frame command buffer"))?;
@@ -1386,16 +1987,54 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
         device.cmd_bind_pipeline(frame.command, vk::PipelineBindPoint::GRAPHICS, *text);
         device.cmd_draw(frame.command, 4, *instances, 0, 0);
         device.cmd_end_rendering(frame.command);
-        let to_present = [vk::ImageMemoryBarrier2::default()
+        let to_final = [vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
             .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+            .dst_stage_mask(if readback.is_some() {
+                vk::PipelineStageFlags2::COPY
+            } else {
+                vk::PipelineStageFlags2::NONE
+            })
+            .dst_access_mask(if readback.is_some() {
+                vk::AccessFlags2::TRANSFER_READ
+            } else {
+                vk::AccessFlags2::NONE
+            })
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .new_layout(*final_layout)
             .image(*image)
             .subresource_range(range)];
-        let dep = vk::DependencyInfo::default().image_memory_barriers(&to_present);
+        let dep = vk::DependencyInfo::default().image_memory_barriers(&to_final);
         device.cmd_pipeline_barrier2(frame.command, &dep);
+        if let Some(buffer) = readback {
+            device.cmd_copy_image_to_buffer(
+                frame.command,
+                *image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                *buffer,
+                &[vk::BufferImageCopy::default()
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(1),
+                    )
+                    .image_extent(vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    })],
+            );
+            let host_ready = [vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                .buffer(*buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)];
+            let dep = vk::DependencyInfo::default().buffer_memory_barriers(&host_ready);
+            device.cmd_pipeline_barrier2(frame.command, &dep);
+        }
         device
             .end_command_buffer(frame.command)
             .map_err(vk_error("end frame command buffer"))?;
@@ -1447,10 +2086,24 @@ mod tests {
     #[test]
     fn gpu_cell_matches_four_word_storage_layout() {
         assert_eq!(size_of::<GpuCell>(), 16);
+        assert_eq!(std::mem::offset_of!(GpuCell, glyph), 0);
+        assert_eq!(std::mem::offset_of!(GpuCell, fg), 4);
+        assert_eq!(std::mem::offset_of!(GpuCell, bg), 8);
+        assert_eq!(std::mem::offset_of!(GpuCell, flags), 12);
         assert_eq!(size_of::<GpuGlyph>(), 48);
+        assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
+        assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
+        assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
         assert_eq!(size_of::<PushGrid>(), 36);
+        assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
+        assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
+        assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
+        assert_eq!(std::mem::offset_of!(PushGrid, cell_height), 12);
+        assert_eq!(std::mem::offset_of!(PushGrid, ascent), 16);
         assert_eq!(std::mem::offset_of!(PushGrid, cursor), 20);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor_visible), 24);
         assert_eq!(std::mem::offset_of!(PushGrid, selection_start), 28);
+        assert_eq!(std::mem::offset_of!(PushGrid, selection_end), 32);
     }
 
     #[test]
