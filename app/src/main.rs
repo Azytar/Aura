@@ -6,11 +6,12 @@ use as_raw_xcb_connection::AsRawXcbConnection;
 use aterm_core::{MouseTracking, Pty, PtySize, SelectionPoint, Terminal};
 use aterm_font::{CellMetrics, Font};
 use aterm_render::Renderer;
+use base64::Engine;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureNotifyEvent, ConnectionExt as XprotoExt, CreateWindowAux, EventMask,
-    KeyButMask, PropMode, WindowClass,
+    KeyButMask, PropMode, SelectionNotifyEvent, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::xcb_ffi::XCBConnection;
@@ -62,6 +63,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ),
     )?;
     set_title(&connection, window, "Terminal")?;
+    let mut clipboard = Clipboard::new(&connection)?;
     connection.change_property32(
         PropMode::REPLACE,
         window,
@@ -177,6 +179,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     keysyms_per_keycode,
                                     connection.setup().min_keycode,
                                 );
+                                if key.state.contains(KeyButMask::CONTROL)
+                                    && key.state.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, Some(0x63 | 0x43))
+                                {
+                                    if let Some(text) = terminal.selection_text() {
+                                        clipboard.set_text(
+                                            &connection,
+                                            window,
+                                            clipboard.clipboard_atom,
+                                            text.as_bytes(),
+                                        )?;
+                                    }
+                                    continue;
+                                }
+                                if key.state.contains(KeyButMask::CONTROL)
+                                    && key.state.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, Some(0x76 | 0x56))
+                                {
+                                    clipboard.request_paste(&connection, window)?;
+                                    continue;
+                                }
                                 if key.state.contains(KeyButMask::SHIFT)
                                     && matches!(sym, Some(0xff55 | 0xff56))
                                 {
@@ -292,6 +315,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     invalidated = true;
                                 }
                             }
+                            Event::SelectionRequest(request) => {
+                                clipboard.respond(&connection, request)?;
+                            }
+                            Event::SelectionNotify(notify)
+                                if notify.property != AtomEnum::NONE.into() =>
+                            {
+                                if let Some(bytes) =
+                                    clipboard.receive_paste(&connection, window, notify.property)?
+                                {
+                                    let input = terminal.encode_paste(&bytes);
+                                    write_all_pty(&mut pty, &input)?;
+                                    invalidated = true;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -301,6 +338,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(0) => break,
                         Ok(length) => {
                             let replies = terminal.process(&buffer[..length]);
+                            for request in terminal.take_clipboard_requests() {
+                                let selection = match request.selection.as_slice() {
+                                    b"c" => Some(clipboard.clipboard_atom),
+                                    b"p" => Some(clipboard.primary_atom),
+                                    _ => None,
+                                };
+                                if let Some(selection) = selection
+                                    && let Some(text) = decode_clipboard_payload(&request.base64)
+                                {
+                                    clipboard.set_text(&connection, window, selection, &text)?;
+                                }
+                            }
                             if !replies.is_empty() {
                                 write_all_pty(&mut pty, &replies)?;
                             }
@@ -403,6 +452,169 @@ fn set_title(
     )?;
     connection.flush()?;
     Ok(())
+}
+
+const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
+
+fn decode_clipboard_payload(encoded: &[u8]) -> Option<Vec<u8>> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+    let decoded = STANDARD
+        .decode(encoded)
+        .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+        .ok()?;
+    (decoded.len() <= MAX_CLIPBOARD_BYTES).then_some(decoded)
+}
+
+struct Clipboard {
+    clipboard_atom: u32,
+    primary_atom: u32,
+    utf8_atom: u32,
+    targets_atom: u32,
+    property_atom: u32,
+    clipboard_contents: Vec<u8>,
+    primary_contents: Vec<u8>,
+}
+
+impl Clipboard {
+    fn new(connection: &XCBConnection) -> Result<Self, Box<dyn std::error::Error>> {
+        let atom = |name: &[u8]| -> Result<u32, Box<dyn std::error::Error>> {
+            Ok(connection.intern_atom(false, name)?.reply()?.atom)
+        };
+        Ok(Self {
+            clipboard_atom: atom(b"CLIPBOARD")?,
+            primary_atom: AtomEnum::PRIMARY.into(),
+            utf8_atom: atom(b"UTF8_STRING")?,
+            targets_atom: atom(b"TARGETS")?,
+            property_atom: atom(b"ATERM_CLIPBOARD")?,
+            clipboard_contents: Vec::new(),
+            primary_contents: Vec::new(),
+        })
+    }
+
+    fn set_text(
+        &mut self,
+        connection: &XCBConnection,
+        window: u32,
+        selection: u32,
+        text: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if text.len() > MAX_CLIPBOARD_BYTES {
+            return Ok(());
+        }
+        let contents = if selection == self.clipboard_atom {
+            &mut self.clipboard_contents
+        } else {
+            &mut self.primary_contents
+        };
+        contents.clear();
+        contents.extend_from_slice(text);
+        connection
+            .set_selection_owner(window, selection, x11rb::CURRENT_TIME)?
+            .check()?;
+        Ok(())
+    }
+
+    fn request_paste(
+        &self,
+        connection: &XCBConnection,
+        window: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        connection
+            .convert_selection(
+                window,
+                self.clipboard_atom,
+                self.utf8_atom,
+                self.property_atom,
+                x11rb::CURRENT_TIME,
+            )?
+            .check()?;
+        Ok(())
+    }
+
+    fn respond(
+        &self,
+        connection: &XCBConnection,
+        request: x11rb::protocol::xproto::SelectionRequestEvent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let property = if request.property == AtomEnum::NONE.into() {
+            request.target
+        } else {
+            request.property
+        };
+        let supported_selection =
+            request.selection == self.clipboard_atom || request.selection == self.primary_atom;
+        let contents = if request.selection == self.clipboard_atom {
+            &self.clipboard_contents
+        } else {
+            &self.primary_contents
+        };
+        let accepted = if !supported_selection {
+            false
+        } else if request.target == self.targets_atom {
+            connection.change_property32(
+                PropMode::REPLACE,
+                request.requestor,
+                property,
+                AtomEnum::ATOM,
+                &[self.targets_atom, self.utf8_atom, AtomEnum::STRING.into()],
+            )?;
+            true
+        } else if request.target == self.utf8_atom || request.target == AtomEnum::STRING.into() {
+            connection.change_property8(
+                PropMode::REPLACE,
+                request.requestor,
+                property,
+                request.target,
+                contents,
+            )?;
+            true
+        } else {
+            false
+        };
+        let notify = SelectionNotifyEvent {
+            response_type: x11rb::protocol::xproto::SELECTION_NOTIFY_EVENT,
+            sequence: 0,
+            time: request.time,
+            requestor: request.requestor,
+            selection: request.selection,
+            target: request.target,
+            property: if accepted {
+                property
+            } else {
+                AtomEnum::NONE.into()
+            },
+        };
+        connection
+            .send_event(false, request.requestor, EventMask::NO_EVENT, notify)?
+            .check()?;
+        Ok(())
+    }
+
+    fn receive_paste(
+        &self,
+        connection: &XCBConnection,
+        window: u32,
+        property: u32,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        let reply = connection
+            .get_property(
+                true,
+                window,
+                property,
+                AtomEnum::ANY,
+                0,
+                MAX_CLIPBOARD_BYTES.div_ceil(4) as u32,
+            )?
+            .reply()?;
+        if reply.format != 8
+            || reply.value.len() > MAX_CLIPBOARD_BYTES
+            || reply.bytes_after != 0
+            || (reply.type_ != self.utf8_atom && reply.type_ != AtomEnum::STRING.into())
+        {
+            return Ok(None);
+        }
+        Ok(Some(reply.value))
+    }
 }
 
 fn resize(
@@ -752,5 +964,18 @@ mod tests {
             .as_deref(),
             Some(&b"\x1b[<3;3;3m"[..])
         );
+    }
+
+    #[test]
+    fn osc52_payload_decode_accepts_bounded_padded_and_unpadded_data() {
+        assert_eq!(
+            decode_clipboard_payload(b"aGVsbG8=").as_deref(),
+            Some(&b"hello"[..])
+        );
+        assert_eq!(
+            decode_clipboard_payload(b"aGVsbG8").as_deref(),
+            Some(&b"hello"[..])
+        );
+        assert!(decode_clipboard_payload(b"%%%=").is_none());
     }
 }
