@@ -6,7 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rustybuzz = "0.20.1"
 swash = "0.2.10"
+unicode-script = "0.5.8"
 
 [lib]
 path = "src/lib.rs"
