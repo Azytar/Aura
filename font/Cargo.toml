@@ -13,5 +13,9 @@ unicode-script = "0.5.8"
 [lib]
 path = "src/lib.rs"
 
+[[bench]]
+name = "glyph_workloads"
+harness = false
+
 [lints]
 workspace = true
