@@ -1,6 +1,10 @@
 use crate::{
     ActiveScreen, Cell, CellFlags, Cursor, Grid, GridError, Parser, ParserEvent, TerminalGrid,
 };
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Renderer-defined foreground/background default palette entry.
 pub const DEFAULT_COLOR: u32 = 0;
@@ -15,6 +19,26 @@ pub enum MouseTracking {
     Off,
     Press,
     Drag,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Osc52Write {
+    pub selection: Vec<u8>,
+    pub base64: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellMarker {
+    PromptStart,
+    CommandStart,
+    OutputStart,
+    CommandFinished(Option<i32>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionPoint {
+    pub row: usize,
+    pub column: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +110,13 @@ pub struct Terminal {
     g0_dec_graphics: bool,
     g1_dec_graphics: bool,
     use_g1: bool,
+    last_printed: Option<(ActiveScreen, usize, usize)>,
+    current_hyperlink: Option<u32>,
+    hyperlinks: HashMap<u32, String>,
+    next_hyperlink: u32,
+    clipboard_requests: VecDeque<Osc52Write>,
+    shell_markers: VecDeque<ShellMarker>,
+    selection: Option<(SelectionPoint, SelectionPoint)>,
 }
 
 impl Terminal {
@@ -109,6 +140,13 @@ impl Terminal {
             g0_dec_graphics: false,
             g1_dec_graphics: false,
             use_g1: false,
+            last_printed: None,
+            current_hyperlink: None,
+            hyperlinks: HashMap::new(),
+            next_hyperlink: 1,
+            clipboard_requests: VecDeque::new(),
+            shell_markers: VecDeque::new(),
+            selection: None,
         })
     }
 
@@ -118,6 +156,20 @@ impl Terminal {
 
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    pub fn hyperlink_at(&self, row: usize, column: usize) -> Option<&str> {
+        let id = self.active_grid().hyperlink(row, column)?;
+        self.hyperlinks.get(&id).map(String::as_str)
+    }
+
+    /// Returns pending OSC 52 writes. Reads are denied so child processes cannot inspect host data.
+    pub fn take_clipboard_requests(&mut self) -> Vec<Osc52Write> {
+        self.clipboard_requests.drain(..).collect()
+    }
+
+    pub fn take_shell_markers(&mut self) -> Vec<ShellMarker> {
+        self.shell_markers.drain(..).collect()
     }
 
     pub const fn bell_count(&self) -> u64 {
@@ -134,6 +186,175 @@ impl Terminal {
 
     pub fn active_grid(&self) -> &Grid {
         self.grid.active()
+    }
+
+    pub fn viewport_cell(&self, row: usize, column: usize) -> Option<Cell> {
+        self.grid
+            .active()
+            .viewport_row(row)?
+            .cells()
+            .get(column)
+            .copied()
+    }
+
+    pub fn scrollback_len(&self) -> usize {
+        self.grid.screen(ActiveScreen::Main).scrollback_len()
+    }
+
+    pub fn viewport_offset(&self) -> usize {
+        if self.is_alternate_screen() {
+            0
+        } else {
+            self.grid.active().viewport_offset()
+        }
+    }
+
+    pub fn page_up(&mut self) {
+        if self.is_alternate_screen() {
+            return;
+        }
+        let grid = self.grid.active_mut();
+        let amount = grid.height().saturating_sub(1).max(1);
+        grid.set_viewport_offset(grid.viewport_offset().saturating_add(amount));
+    }
+
+    pub fn page_down(&mut self) {
+        if self.is_alternate_screen() {
+            return;
+        }
+        let grid = self.grid.active_mut();
+        let amount = grid.height().saturating_sub(1).max(1);
+        grid.set_viewport_offset(grid.viewport_offset().saturating_sub(amount));
+    }
+
+    pub fn jump_to_bottom(&mut self) {
+        if !self.is_alternate_screen() {
+            self.grid.active_mut().set_viewport_offset(0);
+        }
+    }
+
+    pub fn selection(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        self.selection
+    }
+
+    pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        let width = self.active_grid().width();
+        let height = self.active_grid().height();
+        let clamp = |point: SelectionPoint| SelectionPoint {
+            row: point.row.min(height - 1),
+            column: point.column.min(width - 1),
+        };
+        let next = (clamp(anchor), clamp(focus));
+        let old = self.selection;
+        self.selection = Some(next);
+        for (start, end) in [old, Some(next)].into_iter().flatten() {
+            for row in start.row.min(end.row)..=start.row.max(end.row) {
+                self.grid.active_mut().mark_row_dirty(row);
+            }
+        }
+    }
+
+    pub fn select_line(&mut self, row: usize) {
+        let last = self.active_grid().width() - 1;
+        self.set_selection(
+            SelectionPoint { row, column: 0 },
+            SelectionPoint { row, column: last },
+        );
+    }
+
+    pub fn select_word(&mut self, point: SelectionPoint) {
+        let row = point.row.min(self.active_grid().height() - 1);
+        let column = point.column.min(self.active_grid().width() - 1);
+        let word_class = |column| {
+            self.grid
+                .active()
+                .viewport_row(row)
+                .and_then(|row| row.grapheme_at(column))
+                .and_then(|text| text.chars().next())
+                .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+        };
+        let class = word_class(column);
+        let mut start = column;
+        while start > 0 && word_class(start - 1) == class {
+            start -= 1;
+        }
+        let mut end = column;
+        while end + 1 < self.active_grid().width() && word_class(end + 1) == class {
+            end += 1;
+        }
+        self.set_selection(
+            SelectionPoint { row, column: start },
+            SelectionPoint { row, column: end },
+        );
+    }
+
+    pub fn clear_selection(&mut self) {
+        if let Some((start, end)) = self.selection.take() {
+            for row in start.row.min(end.row)..=start.row.max(end.row) {
+                self.grid.active_mut().mark_row_dirty(row);
+            }
+        }
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        let (anchor, focus) = self.selection?;
+        let (start, end) = if (anchor.row, anchor.column) <= (focus.row, focus.column) {
+            (anchor, focus)
+        } else {
+            (focus, anchor)
+        };
+        let mut output = String::new();
+        for row_index in start.row..=end.row {
+            let row = self.grid.active().viewport_row(row_index)?;
+            let first = if row_index == start.row {
+                start.column
+            } else {
+                0
+            };
+            let last = if row_index == end.row {
+                end.column
+            } else {
+                row.cells().len() - 1
+            };
+            let mut line = String::new();
+            for column in first..=last {
+                if let Some(grapheme) = row.grapheme_at(column) {
+                    line.push_str(&grapheme);
+                } else {
+                    line.push(' ');
+                }
+            }
+            output.push_str(line.trim_end());
+            if row_index < end.row
+                && self
+                    .grid
+                    .active()
+                    .viewport_row(row_index + 1)
+                    .is_some_and(|next| !next.is_wrapped())
+            {
+                output.push('\n');
+            }
+        }
+        Some(output)
+    }
+
+    pub fn selection_cell_range(&self) -> Option<(u32, u32)> {
+        let (anchor, focus) = self.selection?;
+        let width = self.active_grid().width();
+        let start = anchor.row * width + anchor.column;
+        let end = focus.row * width + focus.column;
+        Some((start.min(end) as u32, start.max(end) as u32))
+    }
+
+    pub fn encode_paste(&self, bytes: &[u8]) -> Vec<u8> {
+        if !self.modes.bracketed_paste {
+            return bytes.to_vec();
+        }
+        let mut output = Vec::with_capacity(bytes.len() + 12);
+        output.extend_from_slice(b"\x1b[200~");
+        output.extend_from_slice(bytes);
+        output.extend_from_slice(b"\x1b[201~");
+        output
     }
 
     /// Consumes the active screen's row damage after its contents have been uploaded.
@@ -168,6 +389,9 @@ impl Terminal {
     }
 
     fn dispatch(&mut self, event: ParserEvent, replies: &mut Vec<u8>) {
+        if !matches!(event, ParserEvent::Print(_)) {
+            self.last_printed = None;
+        }
         match event {
             ParserEvent::Print(ch) => {
                 let ch = if self.use_g1 {
@@ -357,12 +581,148 @@ impl Terminal {
     }
 
     fn put_char(&mut self, ch: char) {
+        let scalar_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if let Some((screen, row, column)) = self.last_printed
+            && screen == self.grid.active_screen()
+            && let Some(cell) = self.active_grid().cell(row, column)
+        {
+            let stored = self.active_grid().stored_grapheme(row, column);
+            let previous_scalar = char::from_u32(cell.content);
+            let regional_indicator = ('\u{1f1e6}'..='\u{1f1ff}').contains(&ch);
+            let extends = scalar_width == 0
+                || ('\u{1f3fb}'..='\u{1f3ff}').contains(&ch)
+                || stored.is_some_and(|text| text.ends_with('\u{200d}'))
+                || (regional_indicator
+                    && previous_scalar
+                        .is_some_and(|previous| ('\u{1f1e6}'..='\u{1f1ff}').contains(&previous)));
+            if extends {
+                let mut combined = stored.map_or_else(
+                    || previous_scalar.map_or_else(String::new, |previous| previous.to_string()),
+                    str::to_owned,
+                );
+                if combined.len() + ch.len_utf8() <= 256 {
+                    combined.push(ch);
+                } else {
+                    return;
+                }
+                if combined.graphemes(true).count() == 1 {
+                    let mut cell = self
+                        .active_grid()
+                        .cell(row, column)
+                        .expect("last cell remains visible");
+                    let width = UnicodeWidthStr::width(combined.as_str());
+                    if width == 2 && cell.flags().contains(CellFlags::WIDE_LEADING) {
+                        let link = self.active_grid().hyperlink(row, column);
+                        self.active_grid_mut()
+                            .set_wide_grapheme(row, column, &combined, cell);
+                        if let Some(link) = link {
+                            self.active_grid_mut()
+                                .set_hyperlink(row, column, Some(link));
+                        }
+                        return;
+                    }
+                    if width == 2 && column + 1 < self.active_grid().width() {
+                        let link = self.active_grid().hyperlink(row, column);
+                        self.active_grid_mut()
+                            .set_wide_grapheme(row, column, &combined, cell);
+                        if let Some(link) = link {
+                            self.active_grid_mut()
+                                .set_hyperlink(row, column, Some(link));
+                        }
+                        self.set_cursor(column + 2, row);
+                        self.pending_wrap =
+                            self.modes.auto_wrap && column + 2 >= self.active_grid().width();
+                        return;
+                    }
+                    if width <= 1 && !cell.flags().contains(CellFlags::WIDE_LEADING) {
+                        let link = self.active_grid().hyperlink(row, column);
+                        cell.content = combined.chars().next().expect("nonempty grapheme") as u32;
+                        self.active_grid_mut()
+                            .set_grapheme(row, column, &combined, cell);
+                        if let Some(link) = link {
+                            self.active_grid_mut()
+                                .set_hyperlink(row, column, Some(link));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+        let width = scalar_width;
+        if width == 0 {
+            return;
+        }
+        if width > 2 {
+            return;
+        }
+        if width == 2 && self.active_grid().width() == 1 {
+            self.write_single('\u{fffd}');
+            return;
+        }
+        if width == 2 && self.cursor().column + 1 >= self.active_grid().width() {
+            if self.modes.auto_wrap {
+                self.pending_wrap = true;
+            } else {
+                self.write_single('\u{fffd}');
+                return;
+            }
+        }
+        if width == 2 {
+            self.put_wide_char(ch);
+        } else {
+            self.write_single(ch);
+        }
+    }
+
+    fn put_wide_char(&mut self, ch: char) {
         if self.pending_wrap && self.modes.auto_wrap {
             let row = self.cursor().row;
             let top = self.top_margin;
             let bottom = self.bottom_margin;
             if row == bottom {
-                self.active_grid_mut().scroll_up(top, bottom, 1);
+                self.scroll_up(top, bottom, 1);
+                self.set_cursor(0, row);
+            } else if row + 1 < self.active_grid().height() {
+                self.set_cursor(0, row + 1);
+            }
+            let continuation = self.cursor().row;
+            self.active_grid_mut().set_row_wrapped(continuation, true);
+        }
+        self.pending_wrap = false;
+        let cursor = self.cursor();
+        let cell = Cell::new(
+            ch as u32,
+            self.rendition.fg,
+            self.rendition.bg,
+            CellFlags::from_bits_retain(self.rendition.flags),
+        );
+        let text = ch.to_string();
+        if !self
+            .active_grid_mut()
+            .set_wide_grapheme(cursor.row, cursor.column, &text, cell)
+        {
+            return;
+        }
+        if let Some(id) = self.current_hyperlink {
+            self.active_grid_mut()
+                .set_hyperlink(cursor.row, cursor.column, Some(id));
+        }
+        self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
+        if cursor.column + 2 >= self.active_grid().width() {
+            if self.modes.auto_wrap {
+                self.pending_wrap = true;
+            }
+        } else {
+            self.set_cursor(cursor.column + 2, cursor.row);
+        }
+    }
+
+    fn write_single(&mut self, ch: char) {
+        if self.pending_wrap && self.modes.auto_wrap {
+            let row = self.cursor().row;
+            if row == self.bottom_margin {
+                let (top, bottom) = (self.top_margin, self.bottom_margin);
+                self.scroll_up(top, bottom, 1);
                 self.set_cursor(0, row);
             } else if row + 1 < self.active_grid().height() {
                 self.set_cursor(0, row + 1);
@@ -379,7 +739,12 @@ impl Terminal {
             CellFlags::from_bits_retain(self.rendition.flags),
         );
         self.active_grid_mut()
-            .set_cell(cursor.row, cursor.column, cell);
+            .set_grapheme(cursor.row, cursor.column, &ch.to_string(), cell);
+        if let Some(id) = self.current_hyperlink {
+            self.active_grid_mut()
+                .set_hyperlink(cursor.row, cursor.column, Some(id));
+        }
+        self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
         if cursor.column + 1 >= self.active_grid().width() {
             if self.modes.auto_wrap {
                 self.pending_wrap = true;
@@ -395,7 +760,7 @@ impl Terminal {
         let top = self.top_margin;
         let bottom = self.bottom_margin;
         if cursor.row == bottom {
-            self.active_grid_mut().scroll_up(top, bottom, 1);
+            self.scroll_up(top, bottom, 1);
         } else if cursor.row + 1 < self.active_grid().height() {
             self.set_cursor(cursor.column, cursor.row + 1);
             let row = self.cursor().row;
@@ -568,6 +933,7 @@ impl Terminal {
             if self.is_alternate_screen() {
                 return;
             }
+            self.clear_selection();
             if save_main {
                 self.alternate_saved_cursor = Some(self.save_cursor());
                 self.alternate_1049_active = true;
@@ -691,6 +1057,62 @@ impl Terminal {
             let title = String::from_utf8_lossy(&bytes[separator + 1..]);
             self.title.clear();
             self.title.push_str(&title);
+        } else if command == "8" {
+            let rest = &bytes[separator + 1..];
+            let Some(parameter_end) = rest.iter().position(|&byte| byte == b';') else {
+                return;
+            };
+            let uri = &rest[parameter_end + 1..];
+            if uri.is_empty() {
+                self.current_hyperlink = None;
+            } else if uri.len() <= 2048
+                && let Ok(uri) = std::str::from_utf8(uri)
+                && self.hyperlinks.len() < 4096
+            {
+                let id = self.next_hyperlink;
+                self.next_hyperlink = self.next_hyperlink.saturating_add(1).max(1);
+                self.hyperlinks.insert(id, uri.to_owned());
+                self.current_hyperlink = Some(id);
+            }
+        } else if command == "52" {
+            let rest = &bytes[separator + 1..];
+            let Some(data_separator) = rest.iter().position(|&byte| byte == b';') else {
+                return;
+            };
+            let selection = &rest[..data_separator];
+            let payload = &rest[data_separator + 1..];
+            if !payload.is_empty()
+                && payload != b"?"
+                && payload.len() <= 4096
+                && selection.len() == 1
+                && matches!(selection[0], b'c' | b'p' | b's' | b'0'..=b'7')
+                && self.clipboard_requests.len() < 16
+            {
+                self.clipboard_requests.push_back(Osc52Write {
+                    selection: selection.to_vec(),
+                    base64: payload.to_vec(),
+                });
+            }
+        } else if command == "133" {
+            let marker = match bytes.get(separator + 1) {
+                Some(b'A') => Some(ShellMarker::PromptStart),
+                Some(b'B') => Some(ShellMarker::CommandStart),
+                Some(b'C') => Some(ShellMarker::OutputStart),
+                Some(b'D') => {
+                    let status = bytes
+                        .get(separator + 2..)
+                        .and_then(|rest| rest.strip_prefix(b";"))
+                        .and_then(|status| std::str::from_utf8(status).ok())
+                        .and_then(|status| status.parse().ok());
+                    Some(ShellMarker::CommandFinished(status))
+                }
+                _ => None,
+            };
+            if let Some(marker) = marker
+                && self.shell_markers.len() < 1024
+            {
+                self.shell_markers.push_back(marker);
+            }
         }
     }
 
@@ -717,10 +1139,22 @@ impl Terminal {
         self.g0_dec_graphics = false;
         self.g1_dec_graphics = false;
         self.use_g1 = false;
+        self.last_printed = None;
+        self.current_hyperlink = None;
+        self.selection = None;
     }
 
     fn active_grid_mut(&mut self) -> &mut Grid {
         self.grid.active_mut()
+    }
+
+    fn scroll_up(&mut self, top: usize, bottom: usize, count: usize) {
+        let full_screen = top == 0 && bottom + 1 == self.active_grid().height();
+        if full_screen && !self.is_alternate_screen() {
+            self.active_grid_mut().scroll_up_recording(count);
+        } else {
+            self.active_grid_mut().scroll_up(top, bottom, count);
+        }
     }
 
     fn update_mouse_tracking(&mut self) {
@@ -827,6 +1261,186 @@ mod tests {
         feed(&mut terminal, b"D");
         assert_eq!(line(&terminal, 1), "D..");
         assert!(terminal.active_grid().row_at(1).unwrap().is_wrapped());
+    }
+
+    #[test]
+    fn combining_and_zwj_sequences_remain_single_semantic_cells() {
+        let mut terminal = terminal(5, 2);
+        feed(&mut terminal, "e\u{301}👩\u{200d}🚀".as_bytes());
+        assert_eq!(
+            terminal.active_grid().grapheme(0, 0).as_deref(),
+            Some("e\u{301}")
+        );
+        assert_eq!(
+            terminal.active_grid().grapheme(0, 1).as_deref(),
+            Some("👩\u{200d}🚀")
+        );
+        assert!(
+            terminal
+                .active_grid()
+                .cell(0, 1)
+                .unwrap()
+                .flags()
+                .contains(CellFlags::WIDE_LEADING)
+        );
+        assert!(
+            terminal
+                .active_grid()
+                .cell(0, 2)
+                .unwrap()
+                .flags()
+                .contains(CellFlags::WIDE_SPACER)
+        );
+        assert_eq!(terminal.cursor(), Cursor { column: 3, row: 0 });
+    }
+
+    #[test]
+    fn grapheme_storage_has_a_fixed_per_cell_byte_limit() {
+        let mut terminal = terminal(4, 1);
+        let mut input = "a".to_owned();
+        input.push_str(&"\u{301}".repeat(1000));
+        feed(&mut terminal, input.as_bytes());
+        assert!(terminal.active_grid().grapheme(0, 0).unwrap().len() <= 256);
+    }
+
+    #[test]
+    fn wide_character_wraps_before_last_column_and_preserves_pair_invariant() {
+        let mut terminal = terminal(3, 2);
+        feed(&mut terminal, "AB界".as_bytes());
+        assert_eq!(line(&terminal, 0), "AB.");
+        assert_eq!(line(&terminal, 1), "界..");
+        assert!(terminal.active_grid().row_at(1).unwrap().is_wrapped());
+        assert!(
+            terminal
+                .active_grid()
+                .cell(1, 1)
+                .unwrap()
+                .flags()
+                .contains(CellFlags::WIDE_SPACER)
+        );
+    }
+
+    #[test]
+    fn full_screen_output_builds_scrollback_and_viewport_does_not_move_live_cursor() {
+        let mut terminal = terminal(4, 2);
+        feed(&mut terminal, b"1\r\n2\r\n3\r\n4");
+        assert_eq!(terminal.scrollback_len(), 2);
+        assert_eq!(terminal.viewport_offset(), 0);
+        let live_cursor = terminal.cursor();
+        terminal.page_up();
+        assert_eq!(terminal.viewport_offset(), 1);
+        assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'2' as u32);
+        assert_eq!(terminal.viewport_cell(1, 0).unwrap().content, b'3' as u32);
+        assert_eq!(terminal.cursor(), live_cursor);
+        terminal.page_up();
+        assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'1' as u32);
+        terminal.page_down();
+        assert_eq!(terminal.viewport_offset(), 1);
+        terminal.jump_to_bottom();
+        assert_eq!(terminal.viewport_offset(), 0);
+    }
+
+    #[test]
+    fn alternate_screen_scrolling_never_adds_to_main_scrollback() {
+        let mut terminal = terminal(3, 2);
+        feed(&mut terminal, b"1\r\n2\r\n3");
+        let history = terminal.scrollback_len();
+        feed(&mut terminal, b"\x1b[?1049hA\r\nB\r\nC\x1b[?1049l");
+        assert_eq!(terminal.scrollback_len(), history);
+    }
+
+    #[test]
+    fn osc8_links_are_cell_semantics_and_close_for_following_text() {
+        let mut terminal = terminal(12, 1);
+        feed(
+            &mut terminal,
+            b"\x1b]8;id=x;https://example.test\x1b\\link\x1b]8;;\x1b\\plain",
+        );
+        for column in 0..4 {
+            assert_eq!(
+                terminal.hyperlink_at(0, column),
+                Some("https://example.test")
+            );
+        }
+        assert_eq!(terminal.hyperlink_at(0, 4), None);
+        assert_eq!(
+            terminal.active_grid().cell(0, 0).unwrap().content,
+            b'l' as u32
+        );
+    }
+
+    #[test]
+    fn osc52_allows_bounded_writes_but_never_clipboard_reads() {
+        let mut terminal = terminal(8, 2);
+        feed(&mut terminal, b"\x1b]52;c;aGVsbG8=\x1b\\\x1b]52;c;?\x1b\\");
+        assert_eq!(
+            terminal.take_clipboard_requests(),
+            vec![Osc52Write {
+                selection: b"c".to_vec(),
+                base64: b"aGVsbG8=".to_vec(),
+            }]
+        );
+        let oversized = [b"\x1b]52;c;".as_slice(), &vec![b'A'; 4100], b"\x1b\\"].concat();
+        feed(&mut terminal, &oversized);
+        assert!(terminal.take_clipboard_requests().is_empty());
+    }
+
+    #[test]
+    fn paste_bytes_follow_bracketed_paste_mode() {
+        let mut terminal = terminal(8, 2);
+        assert_eq!(terminal.encode_paste(b"a\nb"), b"a\nb");
+        feed(&mut terminal, b"\x1b[?2004h");
+        assert_eq!(terminal.encode_paste(b"a\nb"), b"\x1b[200~a\nb\x1b[201~");
+    }
+
+    #[test]
+    fn osc133_emits_bounded_shell_integration_markers() {
+        let mut terminal = terminal(8, 2);
+        feed(
+            &mut terminal,
+            b"\x1b]133;A\x1b\\\x1b]133;B\x1b\\\x1b]133;C\x1b\\\x1b]133;D;7\x1b\\",
+        );
+        assert_eq!(
+            terminal.take_shell_markers(),
+            vec![
+                ShellMarker::PromptStart,
+                ShellMarker::CommandStart,
+                ShellMarker::OutputStart,
+                ShellMarker::CommandFinished(Some(7)),
+            ]
+        );
+    }
+
+    #[test]
+    fn selection_is_external_to_cells_and_extracts_graphemes_and_logical_lines() {
+        let mut terminal = terminal(8, 2);
+        feed(&mut terminal, "café\r\nnext".as_bytes());
+        let before = terminal.active_grid().cell(0, 0);
+        terminal.set_selection(
+            SelectionPoint { row: 0, column: 0 },
+            SelectionPoint { row: 1, column: 3 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("café\nnext"));
+        assert_eq!(terminal.active_grid().cell(0, 0), before);
+        assert_eq!(terminal.selection_cell_range(), Some((0, 11)));
+        terminal.clear_selection();
+        assert!(terminal.selection().is_none());
+    }
+
+    #[test]
+    fn resize_does_not_join_independent_rows_and_reflows_wrapped_text() {
+        let mut independent = terminal(10, 3);
+        feed(&mut independent, b"AAAAAAAAAA\r\nBBBB");
+        independent.resize(20, 3).unwrap();
+        assert_eq!(line(&independent, 0), "AAAAAAAAAA..........");
+        assert_eq!(&line(&independent, 1)[..4], "BBBB");
+
+        let mut wrapped = terminal(10, 3);
+        feed(&mut wrapped, b"AAAAAAAAAAA");
+        assert!(wrapped.active_grid().row_at(1).unwrap().is_wrapped());
+        wrapped.resize(20, 3).unwrap();
+        assert_eq!(&line(&wrapped, 0)[..11], "AAAAAAAAAAA");
+        assert!(!wrapped.active_grid().row_at(1).unwrap().is_wrapped());
     }
 
     #[test]
