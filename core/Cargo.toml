@@ -8,6 +8,8 @@ rust-version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+libc = "0.2.179"
+
 [lints]
 workspace = true
-

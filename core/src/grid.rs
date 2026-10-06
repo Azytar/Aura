@@ -306,6 +306,44 @@ impl Grid {
         written
     }
 
+    /// Inserts blank cells at a column, shifting the remaining row contents right.
+    /// Row-local storage lets CSI insert operations avoid moving the rest of the screen.
+    pub fn insert_cells(&mut self, row: usize, at: usize, count: usize) -> bool {
+        if row >= self.height || at >= self.width {
+            return false;
+        }
+        let amount = count.min(self.width - at);
+        if amount == 0 {
+            return true;
+        }
+        let width = self.width;
+        let target = self.row_mut(row).expect("validated row");
+        target.cells.copy_within(at..width - amount, at + amount);
+        target.cells[at..at + amount].fill(Cell::EMPTY);
+        repair_wide_pairs(&mut target.cells);
+        target.dirty = true;
+        true
+    }
+
+    /// Deletes cells at a column, shifting the remaining row contents left.
+    /// Row-local storage lets CSI delete operations avoid moving the rest of the screen.
+    pub fn delete_cells(&mut self, row: usize, at: usize, count: usize) -> bool {
+        if row >= self.height || at >= self.width {
+            return false;
+        }
+        let amount = count.min(self.width - at);
+        if amount == 0 {
+            return true;
+        }
+        let width = self.width;
+        let target = self.row_mut(row).expect("validated row");
+        target.cells.copy_within(at + amount..width, at);
+        target.cells[width - amount..].fill(Cell::EMPTY);
+        repair_wide_pairs(&mut target.cells);
+        target.dirty = true;
+        true
+    }
+
     pub fn clear_row(&mut self, row: usize) -> bool {
         let Some(target) = self.row_mut(row) else {
             return false;
@@ -857,6 +895,38 @@ mod tests {
             ["AA", "CC", "..", "..", "EE"]
         );
         assert_eq!((grid.width(), grid.height()), (2, 5));
+    }
+
+    #[test]
+    fn cell_insertion_and_deletion_preserve_wide_pair_invariants() {
+        let mut grid = grid(6, 1);
+        grid.write_range(
+            0,
+            0,
+            &[
+                cell('A'),
+                cell('B'),
+                cell('C'),
+                cell('D'),
+                cell('E'),
+                cell('F'),
+            ],
+        );
+        assert!(grid.insert_cells(0, 1, 2));
+        assert_eq!(row_text(&grid, 0), "A..BCD");
+        assert!(grid.delete_cells(0, 1, 2));
+        assert_eq!(row_text(&grid, 0), "ABCD..");
+        assert!(grid.set_wide_cell(0, 3, cell('界')));
+        assert!(grid.delete_cells(0, 4, 1));
+        for column in 0..grid.width() {
+            let cell = grid.cell(0, column).unwrap();
+            if cell.is_wide_leading() {
+                assert!(grid.cell(0, column + 1).unwrap().is_wide_spacer());
+            }
+            if cell.is_wide_spacer() {
+                assert!(column > 0 && grid.cell(0, column - 1).unwrap().is_wide_leading());
+            }
+        }
     }
 
     #[test]
