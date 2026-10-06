@@ -126,6 +126,10 @@ impl Row {
             .or_else(|| char::from_u32(cell.content).map(|ch| ch.to_string()))
     }
 
+    pub fn stored_grapheme_at(&self, column: usize) -> Option<&str> {
+        self.graphemes.get(column)?.as_deref()
+    }
+
     /// Whether this row continues the logical line from its preceding row.
     pub const fn is_wrapped(&self) -> bool {
         self.wrapped

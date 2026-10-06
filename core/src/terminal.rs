@@ -197,6 +197,74 @@ impl Terminal {
             .copied()
     }
 
+    pub fn viewport_grapheme(&self, row: usize, column: usize) -> Option<String> {
+        self.grid.active().viewport_row(row)?.grapheme_at(column)
+    }
+
+    pub fn viewport_stored_grapheme(&self, row: usize, column: usize) -> Option<&str> {
+        self.grid
+            .active()
+            .viewport_row(row)?
+            .stored_grapheme_at(column)
+    }
+
+    pub fn viewport_shaping_context(&self, row: usize, column: usize) -> (String, String) {
+        let Some(visible_row) = self.grid.active().viewport_row(row) else {
+            return (String::new(), String::new());
+        };
+        if column >= visible_row.cells().len() {
+            return (String::new(), String::new());
+        }
+        if visible_row.cells()[column].content == 0
+            || visible_row.cells()[column]
+                .flags()
+                .contains(CellFlags::WIDE_SPACER)
+        {
+            return (String::new(), String::new());
+        }
+        let mut before = Vec::new();
+        let mut before_bytes = 0;
+        for index in (0..column.min(visible_row.cells().len())).rev() {
+            let cell = visible_row.cells()[index];
+            if cell.content == 0 && !cell.flags().contains(CellFlags::WIDE_SPACER) {
+                break;
+            }
+            if cell.flags().contains(CellFlags::WIDE_SPACER) {
+                continue;
+            }
+            let Some(text) = visible_row.grapheme_at(index) else {
+                break;
+            };
+            if before_bytes + text.len() > 128 {
+                break;
+            }
+            before_bytes += text.len();
+            before.push(text);
+        }
+        before.reverse();
+        let pre_context = before.concat();
+        let mut post_context = String::new();
+        let mut post_bytes = 0;
+        for index in column.saturating_add(1)..visible_row.cells().len() {
+            let cell = visible_row.cells()[index];
+            if cell.content == 0 && !cell.flags().contains(CellFlags::WIDE_SPACER) {
+                break;
+            }
+            if cell.flags().contains(CellFlags::WIDE_SPACER) {
+                continue;
+            }
+            let Some(text) = visible_row.grapheme_at(index) else {
+                break;
+            };
+            if post_bytes + text.len() > 128 {
+                break;
+            }
+            post_bytes += text.len();
+            post_context.push_str(&text);
+        }
+        (pre_context, post_context)
+    }
+
     pub fn scrollback_len(&self) -> usize {
         self.grid.screen(ActiveScreen::Main).scrollback_len()
     }
@@ -1330,6 +1398,20 @@ mod tests {
                     .contains(CellFlags::WIDE_SPACER)
             );
         }
+    }
+
+    #[test]
+    fn shaping_context_stays_with_the_same_unbroken_text_run() {
+        let mut terminal = terminal(8, 1);
+        feed(&mut terminal, "سلام".as_bytes());
+        assert_eq!(
+            terminal.viewport_shaping_context(0, 1),
+            ("س".to_owned(), "ام".to_owned())
+        );
+        assert_eq!(
+            terminal.viewport_shaping_context(0, 4),
+            (String::new(), String::new())
+        );
     }
 
     #[test]

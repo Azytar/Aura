@@ -318,7 +318,15 @@ impl Renderer {
             }
             for column in 0..width {
                 let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
-                self.gpu_cells[row * width + column] = self.convert_cell(cell, font)?;
+                let grapheme = terminal.viewport_stored_grapheme(row, column);
+                let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
+                let (pre_context, post_context) = if Font::requires_contextual_shaping(ch) {
+                    terminal.viewport_shaping_context(row, column)
+                } else {
+                    (String::new(), String::new())
+                };
+                self.gpu_cells[row * width + column] =
+                    self.convert_cell(cell, grapheme, &pre_context, &post_context, font)?;
             }
         }
         let frame_index = self.frame_index;
@@ -511,7 +519,14 @@ impl Renderer {
         Ok(())
     }
 
-    fn convert_cell(&mut self, cell: Cell, font: &mut Font) -> Result<GpuCell, String> {
+    fn convert_cell(
+        &mut self,
+        cell: Cell,
+        grapheme: Option<&str>,
+        pre_context: &str,
+        post_context: &str,
+        font: &mut Font,
+    ) -> Result<GpuCell, String> {
         if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
             return Ok(GpuCell {
                 glyph: u32::MAX,
@@ -521,11 +536,20 @@ impl Renderer {
             });
         }
         let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
-        let (glyph, info, upload) = font.glyph(
-            ch,
-            cell.flags().contains(CellFlags::BOLD),
-            cell.flags().contains(CellFlags::ITALIC),
-        )?;
+        let bold = cell.flags().contains(CellFlags::BOLD);
+        let italic = cell.flags().contains(CellFlags::ITALIC);
+        let (glyph, info, upload) = if let Some(grapheme) = grapheme {
+            if pre_context.is_empty() && post_context.is_empty() {
+                font.glyph_text(grapheme, bold, italic)?
+            } else {
+                font.glyph_text_with_context(grapheme, pre_context, post_context, bold, italic)?
+            }
+        } else if !pre_context.is_empty() || !post_context.is_empty() {
+            let text = ch.to_string();
+            font.glyph_text_with_context(&text, pre_context, post_context, bold, italic)?
+        } else {
+            font.glyph(ch, bold, italic)?
+        };
         if let Some(upload) = upload {
             self.pending_glyph_uploads.push(upload);
         }
