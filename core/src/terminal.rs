@@ -136,6 +136,11 @@ impl Terminal {
         self.grid.active()
     }
 
+    /// Consumes the active screen's row damage after its contents have been uploaded.
+    pub fn take_dirty_rows(&mut self) -> Vec<usize> {
+        self.grid.active_mut().take_dirty_rows()
+    }
+
     pub fn scroll_region(&self) -> (usize, usize) {
         (self.top_margin, self.bottom_margin)
     }
