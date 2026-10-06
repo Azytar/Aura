@@ -9,6 +9,7 @@ rust-version.workspace = true
 aterm-core = { path = "../core" }
 aterm-font = { path = "../font" }
 aterm-render = { path = "../render" }
+base64 = "0.22.1"
 x11rb = { version = "0.14.0", features = ["as-raw-xcb-connection", "allow-unsafe-code"] }
 libc = "0.2"
 as-raw-xcb-connection = "1.0"
