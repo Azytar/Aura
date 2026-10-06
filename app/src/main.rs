@@ -3,7 +3,7 @@ use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 
 use as_raw_xcb_connection::AsRawXcbConnection;
-use aterm_core::{MouseTracking, Pty, PtySize, Terminal};
+use aterm_core::{MouseTracking, Pty, PtySize, SelectionPoint, Terminal};
 use aterm_font::{CellMetrics, Font};
 use aterm_render::Renderer;
 use x11rb::connection::Connection;
@@ -131,6 +131,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut running = true;
     let mut invalidated = false;
     let mut cursor_blink_on = true;
+    let mut selection_anchor = None;
+    let mut last_click: Option<(u32, u8, SelectionPoint, u8)> = None;
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
     let mut buffer = [0u8; 16 * 1024];
@@ -169,6 +171,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::Expose(_) => invalidated = true,
                             Event::KeyPress(key) => {
+                                let sym = key_sym(
+                                    &key,
+                                    &mapping.keysyms,
+                                    keysyms_per_keycode,
+                                    connection.setup().min_keycode,
+                                );
+                                if key.state.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, Some(0xff55 | 0xff56))
+                                {
+                                    if sym == Some(0xff55) {
+                                        terminal.page_up();
+                                    } else {
+                                        terminal.page_down();
+                                    }
+                                    invalidated = true;
+                                    continue;
+                                }
                                 if let Some(bytes) = translate_key(
                                     &key,
                                     mapping.keysyms.as_slice(),
@@ -182,7 +201,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::ButtonPress(button) => {
-                                if let Some(bytes) = mouse_report(
+                                if terminal.modes().mouse_tracking == MouseTracking::Off
+                                    && button.detail == 1
+                                {
+                                    let point = selection_point(
+                                        button.event_x,
+                                        button.event_y,
+                                        metrics,
+                                        &terminal,
+                                    );
+                                    let count = last_click
+                                        .filter(|(time, detail, old, _)| {
+                                            *detail == button.detail
+                                                && button.time.wrapping_sub(*time) <= 400
+                                                && old.row == point.row
+                                                && old.column.abs_diff(point.column) <= 1
+                                        })
+                                        .map_or(1, |(_, _, _, count)| count % 3 + 1);
+                                    last_click = Some((button.time, button.detail, point, count));
+                                    match count {
+                                        2 => terminal.select_word(point),
+                                        3 => terminal.select_line(point.row),
+                                        _ => {
+                                            selection_anchor = Some(point);
+                                            terminal.set_selection(point, point);
+                                        }
+                                    }
+                                    invalidated = true;
+                                } else if let Some(bytes) = mouse_report(
                                     terminal.modes(),
                                     MouseEvent {
                                         button: button.detail,
@@ -198,7 +244,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::ButtonRelease(button) => {
-                                if let Some(bytes) = mouse_report(
+                                if terminal.modes().mouse_tracking == MouseTracking::Off {
+                                    selection_anchor = None;
+                                } else if terminal.modes().mouse_tracking == MouseTracking::Press {
+                                    continue;
+                                } else if let Some(bytes) = mouse_report(
                                     terminal.modes(),
                                     MouseEvent {
                                         button: button.detail,
@@ -213,24 +263,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     write_all_pty(&mut pty, &bytes)?;
                                 }
                             }
-                            Event::MotionNotify(motion)
-                                if terminal.modes().mouse_tracking == MouseTracking::Drag =>
-                            {
-                                if let Some(button) = held_button(motion.state) {
-                                    if let Some(bytes) = mouse_report(
-                                        terminal.modes(),
-                                        MouseEvent {
-                                            button,
-                                            x: motion.event_x,
-                                            y: motion.event_y,
-                                            state: motion.state,
-                                            released: false,
-                                            motion: true,
-                                        },
-                                        metrics,
-                                    ) {
-                                        write_all_pty(&mut pty, &bytes)?;
+                            Event::MotionNotify(motion) => {
+                                if terminal.modes().mouse_tracking == MouseTracking::Drag {
+                                    if let Some(button) = held_button(motion.state) {
+                                        if let Some(bytes) = mouse_report(
+                                            terminal.modes(),
+                                            MouseEvent {
+                                                button,
+                                                x: motion.event_x,
+                                                y: motion.event_y,
+                                                state: motion.state,
+                                                released: false,
+                                                motion: true,
+                                            },
+                                            metrics,
+                                        ) {
+                                            write_all_pty(&mut pty, &bytes)?;
+                                        }
                                     }
+                                } else if let Some(anchor) = selection_anchor {
+                                    let point = selection_point(
+                                        motion.event_x,
+                                        motion.event_y,
+                                        metrics,
+                                        &terminal,
+                                    );
+                                    terminal.set_selection(anchor, point);
+                                    invalidated = true;
                                 }
                             }
                             _ => {}
@@ -399,10 +458,7 @@ fn translate_key(
     min_keycode: u8,
     application_cursor: bool,
 ) -> Option<Vec<u8>> {
-    let offset = usize::from(event.detail.checked_sub(min_keycode)?) * per_key;
-    let keysyms = symbols.get(offset..offset + per_key)?;
-    let shifted = event.state.contains(KeyButMask::SHIFT) && keysyms.len() > 1;
-    let sym = keysyms[usize::from(shifted)];
+    let sym = key_sym(event, symbols, per_key, min_keycode)?;
     let ctrl = event.state.contains(KeyButMask::CONTROL);
     let alt = event.state.contains(KeyButMask::MOD1);
     let mut bytes = match sym {
@@ -455,6 +511,18 @@ fn translate_key(
         bytes.insert(0, 0x1b);
     }
     Some(bytes)
+}
+
+fn key_sym(
+    event: &x11rb::protocol::xproto::KeyPressEvent,
+    symbols: &[u32],
+    per_key: usize,
+    min_keycode: u8,
+) -> Option<u32> {
+    let offset = usize::from(event.detail.checked_sub(min_keycode)?) * per_key;
+    let keysyms = symbols.get(offset..offset + per_key)?;
+    let shifted = event.state.contains(KeyButMask::SHIFT) && keysyms.len() > 1;
+    keysyms.get(usize::from(shifted)).copied()
 }
 
 fn cursor_key(final_byte: u8, application_cursor: bool) -> Vec<u8> {
@@ -571,6 +639,15 @@ fn grid_dimensions(width: u32, height: u32, cell_width: u32, cell_height: u32) -
         (width / cell_width.max(1)).max(1) as usize,
         (height / cell_height.max(1)).max(1) as usize,
     )
+}
+
+fn selection_point(x: i16, y: i16, metrics: CellMetrics, terminal: &Terminal) -> SelectionPoint {
+    SelectionPoint {
+        row: ((u32::try_from(y.max(0)).unwrap_or(0) / metrics.height.max(1)) as usize)
+            .min(terminal.active_grid().height() - 1),
+        column: ((u32::try_from(x.max(0)).unwrap_or(0) / metrics.width.max(1)) as usize)
+            .min(terminal.active_grid().width() - 1),
+    }
 }
 
 #[cfg(test)]

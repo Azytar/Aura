@@ -43,6 +43,8 @@ struct PushGrid {
     ascent: f32,
     cursor: u32,
     cursor_visible: u32,
+    selection_start: u32,
+    selection_end: u32,
 }
 
 struct Buffer {
@@ -315,10 +317,7 @@ impl Renderer {
                 frame.dirty_rows[row] = true;
             }
             for column in 0..width {
-                let cell = terminal
-                    .active_grid()
-                    .cell(row, column)
-                    .unwrap_or(Cell::EMPTY);
+                let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
                 self.gpu_cells[row * width + column] = self.convert_cell(cell, font)?;
             }
         }
@@ -393,7 +392,17 @@ impl Renderer {
             cell_height: font.metrics().height as f32,
             ascent: font.metrics().ascent as f32,
             cursor: (terminal.cursor().row * width + terminal.cursor().column) as u32,
-            cursor_visible: u32::from(terminal.modes().cursor_visible && cursor_blink_on),
+            cursor_visible: u32::from(
+                terminal.modes().cursor_visible
+                    && cursor_blink_on
+                    && terminal.viewport_offset() == 0,
+            ),
+            selection_start: terminal
+                .selection_cell_range()
+                .map_or(u32::MAX, |range| range.0),
+            selection_end: terminal
+                .selection_cell_range()
+                .map_or(u32::MAX, |range| range.1),
         };
         record_frame(
             &self.device,
@@ -1415,7 +1424,9 @@ mod tests {
     fn gpu_cell_matches_four_word_storage_layout() {
         assert_eq!(size_of::<GpuCell>(), 16);
         assert_eq!(size_of::<GpuGlyph>(), 48);
-        assert_eq!(size_of::<PushGrid>(), 28);
+        assert_eq!(size_of::<PushGrid>(), 36);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor), 20);
+        assert_eq!(std::mem::offset_of!(PushGrid, selection_start), 28);
     }
 
     #[test]
