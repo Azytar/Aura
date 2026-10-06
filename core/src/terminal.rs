@@ -281,18 +281,36 @@ impl Terminal {
         if self.is_alternate_screen() {
             return;
         }
-        let grid = self.grid.active_mut();
-        let amount = grid.height().saturating_sub(1).max(1);
-        grid.set_viewport_offset(grid.viewport_offset().saturating_add(amount));
+        let amount = self.active_grid().height().saturating_sub(1).max(1);
+        self.scroll_view_up(amount);
     }
 
     pub fn page_down(&mut self) {
         if self.is_alternate_screen() {
             return;
         }
-        let grid = self.grid.active_mut();
-        let amount = grid.height().saturating_sub(1).max(1);
-        grid.set_viewport_offset(grid.viewport_offset().saturating_sub(amount));
+        let amount = self.active_grid().height().saturating_sub(1).max(1);
+        self.scroll_view_down(amount);
+    }
+
+    pub fn scroll_view_up(&mut self, rows: usize) {
+        if !self.is_alternate_screen() && rows > 0 {
+            let grid = self.grid.active_mut();
+            grid.set_viewport_offset(grid.viewport_offset().saturating_add(rows));
+        }
+    }
+
+    pub fn scroll_view_down(&mut self, rows: usize) {
+        if !self.is_alternate_screen() && rows > 0 {
+            let grid = self.grid.active_mut();
+            grid.set_viewport_offset(grid.viewport_offset().saturating_sub(rows));
+        }
+    }
+
+    pub fn scrollback_top(&mut self) {
+        if !self.is_alternate_screen() {
+            self.grid.active_mut().set_viewport_offset(usize::MAX);
+        }
     }
 
     pub fn jump_to_bottom(&mut self) {
@@ -1459,6 +1477,26 @@ mod tests {
         terminal.page_down();
         assert_eq!(terminal.viewport_offset(), 2);
         terminal.jump_to_bottom();
+        assert_eq!(terminal.viewport_offset(), 0);
+    }
+
+    #[test]
+    fn scrollback_line_and_home_end_controls_clamp_to_available_history() {
+        let mut terminal = terminal(4, 2);
+        feed(&mut terminal, b"1\r\n2\r\n3\r\n4\r\n5");
+        terminal.scroll_view_up(1);
+        assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'3' as u32);
+        terminal.scroll_view_up(usize::MAX);
+        assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'1' as u32);
+        terminal.scroll_view_down(1);
+        assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'2' as u32);
+        terminal.jump_to_bottom();
+        assert_eq!(terminal.viewport_offset(), 0);
+        terminal.scrollback_top();
+        assert!(terminal.viewport_offset() > 0);
+        terminal.jump_to_bottom();
+        feed(&mut terminal, b"\x1b[?1049h");
+        terminal.scrollback_top();
         assert_eq!(terminal.viewport_offset(), 0);
     }
 
