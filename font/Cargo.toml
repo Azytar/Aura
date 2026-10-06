@@ -6,11 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-aterm-core = { path = "../core" }
+swash = "0.2.10"
 
 [lib]
 path = "src/lib.rs"
 
 [lints]
 workspace = true
-

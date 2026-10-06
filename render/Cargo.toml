@@ -8,10 +8,11 @@ rust-version.workspace = true
 [dependencies]
 aterm-core = { path = "../core" }
 aterm-font = { path = "../font" }
+ash = "0.38.0"
+bytemuck = { version = "1.25.0", features = ["derive"] }
 
 [lib]
 path = "src/lib.rs"
 
 [lints]
 workspace = true
-
