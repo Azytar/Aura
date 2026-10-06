@@ -17,3 +17,5 @@ path = "fuzz_targets/vt_parser.rs"
 test = false
 doc = false
 bench = false
+
+[workspace]

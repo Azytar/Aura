@@ -381,6 +381,13 @@ impl Terminal {
 
     pub fn resize(&mut self, width: usize, height: usize) -> Result<(), GridError> {
         self.grid.resize(width, height)?;
+        if let Some((anchor, focus)) = self.selection {
+            let clamp = |point: SelectionPoint| SelectionPoint {
+                row: point.row.min(height - 1),
+                column: point.column.min(width - 1),
+            };
+            self.selection = Some((clamp(anchor), clamp(focus)));
+        }
         self.top_margin = 0;
         self.bottom_margin = height - 1;
         self.pending_wrap = false;
@@ -591,10 +598,11 @@ impl Terminal {
             let regional_indicator = ('\u{1f1e6}'..='\u{1f1ff}').contains(&ch);
             let extends = scalar_width == 0
                 || ('\u{1f3fb}'..='\u{1f3ff}').contains(&ch)
-                || stored.is_some_and(|text| text.ends_with('\u{200d}'))
+                || stored.is_some()
                 || (regional_indicator
                     && previous_scalar
-                        .is_some_and(|previous| ('\u{1f1e6}'..='\u{1f1ff}').contains(&previous)));
+                        .is_some_and(|previous| ('\u{1f1e6}'..='\u{1f1ff}').contains(&previous)))
+                || (is_hangul_jamo(ch) && previous_scalar.is_some_and(is_hangul_jamo));
             if extends {
                 let mut combined = stored.map_or_else(
                     || previous_scalar.map_or_else(String::new, |previous| previous.to_string()),
@@ -1081,8 +1089,7 @@ impl Terminal {
             };
             let selection = &rest[..data_separator];
             let payload = &rest[data_separator + 1..];
-            if !payload.is_empty()
-                && payload != b"?"
+            if payload != b"?"
                 && payload.len() <= 4096
                 && selection.len() == 1
                 && matches!(selection[0], b'c' | b'p' | b's' | b'0'..=b'7')
@@ -1178,6 +1185,10 @@ fn one_based(value: u16) -> usize {
 
 fn indexed_color(index: u8) -> u32 {
     INDEXED_COLOR_TAG | index as u32
+}
+
+fn is_hangul_jamo(ch: char) -> bool {
+    matches!(ch as u32, 0x1100..=0x11ff | 0xa960..=0xa97f | 0xd7b0..=0xd7ff)
 }
 
 fn dec_graphic(ch: char) -> char {
@@ -1295,6 +1306,33 @@ mod tests {
     }
 
     #[test]
+    fn regional_indicator_skin_tone_and_hangul_clusters_stay_atomic() {
+        let mut terminal = terminal(8, 2);
+        feed(&mut terminal, "🇵🇪👍🏽가".as_bytes());
+        assert_eq!(terminal.active_grid().grapheme(0, 0).as_deref(), Some("🇵🇪"));
+        assert_eq!(terminal.active_grid().grapheme(0, 2).as_deref(), Some("👍🏽"));
+        assert_eq!(terminal.active_grid().grapheme(0, 4).as_deref(), Some("가"));
+        for column in [0, 2, 4] {
+            assert!(
+                terminal
+                    .active_grid()
+                    .cell(0, column)
+                    .unwrap()
+                    .flags()
+                    .contains(CellFlags::WIDE_LEADING)
+            );
+            assert!(
+                terminal
+                    .active_grid()
+                    .cell(0, column + 1)
+                    .unwrap()
+                    .flags()
+                    .contains(CellFlags::WIDE_SPACER)
+            );
+        }
+    }
+
+    #[test]
     fn grapheme_storage_has_a_fixed_per_cell_byte_limit() {
         let mut terminal = terminal(4, 1);
         let mut input = "a".to_owned();
@@ -1332,10 +1370,12 @@ mod tests {
         assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'2' as u32);
         assert_eq!(terminal.viewport_cell(1, 0).unwrap().content, b'3' as u32);
         assert_eq!(terminal.cursor(), live_cursor);
+        feed(&mut terminal, b"\r\n5");
+        assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'2' as u32);
         terminal.page_up();
         assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, b'1' as u32);
         terminal.page_down();
-        assert_eq!(terminal.viewport_offset(), 1);
+        assert_eq!(terminal.viewport_offset(), 2);
         terminal.jump_to_bottom();
         assert_eq!(terminal.viewport_offset(), 0);
     }
