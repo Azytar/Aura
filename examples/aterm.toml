@@ -12,9 +12,14 @@
 # stem matches (case-insensitive). An absolute or relative path is used
 # directly, which is the recommended way to select a specific font file.
 #
-# `size` is the rasterization size in typographic pixels. Each distinct size
-# produces its own metrics, glyph atlas, and rasterization. Values are clamped
-# to the 4.0-96.0 range.
+# `size` is the startup rasterization size in typographic pixels. Each
+# distinct size produces its own metrics, glyph atlas, and rasterization.
+# Values must be between 6.0 and 72.0.
+#
+# Runtime zoom: Ctrl+Plus / Ctrl+Minus change the live size by 1.0 px
+# (clamped to the same 6.0-72.0 range); Ctrl+0 restores this configured
+# startup size. The TOML file itself is startup configuration only and is
+# never hot-reloaded.
 
 [font]
 family = "monospace"

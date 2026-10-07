@@ -24,7 +24,14 @@ per commit.
 ### Added
 
 - Typed TOML configuration loaded once at startup from `~/.config/aterm/aterm.toml`.
-- Configurable font family and size with validation (4-96 px).
+- Configurable font family and size with validation (6-72 px).
+- Runtime font zoom: `Ctrl+Plus` / `Ctrl+Minus` adjust the live size by
+  1.0 px (clamped to 6-72 px) with fresh rasterization, atlas rebuild, and
+  window/PTY geometry updates; `Ctrl+0` restores the configured startup
+  size. The TOML file remains startup-only and is never hot-reloaded.
+- Centralized font-size limits shared by config validation and runtime
+  clamping, plus a single-source `FontGeometry` for window, grid, PTY, and
+  renderer dimensions.
 - Size-aware glyph cache key so each font size rasterizes independently.
 - Atlas invalidation on font geometry changes, preventing stale CPU/GPU metadata.
 - Configurable terminal columns, lines, and padding.
