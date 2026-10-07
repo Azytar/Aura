@@ -53,6 +53,21 @@ aterm --version
 Font and terminal geometry are configured in `~/.config/aterm/aterm.toml`.
 An example configuration is provided in `examples/aterm.toml`.
 
+## Configuration
+
+The TOML file is read once at startup; it is never hot-reloaded.
+Supported keys:
+
+- `font.family`, `font.size` (startup size, 6-72 px)
+- `font.bold`, `font.italic`, `font.bold_italic` (optional per-style faces)
+- `font.fallback.families` (ordered fallback family names)
+- `window.columns`, `window.lines`, `window.padding_x`, `window.padding_y`
+
+`font.size` is the configured startup size. `Ctrl+Plus` / `Ctrl+Minus`
+change the size during the session (fresh rasterization, rebuilt atlas,
+window and PTY geometry updated); `Ctrl+0` restores the configured
+startup size. The TOML value itself never changes at runtime.
+
 ## Local install
 
 ```sh
@@ -62,6 +77,8 @@ install -Dm644 aterm.desktop /usr/share/applications/aterm.desktop
 
 ## Key bindings
 
+- `Ctrl+Plus` / `Ctrl+Minus` change the runtime font size by 1.0 px
+  (clamped to 6-72 px); `Ctrl+0` restores the configured `font.size`.
 - `Ctrl+Shift+C` copy selection, `Ctrl+Shift+V` paste.
 - `Shift+PageUp` / `Shift+PageDown` scrollback, `Ctrl+Shift+Home` top,
   `Ctrl+Shift+End` bottom.
