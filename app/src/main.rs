@@ -487,7 +487,10 @@ fn keyboard_mapping(
     Ok((mapping.keysyms, usize::from(mapping.keysyms_per_keycode)))
 }
 
-fn arguments() -> Result<Option<(Option<PathBuf>, f32)>, Box<dyn std::error::Error>> {
+/// Parsed launch options; `None` means a flag like `--help` already ran.
+type LaunchOptions = Option<(Option<PathBuf>, f32)>;
+
+fn arguments() -> Result<LaunchOptions, Box<dyn std::error::Error>> {
     let mut path = None;
     let mut size = 14.0;
     let mut args = std::env::args_os().skip(1);
