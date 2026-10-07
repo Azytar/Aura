@@ -53,4 +53,43 @@ fn main() {
                 .expect("shape contextual Arabic glyph"),
         );
     });
+
+    // Each distinct font size must produce its own metrics and atlas; the
+    // workload below measures the cost of switching sizes so accidental
+    // atlas reuse is visible in the numbers.
+    let sizes = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];
+    measure(
+        "load and rasterize A at each tested size",
+        sizes.len(),
+        || {
+            for &size in &sizes {
+                let mut font = Font::load(None, size).expect("system monospace font is available");
+                black_box(
+                    font.glyph('A', false, false)
+                        .expect("rasterize glyph at tested size"),
+                );
+            }
+        },
+    );
+
+    measure("font metrics computation per size", sizes.len(), || {
+        for &size in &sizes {
+            let font = Font::load(None, size).expect("system monospace font is available");
+            let metrics = font.metrics();
+            black_box(metrics);
+        }
+    });
+
+    measure("atlas growth across ASCII range at 14pt", 1, || {
+        let mut font = Font::load(None, 14.0).expect("system monospace font is available");
+        let mut glyph_count = 0u32;
+        for ch in (b' '..=b'~').map(char::from) {
+            if let Ok((_, _, upload)) = font.glyph(ch, false, false) {
+                if upload.is_some() {
+                    glyph_count += 1;
+                }
+            }
+        }
+        black_box(glyph_count);
+    });
 }
