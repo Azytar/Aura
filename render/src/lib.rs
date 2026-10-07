@@ -342,6 +342,12 @@ impl OffscreenRenderer {
         self.show_cursor = show;
     }
 
+    /// Marks the atlas as needing a full re-upload on the next render call.
+    pub fn invalidate_atlas(&mut self) {
+        self.atlas_uploaded = false;
+        self.color_uploaded = false;
+    }
+
     /// Renders the current viewport and returns tightly packed RGBA8 pixels.
     pub fn render(&mut self, terminal: &mut Terminal, font: &mut Font) -> Result<Vec<u8>, String> {
         let grid = terminal.active_grid();
@@ -908,7 +914,14 @@ impl Renderer {
     }
 
     /// Replaces swapchain images only after submitted work has released their views.
+    pub fn invalidate_atlas(&mut self) {
+        self.uploaded_atlas = false;
+        self.uploaded_color_atlas = false;
+        self.pending_glyph_uploads.clear();
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.invalidate_atlas();
         unsafe { self.device.device_wait_idle() }
             .map_err(vk_error("wait before swapchain resize"))?;
         let context = SurfaceContext {
@@ -2331,5 +2344,17 @@ mod tests {
         assert_eq!(color(INDEXED_COLOR_TAG | 1, true), 0x0000cd);
         assert_eq!(color(INDEXED_COLOR_TAG | 196, true), 0x0000ff);
         assert_eq!(color(DEFAULT_COLOR, false), 0x00181818);
+    }
+
+    #[test]
+    fn atlas_invalidation_resets_upload_flags() {
+        // OffscreenRenderer::invalidate_atlas marks the atlas as needing a
+        // full re-upload; the next render call must re-upload instead of
+        // reusing stale GPU memory.
+        if let Ok(mut renderer) = OffscreenRenderer::new(64, 64) {
+            renderer.invalidate_atlas();
+            assert!(!renderer.atlas_uploaded);
+            assert!(!renderer.color_uploaded);
+        }
     }
 }
