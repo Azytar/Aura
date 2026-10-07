@@ -42,3 +42,34 @@ fn renders_terminal_cells_and_reads_back_expected_colors() {
         "the atlas sampled at least one bright A glyph pixel"
     );
 }
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn glyph_cache_hits_keep_later_table_entries() {
+    // "ABA" assigns ids 0,1 then hits id 0 again; a truncating table update
+    // would drop entry 1 and leave the middle cell without sampled pixels.
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    let metrics = font.metrics();
+    let mut terminal = Terminal::new(3, 1).expect("create terminal grid");
+    terminal.process(b"ABA");
+    let mut renderer = OffscreenRenderer::new(metrics.width * 3, metrics.height)
+        .expect("create offscreen renderer");
+    let pixels = renderer
+        .render(&mut terminal, &mut font)
+        .expect("draw terminal and read back pixels");
+    let cell_bright = |column: u32| {
+        (0..metrics.height).any(|y| {
+            (0..metrics.width).any(|x| {
+                let index = ((y * metrics.width * 3 + column * metrics.width + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                rgba[0] > 150 && rgba[1] > 150 && rgba[2] > 150
+            })
+        })
+    };
+    assert!(cell_bright(0), "first A cell renders glyph pixels");
+    assert!(
+        cell_bright(1),
+        "B cell survives the later A cache hit in the glyph table"
+    );
+    assert!(cell_bright(2), "second A cell renders glyph pixels");
+}
