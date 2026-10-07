@@ -80,6 +80,26 @@ fn main() {
         }
     });
 
+    // Runtime zoom cost: in-place `set_size` (metrics + cache/atlas clear)
+    // followed by a realistic glyph warmup, both directions.
+    measure("font resize 12->24 with ASCII warmup", 12, || {
+        let mut font = Font::load(None, 12.0).expect("system monospace font is available");
+        black_box(font.set_size(black_box(24.0)).expect("resize to 24"));
+        for ch in (b'A'..=b'Z').map(char::from) {
+            black_box(font.glyph(ch, false, false).expect("warm glyph at 24"));
+        }
+        black_box(font.glyph('界', false, false).expect("warm CJK at 24"));
+    });
+
+    measure("font resize 24->12 with ASCII warmup", 12, || {
+        let mut font = Font::load(None, 24.0).expect("system monospace font is available");
+        black_box(font.set_size(black_box(12.0)).expect("resize to 12"));
+        for ch in (b'A'..=b'Z').map(char::from) {
+            black_box(font.glyph(ch, false, false).expect("warm glyph at 12"));
+        }
+        black_box(font.glyph('界', false, false).expect("warm CJK at 12"));
+    });
+
     measure("atlas growth across ASCII range at 14pt", 1, || {
         let mut font = Font::load(None, 14.0).expect("system monospace font is available");
         let mut glyph_count = 0u32;

@@ -14,6 +14,28 @@ use unicode_script::{Script, UnicodeScript};
 const DEFAULT_ATLAS_SIZE: u32 = 1024;
 const MAX_FALLBACKS: usize = 3;
 
+/// Smallest runtime font size in typographic pixels. The floor keeps glyph
+/// rasters, cell geometry, and window pixel math safely above zero; every
+/// size below is clamped here, never rejected. Verified against the
+/// `metrics_*` and `.*_clamped_to_supported_range` tests below.
+pub const MIN_FONT_SIZE: f32 = 6.0;
+/// Largest runtime font size in typographic pixels. The ceiling keeps
+/// single-glyph uploads inside the 1024px atlas packer and pixel dimensions
+/// inside the saturating `u32` window math. Verified the same way.
+pub const MAX_FONT_SIZE: f32 = 72.0;
+/// Step applied by one `Ctrl+Plus` / `Ctrl+Minus` press.
+pub const FONT_SIZE_STEP: f32 = 1.0;
+
+/// Clamps any requested size into `[MIN_FONT_SIZE, MAX_FONT_SIZE]`.
+/// Non-finite inputs fall back to `MIN_FONT_SIZE` so rasterization and
+/// geometry never see NaN, infinity, zero, or negative sizes.
+pub fn clamp_font_size(size: f32) -> f32 {
+    if !size.is_finite() {
+        return MIN_FONT_SIZE;
+    }
+    size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
+
 /// Well-known fallback faces tried in order when the primary face lacks a
 /// glyph: CJK coverage, color emoji, and extra symbols. Each entry is a file
 /// path plus the face index inside that file (collections hold several).
@@ -143,9 +165,7 @@ impl Font {
     }
 
     pub fn load(path: Option<&Path>, size: f32) -> Result<Self, String> {
-        if !size.is_finite() || !(4.0..=96.0).contains(&size) {
-            return Err("font size must be between 4 and 96 pixels".into());
-        }
+        let size = clamp_font_size(size);
         let path = path
             .map(Path::to_path_buf)
             .or_else(default_font_path)
@@ -155,27 +175,8 @@ impl Font {
             })?;
         let bytes =
             fs::read(&path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
-        let face = FontRef::from_index(&bytes, 0)
+        let metrics = compute_metrics(&bytes, 0, size)
             .ok_or_else(|| format!("invalid font: {}", path.display()))?;
-        let raw = face.metrics(&[]);
-        let scaled = raw.scale(size);
-        let glyph_metrics = face.glyph_metrics(&[]).scale(size);
-        let cell_width = glyph_metrics.advance_width(face.charmap().map('M'));
-        if ['i', 'W', '0', ' '].into_iter().any(|ch| {
-            (glyph_metrics.advance_width(face.charmap().map(ch)) - cell_width).abs() > 0.05
-        }) {
-            return Err(format!("font is not monospaced: {}", path.display()));
-        }
-        let ascent = scaled.ascent.ceil() as i32;
-        let descent = scaled.descent.abs().ceil() as u32;
-        let line_gap = scaled.leading.ceil().max(0.0) as u32;
-        let metrics = CellMetrics {
-            width: cell_width.ceil().max(1.0) as u32,
-            height: (ascent.max(0) as u32 + descent + line_gap).max(1),
-            ascent,
-            descent,
-            line_gap,
-        };
         Ok(Self {
             bytes,
             face_index: 0,
@@ -195,6 +196,28 @@ impl Font {
             glyphs: HashMap::new(),
             context: ScaleContext::new(),
         })
+    }
+
+    /// Current rasterization size in typographic pixels.
+    pub const fn size(&self) -> f32 {
+        self.size
+    }
+
+    /// Switches to `requested` size with fresh metrics, an empty glyph cache,
+    /// and cleared atlas shelves so the next lookup re-rasterizes every
+    /// glyph (primary, fallback, CJK, emoji) instead of scaling old pixels.
+    /// Returns `true` when the effective size changed.
+    pub fn set_size(&mut self, requested: f32) -> Result<bool, String> {
+        let size = clamp_font_size(requested);
+        if size.to_bits() == self.size.to_bits() {
+            return Ok(false);
+        }
+        let metrics = compute_metrics(&self.bytes, self.face_index, size)
+            .ok_or_else(|| "loaded font no longer parses; size change rejected".to_string())?;
+        self.size = size;
+        self.metrics = metrics;
+        self.invalidate_atlas();
+        Ok(true)
     }
 
     /// Clears the glyph cache and atlas so stale metadata is never sampled
@@ -234,10 +257,8 @@ impl Font {
 
     /// Loads a font by family name or explicit path, falling back to the
     /// system monospace search when the name cannot be resolved.
+    /// The requested size is clamped by [`clamp_font_size`], same as `load`.
     pub fn load_with_family(family: &str, size: f32) -> Result<Self, String> {
-        if !size.is_finite() || !(4.0..=96.0).contains(&size) {
-            return Err("font size must be between 4 and 96 pixels".into());
-        }
         let path = Self::resolve_family_path(family)
             .or_else(default_font_path)
             .ok_or_else(|| {
@@ -731,6 +752,33 @@ fn default_font_path() -> Option<PathBuf> {
     .find(|path| path.is_file())
 }
 
+/// Computes cell metrics for `bytes`/`index` at `size` without touching the
+/// atlas. Returns `None` when the face does not parse, which lets `set_size`
+/// reject the change while keeping the live font untouched.
+fn compute_metrics(bytes: &[u8], index: usize, size: f32) -> Option<CellMetrics> {
+    let face = FontRef::from_index(bytes, index)?;
+    let raw = face.metrics(&[]);
+    let scaled = raw.scale(size);
+    let glyph_metrics = face.glyph_metrics(&[]).scale(size);
+    let cell_width = glyph_metrics.advance_width(face.charmap().map('M'));
+    if ['i', 'W', '0', ' ']
+        .into_iter()
+        .any(|ch| (glyph_metrics.advance_width(face.charmap().map(ch)) - cell_width).abs() > 0.05)
+    {
+        return None;
+    }
+    let ascent = scaled.ascent.ceil() as i32;
+    let descent = scaled.descent.abs().ceil() as u32;
+    let line_gap = scaled.leading.ceil().max(0.0) as u32;
+    Some(CellMetrics {
+        width: cell_width.ceil().max(1.0) as u32,
+        height: (ascent.max(0) as u32 + descent + line_gap).max(1),
+        ascent,
+        descent,
+        line_gap,
+    })
+}
+
 /// Loads existing fallback faces from well-known system paths, in priority
 /// order and bounded by `MAX_FALLBACKS`.
 fn load_fallbacks() -> Vec<FaceData> {
@@ -891,6 +939,125 @@ mod tests {
             widths.windows(2).any(|w| w[0] != w[1]),
             "metrics must change with font size"
         );
+    }
+
+    #[test]
+    fn set_size_rerasterizes_and_clears_stale_cache() {
+        let mut font =
+            Font::load(None, 12.0).expect("Linux test environment provides a monospace font");
+        let before = font.metrics();
+        let (_, info12, _) = font.glyph('A', false, false).unwrap();
+        assert!(info12.size[0] > 0.0 && info12.size[1] > 0.0);
+        // Fallback coverage must also rasterize at the old size before resize.
+        let _ = font.glyph('界', false, false);
+        let cached = font.glyphs.len();
+        assert!(cached >= 2, "primary + fallback glyphs are cached");
+
+        assert!(font.set_size(24.0).unwrap());
+        assert_eq!(font.size(), 24.0);
+        assert!(font.glyphs.is_empty(), "old cache must not survive resize");
+        assert_eq!(font.shelf_x, 1);
+        assert_eq!(font.shelf_y, 1);
+        assert_eq!(font.color_shelf_x, 1);
+        assert_eq!(font.color_shelf_y, 1);
+        let after = font.metrics();
+        assert_ne!(before, after, "metrics must change with size");
+        assert!(after.width > before.width && after.height > before.height);
+
+        // Same glyph at the new size re-rasterizes through a fresh cache key.
+        let (_, info24, upload) = font.glyph('A', false, false).unwrap();
+        assert!(
+            upload.is_some(),
+            "new size must rasterize, not scale old pixels"
+        );
+        assert!(
+            info24.size[0] > info12.size[0] && info24.size[1] > info12.size[1],
+            "24px glyph must be larger than 12px: {info12:?} vs {info24:?}"
+        );
+        // Fallback glyphs also re-rasterize at the new size.
+        let (_, cjk24, cjk_upload) = font.glyph('界', false, false).unwrap();
+        assert!(
+            cjk_upload.is_some(),
+            "fallback must re-rasterize at the new size"
+        );
+        assert!(cjk24.size[0] > 0.0 && cjk24.size[1] > 0.0);
+
+        // Same-size call is a no-op (idempotent, no cache churn).
+        let cached_after = font.glyphs.len();
+        assert!(!font.set_size(24.0).unwrap());
+        assert_eq!(font.glyphs.len(), cached_after);
+    }
+
+    #[test]
+    fn set_size_is_clamped_to_supported_range() {
+        let mut font =
+            Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
+        assert!(font.set_size(1.0).unwrap());
+        assert_eq!(font.size(), MIN_FONT_SIZE);
+        assert!(font.metrics().width > 0 && font.metrics().height > 0);
+        assert!(font.set_size(200.0).unwrap());
+        assert_eq!(font.size(), MAX_FONT_SIZE);
+        assert!(font.metrics().width > 0 && font.metrics().height > 0);
+        assert!(font.set_size(f32::NAN).unwrap());
+        assert_eq!(font.size(), MIN_FONT_SIZE);
+        // At minimum, further shrink stays clamped; at maximum, growth stays.
+        assert!(!font.set_size(MIN_FONT_SIZE - 1.0).unwrap());
+        assert_eq!(font.size(), MIN_FONT_SIZE);
+        assert!(font.set_size(MAX_FONT_SIZE).unwrap());
+        assert!(!font.set_size(MAX_FONT_SIZE + 1.0).unwrap());
+        assert_eq!(font.size(), MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn clamp_font_size_never_leaks_nonpositive_sizes() {
+        const { assert!(MIN_FONT_SIZE > 0.0) }
+        const { assert!(MAX_FONT_SIZE > MIN_FONT_SIZE) }
+        const { assert!(FONT_SIZE_STEP == 1.0) }
+        assert_eq!(clamp_font_size(0.0), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(-12.0), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(f32::NAN), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(f32::INFINITY), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(f32::NEG_INFINITY), MIN_FONT_SIZE);
+        assert_eq!(clamp_font_size(14.0), 14.0);
+    }
+
+    #[test]
+    fn unicode_and_fallback_survive_size_round_trip() {
+        let mut font =
+            Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
+        // ASCII, accented, combining, CJK, emoji, wide glyphs at startup size.
+        for text in ["A", "é", "e\u{301}", "界", "😀"] {
+            if text == "😀" && font.fallback_count() == 0 {
+                let _ = font.glyph('😀', false, false);
+                if font.fallback_count() == 0 {
+                    continue;
+                }
+            }
+            font.glyph_text(text, false, false)
+                .unwrap_or_else(|_| panic!("rasterize {text:?} at 14px"));
+        }
+        for size in [12.0, 16.0, 20.0, 24.0, 12.0] {
+            assert!(font.set_size(size).unwrap() || font.size() == size);
+            for text in ["A", "é", "e\u{301}", "界", "😀"] {
+                if text == "😀" && font.fallback_count() == 0 {
+                    continue;
+                }
+                let (_, info, upload) = font
+                    .glyph_text(text, false, false)
+                    .unwrap_or_else(|_| panic!("rasterize {text:?} at {size}px"));
+                assert!(
+                    upload.is_some(),
+                    "{text:?} must re-rasterize after resize to {size}px"
+                );
+                // Empty entries only happen for missing glyphs; ASCII/CJK must paint.
+                if matches!(text, "A" | "界") {
+                    assert!(
+                        info.size[0] > 0.0 && info.size[1] > 0.0,
+                        "{text:?} must have pixels at {size}px"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
