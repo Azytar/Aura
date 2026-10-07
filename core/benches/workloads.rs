@@ -119,4 +119,20 @@ fn main() {
             black_box(terminal.viewport_offset());
         }
     });
+
+    // Font-size-to-geometry conversion must stay cheap because it runs on
+    // every startup and any future font-change path.
+    let sizes = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];
+    measure("font metrics to cell/pixel geometry", sizes.len(), || {
+        for &size in &sizes {
+            let font = aterm_font::Font::load_with_family("monospace", size)
+                .expect("system monospace is available");
+            let metrics = font.metrics();
+            let cols = 120usize;
+            let rows = 32usize;
+            let pixel_width = (cols * metrics.width as usize).max(1) as u32;
+            let pixel_height = (rows * metrics.height as usize).max(1) as u32;
+            black_box((pixel_width, pixel_height, metrics.width, metrics.height));
+        }
+    });
 }
