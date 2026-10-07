@@ -346,7 +346,12 @@ impl OffscreenRenderer {
                     size_bearing: [info.size[0], info.size[1], info.bearing[0], info.bearing[1]],
                     bearing_advance: [info.bearing[0], info.bearing[1], info.advance, 0.0],
                 };
-                glyphs.resize(glyph as usize + 1, GpuGlyph::zeroed());
+                // Grow the glyph table without truncating entries that earlier
+                // cells in this frame already recorded; `resize` would shrink it
+                // when a cache hit references a smaller index than the maximum.
+                if glyphs.len() <= glyph as usize {
+                    glyphs.resize(glyph as usize + 1, GpuGlyph::zeroed());
+                }
                 glyphs[glyph as usize] = metadata;
                 cells[row * cols + column] = GpuCell {
                     glyph,
@@ -863,8 +868,12 @@ impl Renderer {
             self.pending_glyph_uploads.push(upload);
         }
         let old_length = self.gpu_glyphs.len();
-        self.gpu_glyphs
-            .resize(glyph as usize + 1, GpuGlyph::zeroed());
+        // Grow the glyph table without truncating entries recorded for other
+        // cells; `resize` would shrink it on cache hits with smaller indices.
+        if self.gpu_glyphs.len() <= glyph as usize {
+            self.gpu_glyphs
+                .resize(glyph as usize + 1, GpuGlyph::zeroed());
+        }
         let metadata = GpuGlyph {
             uv: [
                 info.uv_min[0],
