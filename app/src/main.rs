@@ -1,12 +1,13 @@
 use std::io;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 
+mod config;
 use as_raw_xcb_connection::AsRawXcbConnection;
 use aterm_core::{MouseTracking, Pty, PtySize, SelectionPoint, Terminal};
 use aterm_font::{CellMetrics, Font};
 use aterm_render::Renderer;
 use base64::Engine;
+use config::AppConfig;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
@@ -17,6 +18,16 @@ use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::xcb_ffi::XCBConnection;
 
 fn main() {
+    let opts = match arguments() {
+        Ok(opts) => opts,
+        Err(error) => {
+            eprintln!("aterm: {error}");
+            std::process::exit(1);
+        }
+    };
+    if opts.is_none() {
+        return;
+    }
     if let Err(error) = run() {
         eprintln!("aterm: {error}");
         std::process::exit(1);
@@ -24,16 +35,19 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let Some((font_path, font_size)) = arguments()? else {
-        return Ok(());
-    };
-    let mut font = Font::load(font_path.as_deref(), font_size).map_err(io::Error::other)?;
+    let config = AppConfig::load();
+    let mut font =
+        Font::load_with_family(&config.font.family, config.font.size).map_err(io::Error::other)?;
     let metrics = font.metrics();
     let (connection, screen_index) = XCBConnection::connect(None)?;
     let screen = &connection.setup().roots[screen_index];
     let window = connection.generate_id()?;
-    let pixel_width = metrics.width * 100;
-    let pixel_height = metrics.height * 32;
+    let pixel_width = (config.window.columns * metrics.width as usize)
+        .saturating_add(2 * config.window.padding_x as usize)
+        .max(1) as u32;
+    let pixel_height = (config.window.lines * metrics.height as usize)
+        .saturating_add(2 * config.window.padding_y as usize)
+        .max(1) as u32;
     let protocols = connection
         .intern_atom(false, b"WM_PROTOCOLS")?
         .reply()?
@@ -76,7 +90,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     connection.map_window(window)?;
     connection.flush()?;
 
-    let (columns, rows) = grid_dimensions(pixel_width, pixel_height, metrics.width, metrics.height);
+    let (columns, rows) = (config.window.columns, config.window.lines);
     let mut terminal = Terminal::new(columns, rows)
         .map_err(|error| io::Error::other(format!("terminal grid: {error:?}")))?;
     let mut pty = Pty::spawn_shell(PtySize::new(columns, rows)?)?;
@@ -167,8 +181,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     &mut terminal,
                                     &mut pty,
                                     &mut renderer,
-                                    metrics.width,
-                                    metrics.height,
+                                    (metrics.width, metrics.height),
+                                    (config.window.padding_x, config.window.padding_y),
                                     configure,
                                 )?;
                                 invalidated = true;
@@ -488,23 +502,21 @@ fn keyboard_mapping(
 }
 
 /// Parsed launch options; `None` means a flag like `--help` already ran.
-type LaunchOptions = Option<(Option<PathBuf>, f32)>;
+type LaunchOptions = Option<()>;
 
+#[allow(clippy::never_loop)]
 fn arguments() -> Result<LaunchOptions, Box<dyn std::error::Error>> {
-    let mut path = None;
-    let mut size = 14.0;
-    let mut args = std::env::args_os().skip(1);
-    while let Some(arg) = args.next() {
+    for arg in std::env::args_os().skip(1) {
         match arg.to_str() {
             Some("--help" | "-h") => {
                 println!(
                     "aterm {} - GPU terminal emulator (Vulkan/X11)\n\n\
                      Usage: aterm [OPTIONS]\n\n\
                      Options:\n  \
-                     --font PATH      monospace font file (default: system monospace)\n  \
-                     --font-size SIZE cell font size in pixels, 4-96 (default: 14)\n  \
                      -h, --help       print this help and exit\n  \
-                     -V, --version    print the version and exit",
+                     -V, --version    print the version and exit\n\n\
+                     Font and terminal geometry are configured in:\n  \
+                     ~/.config/aterm/aterm.toml",
                     env!("CARGO_PKG_VERSION")
                 );
                 return Ok(None);
@@ -513,21 +525,11 @@ fn arguments() -> Result<LaunchOptions, Box<dyn std::error::Error>> {
                 println!("aterm {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
-            Some("--font") => {
-                path = Some(PathBuf::from(args.next().ok_or("--font requires a path")?))
-            }
-            Some("--font-size") => {
-                size = args
-                    .next()
-                    .ok_or("--font-size requires a value")?
-                    .to_string_lossy()
-                    .parse()?
-            }
             Some(other) => return Err(format!("unknown argument: {other}").into()),
             None => return Err("arguments must be valid UTF-8".into()),
         }
     }
-    Ok(Some((path, size)))
+    Ok(Some(()))
 }
 
 fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
@@ -731,16 +733,15 @@ fn resize(
     terminal: &mut Terminal,
     pty: &mut Pty,
     renderer: &mut Renderer,
-    cell_width: u32,
-    cell_height: u32,
+    metrics: (u32, u32),
+    padding: (u32, u32),
     event: ConfigureNotifyEvent,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (width, height) = grid_dimensions(
-        u32::from(event.width),
-        u32::from(event.height),
-        cell_width,
-        cell_height,
-    );
+    let (cell_width, cell_height) = metrics;
+    let (padding_x, padding_y) = padding;
+    let inner_width = u32::from(event.width).saturating_sub(2 * padding_x).max(1);
+    let inner_height = u32::from(event.height).saturating_sub(2 * padding_y).max(1);
+    let (width, height) = grid_dimensions(inner_width, inner_height, cell_width, cell_height);
     if terminal.active_grid().width() != width || terminal.active_grid().height() != height {
         terminal
             .resize(width, height)
