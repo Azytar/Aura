@@ -77,4 +77,42 @@ fn main() {
         terminal.resize(80, 25).expect("valid restored dimensions");
         black_box(&terminal);
     });
+
+    let wide = "界x".repeat(4096).into_bytes();
+    measure("resize and reflow with wide cells (80x25 to 200x60)", 10, || {
+        let mut terminal = Terminal::new(80, 25).expect("fixed dimensions are valid");
+        terminal.process(black_box(&wide));
+        terminal.resize(200, 60).expect("valid resized dimensions");
+        black_box(&terminal);
+        terminal.resize(80, 25).expect("valid restored dimensions");
+        black_box(&terminal);
+    });
+
+    let combining = "e\u{301}x".repeat(4096).into_bytes();
+    measure(
+        "resize and reflow with combining marks (200x60 to 80x25)",
+        10,
+        || {
+            let mut terminal = Terminal::new(200, 60).expect("fixed dimensions are valid");
+            terminal.process(black_box(&combining));
+            terminal.resize(80, 25).expect("valid resized dimensions");
+            black_box(&terminal);
+            terminal.resize(200, 60).expect("valid restored dimensions");
+            black_box(&terminal);
+        },
+    );
+
+    measure("scrollback traversal (10k lines, page walk)", 5, || {
+        let mut terminal = Terminal::new(80, 25).expect("fixed dimensions are valid");
+        let block = vec![b'y'; 80 * 25];
+        for _ in 0..400 {
+            terminal.process(black_box(&block));
+        }
+        for _ in 0..40 {
+            terminal.scroll_view_up(25);
+            black_box(terminal.viewport_offset());
+            terminal.scroll_view_down(25);
+            black_box(terminal.viewport_offset());
+        }
+    });
 }
