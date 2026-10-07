@@ -158,8 +158,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             // The server sends this when the keymap changes;
                             // without a refetch every key would mistranslate.
                             Event::MappingNotify(_) => {
-                                (keysyms, keysyms_per_keycode) =
-                                    keyboard_mapping(&connection)?;
+                                (keysyms, keysyms_per_keycode) = keyboard_mapping(&connection)?;
                             }
                             Event::ConfigureNotify(configure) => {
                                 resize(
@@ -483,10 +482,7 @@ fn keyboard_mapping(
             connection.setup().max_keycode - connection.setup().min_keycode + 1,
         )?
         .reply()?;
-    Ok((
-        mapping.keysyms,
-        usize::from(mapping.keysyms_per_keycode),
-    ))
+    Ok((mapping.keysyms, usize::from(mapping.keysyms_per_keycode)))
 }
 
 fn arguments() -> Result<(Option<PathBuf>, f32), Box<dyn std::error::Error>> {

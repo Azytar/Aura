@@ -685,9 +685,7 @@ impl Terminal {
             b'c' if csi.param(0, 0) == 0 => replies.extend_from_slice(b"\x1b[?1;2c"),
             b'n' if csi.param(0, 0) == 5 => replies.extend_from_slice(b"\x1b[0n"),
             b'n' if csi.param(0, 0) == 6 => self.report_cursor(replies, false),
-            b'q'
-                if csi.intermediate_len == 1 && csi.intermediates[0] == b' ' =>
-            {
+            b'q' if csi.intermediate_len == 1 && csi.intermediates[0] == b' ' => {
                 self.set_cursor_style(csi.param(0, 0))
             }
             _ => {}

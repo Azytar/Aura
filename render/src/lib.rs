@@ -520,9 +520,7 @@ impl OffscreenRenderer {
             cell_height: metrics.height as f32,
             ascent: metrics.ascent as f32,
             cursor: (terminal.cursor().row * cols + terminal.cursor().column) as u32,
-            cursor_visible: u32::from(
-                self.show_cursor && terminal.modes().cursor_visible
-            ),
+            cursor_visible: u32::from(self.show_cursor && terminal.modes().cursor_visible),
             selection_start: u32::MAX,
             selection_end: u32::MAX,
             cursor_style: push_cursor_style(terminal.modes().cursor_style),
@@ -782,13 +780,7 @@ impl Renderer {
             self.glyphs_dirty = false;
         }
         if !self.uploaded_atlas {
-            self.upload_atlas(
-                self.atlas,
-                false,
-                Some(font.atlas_pixels()),
-                &[],
-                false,
-            )?;
+            self.upload_atlas(self.atlas, false, Some(font.atlas_pixels()), &[], false)?;
             self.upload_atlas(
                 self.color_atlas,
                 false,
@@ -1246,10 +1238,8 @@ impl Drop for OffscreenRenderer {
             self.device.destroy_image_view(self.atlas_view, None);
             self.device.destroy_image(self.atlas, None);
             self.device.free_memory(self.atlas_memory, None);
-            self.device
-                .destroy_sampler(self.color_atlas_sampler, None);
-            self.device
-                .destroy_image_view(self.color_atlas_view, None);
+            self.device.destroy_sampler(self.color_atlas_sampler, None);
+            self.device.destroy_image_view(self.color_atlas_view, None);
             self.device.destroy_image(self.color_atlas, None);
             self.device.free_memory(self.color_atlas_memory, None);
             self.device.destroy_image_view(self.target_view, None);
@@ -1554,10 +1544,8 @@ impl Drop for Renderer {
             self.device.destroy_image_view(self.atlas_view, None);
             self.device.destroy_image(self.atlas, None);
             self.device.free_memory(self.atlas_memory, None);
-            self.device
-                .destroy_sampler(self.color_atlas_sampler, None);
-            self.device
-                .destroy_image_view(self.color_atlas_view, None);
+            self.device.destroy_sampler(self.color_atlas_sampler, None);
+            self.device.destroy_image_view(self.color_atlas_view, None);
             self.device.destroy_image(self.color_atlas, None);
             self.device.free_memory(self.color_atlas_memory, None);
             for view in self.image_views.drain(..) {
