@@ -7,7 +7,7 @@ use aterm_core::{MouseTracking, Pty, PtySize, SelectionPoint, Terminal};
 use aterm_font::{CellMetrics, Font};
 use aterm_render::Renderer;
 use base64::Engine;
-use config::AppConfig;
+use config::{AppConfig, FontGeometry, RuntimeFontSize, grid_dimensions};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
@@ -36,18 +36,21 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::load();
-    let mut font =
-        Font::load_with_family(&config.font.family, config.font.size).map_err(io::Error::other)?;
-    let metrics = font.metrics();
+    let mut font_sizes = RuntimeFontSize::new(config.font.size);
+    let mut font = Font::load_with_family(&config.font.family, font_sizes.current())
+        .map_err(io::Error::other)?;
+    let geometry = FontGeometry::new(
+        font.metrics().width,
+        font.metrics().height,
+        config.window.columns,
+        config.window.lines,
+        config.window.padding_x,
+        config.window.padding_y,
+    );
+    let (pixel_width, pixel_height) = (geometry.pixel_width, geometry.pixel_height);
     let (connection, screen_index) = XCBConnection::connect(None)?;
     let screen = &connection.setup().roots[screen_index];
     let window = connection.generate_id()?;
-    let pixel_width = (config.window.columns * metrics.width as usize)
-        .saturating_add(2 * config.window.padding_x as usize)
-        .max(1) as u32;
-    let pixel_height = (config.window.lines * metrics.height as usize)
-        .saturating_add(2 * config.window.padding_y as usize)
-        .max(1) as u32;
     let protocols = connection
         .intern_atom(false, b"WM_PROTOCOLS")?
         .reply()?
@@ -181,7 +184,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     &mut terminal,
                                     &mut pty,
                                     &mut renderer,
-                                    (metrics.width, metrics.height),
+                                    (font.metrics().width, font.metrics().height),
                                     (config.window.padding_x, config.window.padding_y),
                                     configure,
                                 )?;
@@ -189,6 +192,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::Expose(_) => invalidated = true,
                             Event::KeyPress(key) => {
+                                // Runtime font zoom consumes Ctrl+Plus/Minus/0
+                                // here so the bytes never reach the PTY child.
+                                if let Some(action) = font_size_action(
+                                    &key,
+                                    &keysyms,
+                                    keysyms_per_keycode,
+                                    connection.setup().min_keycode,
+                                ) {
+                                    let changed = match action {
+                                        FontSizeAction::Grow => font_sizes.grow(),
+                                        FontSizeAction::Shrink => font_sizes.shrink(),
+                                        FontSizeAction::Reset => font_sizes.reset(),
+                                    };
+                                    if changed {
+                                        resize_font(
+                                            &config,
+                                            &mut font_sizes,
+                                            &mut font,
+                                            &mut terminal,
+                                            &mut pty,
+                                            &connection,
+                                            window,
+                                            &mut renderer,
+                                        )?;
+                                        cursor_blink_on = true;
+                                        invalidated = true;
+                                    }
+                                    continue;
+                                }
                                 let sym = key_sym(
                                     &key,
                                     &keysyms,
@@ -267,7 +299,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     let point = selection_point(
                                         button.event_x,
                                         button.event_y,
-                                        metrics,
+                                        font.metrics(),
                                         &terminal,
                                     );
                                     let count = last_click
@@ -298,7 +330,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         released: false,
                                         motion: false,
                                     },
-                                    metrics,
+                                    font.metrics(),
                                 ) {
                                     write_all_pty(&mut pty, &bytes)?;
                                 }
@@ -318,7 +350,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         released: true,
                                         motion: false,
                                     },
-                                    metrics,
+                                    font.metrics(),
                                 ) {
                                     write_all_pty(&mut pty, &bytes)?;
                                 }
@@ -336,7 +368,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 released: false,
                                                 motion: true,
                                             },
-                                            metrics,
+                                            font.metrics(),
                                         ) {
                                             write_all_pty(&mut pty, &bytes)?;
                                         }
@@ -345,7 +377,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     let point = selection_point(
                                         motion.event_x,
                                         motion.event_y,
-                                        metrics,
+                                        font.metrics(),
                                         &terminal,
                                     );
                                     terminal.set_selection(anchor, point);
@@ -757,6 +789,61 @@ fn resize(
     Ok(())
 }
 
+/// Runtime font-size change: re-rasterizes at the new size, rebuilds the
+/// atlas state, recomputes the single-source geometry, resizes the window
+/// pixels (keeping the configured columns×rows), propagates `TIOCSWINSZ`,
+/// and invalidates the frame. Screen content, modes, cursor, alternate
+/// screen, and scrollback all survive via the existing `Terminal::resize`
+/// path — which is a no-op here because columns×rows do not change; pixel
+/// geometry and the renderer still refresh.
+#[allow(clippy::too_many_arguments)]
+fn resize_font(
+    config: &AppConfig,
+    font_sizes: &mut RuntimeFontSize,
+    font: &mut Font,
+    terminal: &mut Terminal,
+    pty: &mut Pty,
+    connection: &XCBConnection,
+    window: u32,
+    renderer: &mut Renderer,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // New rasterization + new metrics + cleared glyph cache/atlas shelves.
+    font.set_size(font_sizes.current())
+        .map_err(io::Error::other)?;
+    // Single source of truth: one geometry feeds window, grid, PTY, renderer.
+    let geometry = FontGeometry::new(
+        font.metrics().width,
+        font.metrics().height,
+        terminal.active_grid().width(),
+        terminal.active_grid().height(),
+        config.window.padding_x,
+        config.window.padding_y,
+    );
+    // Keep the current grid size; only pixel geometry changed. Reflow policy
+    // stays identical to a normal resize (no second reflow implementation).
+    terminal
+        .resize(geometry.columns, geometry.rows)
+        .map_err(|error| io::Error::other(format!("terminal resize: {error:?}")))?;
+    let mut winsize = PtySize::new(geometry.columns, geometry.rows)?;
+    let (px, py) = geometry.pty_pixels();
+    winsize.pixel_width = px;
+    winsize.pixel_height = py;
+    pty.resize(winsize)?;
+    // Ask the window manager for the new pixel size; a tiling WM may ignore
+    // it, in which case the next ConfigureNotify reconciles via `resize()`.
+    connection.configure_window(
+        window,
+        &x11rb::protocol::xproto::ConfigureWindowAux::new()
+            .width(geometry.pixel_width)
+            .height(geometry.pixel_height),
+    )?;
+    connection.flush()?;
+    renderer
+        .resize(geometry.pixel_width, geometry.pixel_height)
+        .map_err(io::Error::other)?;
+    Ok(())
+}
+
 fn write_all_pty(pty: &mut Pty, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
         match pty.write(bytes) {
@@ -846,6 +933,59 @@ fn key_sym(
     let keysyms = symbols.get(offset..offset + per_key)?;
     let shifted = event.state.contains(KeyButMask::SHIFT) && keysyms.len() > 1;
     keysyms.get(usize::from(shifted)).copied()
+}
+
+/// Runtime font-size intent derived from a key press. Pure logic over the
+/// translated keymap so tests never need X11.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontSizeAction {
+    Grow,
+    Shrink,
+    Reset,
+}
+
+/// Matches `Ctrl+Plus/Minus/0` from the translated keymap without hardcoding
+/// physical keycodes, so Dvorak, QWERTY, and other layouts all work.
+/// Consumes both shifted and unshifted levels (`+` is normally `Shift+=`)
+/// plus keypad keys; requires Ctrl without Alt so `Alt` combos still reach
+/// the application. Returns `None` for every other key.
+fn font_size_action(
+    event: &x11rb::protocol::xproto::KeyPressEvent,
+    symbols: &[u32],
+    per_key: usize,
+    min_keycode: u8,
+) -> Option<FontSizeAction> {
+    if !event.state.contains(KeyButMask::CONTROL) || event.state.contains(KeyButMask::MOD1) {
+        return None;
+    }
+    let offset = usize::from(event.detail.checked_sub(min_keycode)?) * per_key;
+    let keysyms = symbols.get(offset..offset + per_key)?;
+    // Level 0 is the unshifted keysym, level 1 the shifted one. Either may
+    // carry the zoom key (`+` lives on level 1 of `=` on US layouts), and
+    // later levels hold layout-specific variants we also accept.
+    let mut grow = false;
+    let mut shrink = false;
+    let mut reset = false;
+    for &sym in keysyms.iter().take(per_key.max(2).min(keysyms.len())) {
+        match sym {
+            // `+`, `=` (Shift+= produces `+`), keypad add / equal.
+            0x2b | 0x3d | 0xffaa | 0xffbd => grow = true,
+            // `-`, `_` (Shift+-), keypad subtract.
+            0x2d | 0x5f | 0xffad => shrink = true,
+            // `0`, keypad 0/insert.
+            0x30 | 0xffb0 | 0xff9e => reset = true,
+            _ => {}
+        }
+    }
+    if grow {
+        Some(FontSizeAction::Grow)
+    } else if shrink {
+        Some(FontSizeAction::Shrink)
+    } else if reset {
+        Some(FontSizeAction::Reset)
+    } else {
+        None
+    }
 }
 
 fn cursor_key(final_byte: u8, application_cursor: bool) -> Vec<u8> {
@@ -957,13 +1097,6 @@ fn mouse_report(
     }
 }
 
-fn grid_dimensions(width: u32, height: u32, cell_width: u32, cell_height: u32) -> (usize, usize) {
-    (
-        (width / cell_width.max(1)).max(1) as usize,
-        (height / cell_height.max(1)).max(1) as usize,
-    )
-}
-
 fn selection_point(x: i16, y: i16, metrics: CellMetrics, terminal: &Terminal) -> SelectionPoint {
     SelectionPoint {
         row: ((u32::try_from(y.max(0)).unwrap_or(0) / metrics.height.max(1)) as usize)
@@ -1003,6 +1136,89 @@ mod tests {
     }
 
     #[test]
+    fn font_zoom_shortcuts_match_keysyms_not_keycodes() {
+        // US layout: `=`/`+` share keycode 35 (levels 0/1), `-`/`_` keycode 48.
+        let key = |detail: u8, state: KeyButMask| KeyPressEvent {
+            detail,
+            state,
+            ..KeyPressEvent::default()
+        };
+        // Symbols indexed by (keycode - min_keycode) * per_key.
+        let mut symbols = vec![0u32; 96 * 2];
+        let put = |symbols: &mut Vec<u32>, detail: u8, l0: u32, l1: u32| {
+            let base = (u32::from(detail) - 8) as usize * 2;
+            symbols[base] = l0;
+            symbols[base + 1] = l1;
+        };
+        put(&mut symbols, 35, 0x3d, 0x2b); // equal / plus
+        put(&mut symbols, 48, 0x2d, 0x5f); // minus / underscore
+        put(&mut symbols, 19, 0x30, 0x29); // 0 / parenright
+        put(&mut symbols, 38, b'a' as u32, b'A' as u32);
+
+        // Ctrl+- / Ctrl++ (via Shift+=) / Ctrl+= / Ctrl+0 all match.
+        assert_eq!(
+            font_size_action(&key(48, KeyButMask::CONTROL), &symbols, 2, 8),
+            Some(FontSizeAction::Shrink)
+        );
+        assert_eq!(
+            font_size_action(
+                &key(35, KeyButMask::CONTROL | KeyButMask::SHIFT),
+                &symbols,
+                2,
+                8
+            ),
+            Some(FontSizeAction::Grow)
+        );
+        assert_eq!(
+            font_size_action(&key(35, KeyButMask::CONTROL), &symbols, 2, 8),
+            Some(FontSizeAction::Grow)
+        );
+        assert_eq!(
+            font_size_action(&key(19, KeyButMask::CONTROL), &symbols, 2, 8),
+            Some(FontSizeAction::Reset)
+        );
+        // Keypad variants.
+        put(&mut symbols, 86, 0xffaa, 0);
+        put(&mut symbols, 82, 0xffad, 0);
+        put(&mut symbols, 90, 0xffb0, 0);
+        assert_eq!(
+            font_size_action(&key(86, KeyButMask::CONTROL), &symbols, 2, 8),
+            Some(FontSizeAction::Grow)
+        );
+        assert_eq!(
+            font_size_action(&key(82, KeyButMask::CONTROL), &symbols, 2, 8),
+            Some(FontSizeAction::Shrink)
+        );
+        assert_eq!(
+            font_size_action(&key(90, KeyButMask::CONTROL), &symbols, 2, 8),
+            Some(FontSizeAction::Reset)
+        );
+        // Without Ctrl nothing matches; with Alt the app keeps the combo.
+        assert_eq!(
+            font_size_action(&key(48, KeyButMask::default()), &symbols, 2, 8),
+            None
+        );
+        assert_eq!(
+            font_size_action(
+                &key(48, KeyButMask::CONTROL | KeyButMask::MOD1),
+                &symbols,
+                2,
+                8
+            ),
+            None
+        );
+        // Ordinary Ctrl combos (Ctrl+A) are not zoom: they reach the PTY.
+        assert_eq!(
+            font_size_action(&key(38, KeyButMask::CONTROL), &symbols, 2, 8),
+            None
+        );
+        assert_eq!(
+            translate_key(&key(38, KeyButMask::CONTROL), &symbols, 2, 8, false).as_deref(),
+            Some(&[1][..])
+        );
+    }
+
+    #[test]
     fn cursor_and_alt_prefix_follow_modes() {
         let symbols = [0xff51, 0];
         let event = KeyPressEvent {
@@ -1018,12 +1234,6 @@ mod tests {
             translate_key(&event, &symbols, 2, 8, true).as_deref(),
             Some(&b"\x1b\x1bOD"[..])
         );
-    }
-
-    #[test]
-    fn grid_size_uses_complete_cells_and_never_zero() {
-        assert_eq!(grid_dimensions(100, 64, 9, 16), (11, 4));
-        assert_eq!(grid_dimensions(2, 3, 9, 16), (1, 1));
     }
 
     #[test]
