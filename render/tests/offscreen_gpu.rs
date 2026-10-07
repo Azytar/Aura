@@ -127,31 +127,45 @@ fn underline_and_strikethrough_paint_foreground_rows() {
 #[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn color_emoji_samples_the_color_atlas() {
     // A color glyph must paint non-background texels through the RGBA path;
-    // a monochrome-only pipeline would leave the cell background.
+    // a monochrome-only pipeline would leave the cell background. The grid
+    // must be two cells wide: a 1x1 grid replaces any wide glyph with
+    // U+FFFD, which would exercise the mask path instead of the color one.
     let mut font = Font::load(None, 18.0).expect("load system monospace font");
     let metrics = font.metrics();
+    // Touch the emoji first: fallback faces load on demand, so checking
+    // `fallback_count` before any miss would always skip on a cold font.
+    let (_, info, _) = font.glyph('😀', false, false).unwrap();
     if font.fallback_count() == 0 {
         eprintln!("no fallback faces installed; skipping color atlas check");
         return;
     }
-    let (_, info, _) = font.glyph('😀', false, false).unwrap();
     if !info.color {
         eprintln!("emoji face has no color raster on this system");
         return;
     }
-    let mut terminal = Terminal::new(1, 1).expect("create terminal grid");
+    let mut terminal = Terminal::new(2, 1).expect("create terminal grid");
     terminal.process("😀".as_bytes());
-    let mut renderer =
-        OffscreenRenderer::new(metrics.width, metrics.height).expect("create offscreen renderer");
+    // Terminal-cell ownership: leading cell + wide spacer.
+    assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, 0x1f600);
+    assert!(
+        terminal
+            .viewport_cell(0, 1)
+            .unwrap()
+            .flags()
+            .contains(aterm_core::CellFlags::WIDE_SPACER)
+    );
+    let mut renderer = OffscreenRenderer::new(metrics.width * 2, metrics.height)
+        .expect("create offscreen renderer");
     let pixels = renderer
         .render(&mut terminal, &mut font)
         .expect("draw terminal and read back pixels");
-    let painted = pixels
-        .chunks_exact(4)
-        .any(|rgba| rgba[0] != 24 || rgba[1] != 24 || rgba[2] != 24);
+    let painted = pixels.chunks_exact(4).any(|rgba| {
+        let spread = rgba[0].max(rgba[1]).max(rgba[2]) - rgba[0].min(rgba[1]).min(rgba[2]);
+        spread > 40
+    });
     assert!(
         painted,
-        "color emoji cell must contain non-background pixels",
+        "color emoji cell must contain chromatic (non-gray) pixels",
     );
 }
 
@@ -255,7 +269,12 @@ fn inverse_and_truecolor_cells_use_deterministic_colors() {
 fn mixed_fallback_frame_renders_all_atlases() {
     // ASCII (mask atlas, primary face), CJK (mask atlas, fallback face),
     // and emoji (color atlas) share one frame and one glyph table.
+    // `A界😀` occupies exactly five terminal columns (1+2+2).
     let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    // Touch the fallback glyphs first: fallback faces load on demand, so a
+    // cold `fallback_count` check would skip even when CJK/emoji exist.
+    let _ = font.glyph('界', false, false);
+    let _ = font.glyph('😀', false, false);
     if font.fallback_count() == 0 {
         eprintln!("no fallback faces installed; skipping mixed frame check");
         return;
@@ -263,6 +282,8 @@ fn mixed_fallback_frame_renders_all_atlases() {
     let metrics = font.metrics();
     let mut terminal = Terminal::new(5, 1).expect("create terminal grid");
     terminal.process("A界😀".as_bytes());
+    assert_eq!(terminal.viewport_cell(0, 1).unwrap().content, 0x754c);
+    assert_eq!(terminal.viewport_cell(0, 3).unwrap().content, 0x1f600);
     let mut renderer = OffscreenRenderer::new(metrics.width * 5, metrics.height)
         .expect("create offscreen renderer");
     let pixels = renderer
@@ -283,4 +304,332 @@ fn mixed_fallback_frame_renders_all_atlases() {
         "CJK fallback cell renders from the mask atlas"
     );
     assert!(lit_in_column(3), "emoji cell renders from the color atlas",);
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn font_resize_repaints_ascii_cells_with_fresh_rasterization() {
+    // Ordinary narrow glyphs only: 12 -> 24 re-rasterizes (bright pixel
+    // coverage grows with the cell) and returning to 12 reproduces the
+    // original frame byte-for-byte — no size-24 atlas/cache may leak.
+    let mut font = Font::load(None, 12.0).expect("load system monospace font");
+    let mut terminal = Terminal::new(3, 1).expect("create terminal grid");
+    terminal.process(b"ABC");
+
+    let render = |font: &mut Font, terminal: &mut Terminal, columns: u32| {
+        let metrics = font.metrics();
+        let mut renderer = OffscreenRenderer::new(metrics.width * columns, metrics.height)
+            .expect("create offscreen renderer");
+        renderer
+            .render(terminal, font)
+            .expect("draw terminal and read back pixels")
+    };
+    let bright_in_cell = |pixels: &[u8], width: u32, height: u32, cell: u32| {
+        let frame_width = width * 3;
+        (0..height).any(|y| {
+            (0..width).any(|x| {
+                let index = ((y * frame_width + cell * width + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                rgba[0] > 100 && rgba[1] > 100 && rgba[2] > 100
+            })
+        })
+    };
+
+    let small = font.metrics();
+    let frame12 = render(&mut font, &mut terminal, 3);
+    for cell in 0..3 {
+        assert!(
+            bright_in_cell(&frame12, small.width, small.height, cell),
+            "ASCII cell {cell} renders at 12px"
+        );
+    }
+    let (_, info12, _) = font.glyph('A', false, false).unwrap();
+
+    assert!(font.set_size(24.0).unwrap(), "size changes 12 -> 24");
+    let (_, info24, upload) = font.glyph('A', false, false).unwrap();
+    assert!(
+        upload.is_some(),
+        "24px glyph is freshly rasterized, not scaled from the 12px texture"
+    );
+    assert!(
+        info24.size[0] > info12.size[0] && info24.size[1] > info12.size[1],
+        "24px raster is physically larger: {:?} vs {:?}",
+        info12.size,
+        info24.size
+    );
+    let large = font.metrics();
+    let frame24 = render(&mut font, &mut terminal, 3);
+    assert_eq!(
+        frame24.len(),
+        (large.width * 3 * large.height * 4) as usize,
+        "frame follows the new cell geometry"
+    );
+    let lit = |pixels: &[u8], width: u32, height: u32| {
+        (0..height)
+            .flat_map(|y| (0..width * 3).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let index = ((y * width * 3 + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                rgba[0] > 100 && rgba[1] > 100 && rgba[2] > 100
+            })
+            .count()
+    };
+    let lit12 = lit(&frame12, small.width, small.height);
+    let lit24 = lit(&frame24, large.width, large.height);
+    assert!(
+        lit24 > lit12,
+        "bigger rasterization paints more glyph pixels: 12px={lit12} 24px={lit24}"
+    );
+    for cell in 0..3 {
+        assert!(
+            bright_in_cell(&frame24, large.width, large.height, cell),
+            "ASCII cell {cell} renders at 24px"
+        );
+    }
+
+    // Return trip: back at 12 the frame must match the original exactly.
+    assert!(font.set_size(12.0).unwrap(), "size returns to 12");
+    let frame12b = render(&mut font, &mut terminal, 3);
+    assert_eq!(
+        frame12b, frame12,
+        "12 -> 24 -> 12 must reproduce the original frame with no stale glyphs"
+    );
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn font_resize_rerasterizes_wide_cells_with_terminal_cell_ownership() {
+    // `A界B` occupies four terminal columns: A=1, 界=2 (leading + spacer),
+    // B=1. Placement is asserted from terminal-cell ownership, never from
+    // a one-character-per-column assumption.
+    let mut font = Font::load(None, 12.0).expect("load system monospace font");
+    let mut terminal = Terminal::new(4, 1).expect("create terminal grid");
+    terminal.process("A界B".as_bytes());
+    assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, 'A' as u32);
+    let flags = |column: usize| terminal.viewport_cell(0, column).unwrap().flags();
+    assert!(flags(1).contains(aterm_core::CellFlags::WIDE_LEADING));
+    assert!(flags(2).contains(aterm_core::CellFlags::WIDE_SPACER));
+    assert_eq!(terminal.viewport_cell(0, 3).unwrap().content, 'B' as u32);
+
+    let render = |font: &mut Font, terminal: &mut Terminal| {
+        let metrics = font.metrics();
+        let mut renderer = OffscreenRenderer::new(metrics.width * 4, metrics.height)
+            .expect("create offscreen renderer");
+        renderer
+            .render(terminal, font)
+            .expect("draw terminal and read back pixels")
+    };
+    let bright_in_cell = |pixels: &[u8], width: u32, height: u32, cell: u32| {
+        let frame_width = width * 4;
+        (0..height).any(|y| {
+            (0..width).any(|x| {
+                let index = ((y * frame_width + cell * width + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                rgba[0] > 100 && rgba[1] > 100 && rgba[2] > 100
+            })
+        })
+    };
+
+    let small = font.metrics();
+    let frame12 = render(&mut font, &mut terminal);
+    assert!(
+        bright_in_cell(&frame12, small.width, small.height, 0),
+        "A at 12px"
+    );
+    assert!(
+        bright_in_cell(&frame12, small.width, small.height, 1),
+        "界 leading cell at 12px"
+    );
+    assert!(
+        bright_in_cell(&frame12, small.width, small.height, 2),
+        "界 is not clipped: its raster spans into the spacer column at 12px"
+    );
+    assert!(
+        bright_in_cell(&frame12, small.width, small.height, 3),
+        "B keeps its column after the wide pair at 12px"
+    );
+
+    assert!(font.set_size(24.0).unwrap(), "size changes 12 -> 24");
+    let (_, cjk24, cjk_upload) = font.glyph('界', false, false).unwrap();
+    assert!(
+        cjk_upload.is_some(),
+        "the fallback CJK face re-rasterizes at 24px"
+    );
+    assert!(cjk24.size[0] > 0.0 && cjk24.size[1] > 0.0);
+    let large = font.metrics();
+    let frame24 = render(&mut font, &mut terminal);
+    assert_eq!(frame24.len(), (large.width * 4 * large.height * 4) as usize);
+    assert!(
+        bright_in_cell(&frame24, large.width, large.height, 0),
+        "A at 24px"
+    );
+    assert!(
+        bright_in_cell(&frame24, large.width, large.height, 1),
+        "界 leading cell at 24px"
+    );
+    assert!(
+        bright_in_cell(&frame24, large.width, large.height, 2),
+        "界 is not clipped: its raster spans into the spacer column at 24px"
+    );
+    assert!(
+        bright_in_cell(&frame24, large.width, large.height, 3),
+        "B keeps its column after the wide pair at 24px"
+    );
+
+    assert!(font.set_size(12.0).unwrap(), "size returns to 12");
+    let frame12b = render(&mut font, &mut terminal);
+    assert_eq!(
+        frame12b, frame12,
+        "12 -> 24 -> 12 reproduces the original wide-cell frame exactly"
+    );
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn font_resize_repaints_color_emoji_from_fresh_color_atlas() {
+    // `A😀B` occupies four terminal columns (A=1, 😀=2, B=1). The emoji
+    // must come from the RGBA atlas at BOTH sizes — a 12px atlas reused
+    // at 24px would paint chromatic pixels at the wrong scale or not at all.
+    let mut font = Font::load(None, 12.0).expect("load system monospace font");
+    let (_, info, _) = font.glyph('😀', false, false).unwrap();
+    if font.fallback_count() == 0 {
+        eprintln!("no fallback faces installed; skipping emoji resize check");
+        return;
+    }
+    if !info.color {
+        eprintln!("emoji face has no color raster on this system");
+        return;
+    }
+    let mut terminal = Terminal::new(4, 1).expect("create terminal grid");
+    terminal.process("A😀B".as_bytes());
+    assert_eq!(terminal.viewport_cell(0, 0).unwrap().content, 'A' as u32);
+    assert_eq!(terminal.viewport_cell(0, 1).unwrap().content, 0x1f600);
+    assert!(
+        terminal
+            .viewport_cell(0, 2)
+            .unwrap()
+            .flags()
+            .contains(aterm_core::CellFlags::WIDE_SPACER)
+    );
+    assert_eq!(terminal.viewport_cell(0, 3).unwrap().content, 'B' as u32);
+
+    let render = |font: &mut Font, terminal: &mut Terminal| {
+        let metrics = font.metrics();
+        let mut renderer = OffscreenRenderer::new(metrics.width * 4, metrics.height)
+            .expect("create offscreen renderer");
+        renderer
+            .render(terminal, font)
+            .expect("draw terminal and read back pixels")
+    };
+    // Chromatic pixels anywhere in the emoji's two-column span (columns 1-2).
+    let emoji_chroma = |pixels: &[u8], width: u32, height: u32| {
+        let frame_width = width * 4;
+        (0..height).any(|y| {
+            (width..width * 3).any(|x| {
+                let index = ((y * frame_width + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                let spread = rgba[0].max(rgba[1]).max(rgba[2]) - rgba[0].min(rgba[1]).min(rgba[2]);
+                spread > 40
+            })
+        })
+    };
+
+    let small = font.metrics();
+    let frame12 = render(&mut font, &mut terminal);
+    assert!(
+        emoji_chroma(&frame12, small.width, small.height),
+        "emoji paints chromatic pixels from the color atlas at 12px"
+    );
+
+    assert!(font.set_size(24.0).unwrap(), "size changes 12 -> 24");
+    let (_, emoji24, emoji_upload) = font.glyph('😀', false, false).unwrap();
+    assert!(emoji_upload.is_some(), "color glyph re-rasterizes at 24px");
+    assert!(
+        emoji24.color,
+        "still served by the color atlas after resize"
+    );
+    let large = font.metrics();
+    let frame24 = render(&mut font, &mut terminal);
+    assert!(
+        emoji_chroma(&frame24, large.width, large.height),
+        "emoji paints chromatic pixels from a fresh color atlas at 24px"
+    );
+
+    assert!(font.set_size(12.0).unwrap(), "size returns to 12");
+    let frame12b = render(&mut font, &mut terminal);
+    assert_eq!(
+        frame12b, frame12,
+        "12 -> 24 -> 12 reproduces the original emoji frame exactly"
+    );
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn font_resize_keeps_combining_grapheme_in_one_cell() {
+    // `e` + U+0301 is a single terminal cell at every size; the composed
+    // glyph must re-rasterize with the rest of the font, not vanish or
+    // split when the size changes.
+    let mut font = Font::load(None, 12.0).expect("load system monospace font");
+    let mut terminal = Terminal::new(2, 1).expect("create terminal grid");
+    terminal.process("e\u{301}B".as_bytes());
+    assert_eq!(
+        terminal.active_grid().grapheme(0, 0).as_deref(),
+        Some("e\u{301}"),
+        "combining sequence stays one semantic cell"
+    );
+    assert_eq!(terminal.viewport_cell(0, 1).unwrap().content, 'B' as u32);
+
+    let render = |font: &mut Font, terminal: &mut Terminal| {
+        let metrics = font.metrics();
+        let mut renderer = OffscreenRenderer::new(metrics.width * 2, metrics.height)
+            .expect("create offscreen renderer");
+        renderer
+            .render(terminal, font)
+            .expect("draw terminal and read back pixels")
+    };
+    let bright_in_cell = |pixels: &[u8], width: u32, height: u32, cell: u32| {
+        let frame_width = width * 2;
+        (0..height).any(|y| {
+            (0..width).any(|x| {
+                let index = ((y * frame_width + cell * width + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                rgba[0] > 100 && rgba[1] > 100 && rgba[2] > 100
+            })
+        })
+    };
+
+    let small = font.metrics();
+    let frame12 = render(&mut font, &mut terminal);
+    assert!(
+        bright_in_cell(&frame12, small.width, small.height, 0),
+        "composed é renders at 12px"
+    );
+    assert!(
+        bright_in_cell(&frame12, small.width, small.height, 1),
+        "B renders at 12px"
+    );
+
+    assert!(font.set_size(24.0).unwrap(), "size changes 12 -> 24");
+    let large = font.metrics();
+    let frame24 = render(&mut font, &mut terminal);
+    assert!(
+        bright_in_cell(&frame24, large.width, large.height, 0),
+        "composed é renders at 24px"
+    );
+    assert!(
+        bright_in_cell(&frame24, large.width, large.height, 1),
+        "B renders at 24px"
+    );
+    assert_eq!(
+        terminal.active_grid().grapheme(0, 0).as_deref(),
+        Some("e\u{301}"),
+        "grapheme sidecar survives the resize"
+    );
+
+    assert!(font.set_size(12.0).unwrap(), "size returns to 12");
+    let frame12b = render(&mut font, &mut terminal);
+    assert_eq!(
+        frame12b, frame12,
+        "12 -> 24 -> 12 reproduces the original combining-glyph frame exactly"
+    );
 }
