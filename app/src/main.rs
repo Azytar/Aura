@@ -24,7 +24,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (font_path, font_size) = arguments()?;
+    let Some((font_path, font_size)) = arguments()? else {
+        return Ok(());
+    };
     let mut font = Font::load(font_path.as_deref(), font_size).map_err(io::Error::other)?;
     let metrics = font.metrics();
     let (connection, screen_index) = XCBConnection::connect(None)?;
@@ -485,12 +487,29 @@ fn keyboard_mapping(
     Ok((mapping.keysyms, usize::from(mapping.keysyms_per_keycode)))
 }
 
-fn arguments() -> Result<(Option<PathBuf>, f32), Box<dyn std::error::Error>> {
+fn arguments() -> Result<Option<(Option<PathBuf>, f32)>, Box<dyn std::error::Error>> {
     let mut path = None;
     let mut size = 14.0;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
+            Some("--help" | "-h") => {
+                println!(
+                    "aterm {} - GPU terminal emulator (Vulkan/X11)\n\n\
+                     Usage: aterm [OPTIONS]\n\n\
+                     Options:\n  \
+                     --font PATH      monospace font file (default: system monospace)\n  \
+                     --font-size SIZE cell font size in pixels, 4-96 (default: 14)\n  \
+                     -h, --help       print this help and exit\n  \
+                     -V, --version    print the version and exit",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Ok(None);
+            }
+            Some("--version" | "-V") => {
+                println!("aterm {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
+            }
             Some("--font") => {
                 path = Some(PathBuf::from(args.next().ok_or("--font requires a path")?))
             }
@@ -505,7 +524,7 @@ fn arguments() -> Result<(Option<PathBuf>, f32), Box<dyn std::error::Error>> {
             None => return Err("arguments must be valid UTF-8".into()),
         }
     }
-    Ok((path, size))
+    Ok(Some((path, size)))
 }
 
 fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
