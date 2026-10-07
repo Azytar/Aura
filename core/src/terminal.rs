@@ -493,7 +493,13 @@ impl Terminal {
         self.top_margin = 0;
         self.bottom_margin = height - 1;
         self.pending_wrap = false;
-        self.main_pending_wrap = false;
+        // `pending_wrap` belongs to the active screen and is invalidated by the
+        // new geometry. `main_pending_wrap` is the saved pending-wrap state of
+        // the main screen: when resizing from the alternate screen it must be
+        // preserved, but on the main screen it is stale and reset.
+        if !self.is_alternate_screen() {
+            self.main_pending_wrap = false;
+        }
         Ok(())
     }
 
@@ -1841,6 +1847,39 @@ mod tests {
     fn alternate_switch_does_not_reuse_main_pending_wrap_state() {
         let mut terminal = terminal(4, 2);
         feed(&mut terminal, b"ABCD\x1b[?47hX\x1b[?47lE");
+        assert_eq!(line(&terminal, 0), "ABCD");
+        assert_eq!(line(&terminal, 1), "E...");
+    }
+
+    #[test]
+    fn resize_while_alternate_preserves_main_pending_wrap() {
+        // Regression test: resize while on the alternate screen must not
+        // destroy `main_pending_wrap`, which holds the main screen's saved
+        // pending-wrap state. Before the fix, resize unconditionally cleared
+        // it, so exiting the alternate screen lost the wrap and overwrote the
+        // right-margin character instead of advancing to the next line.
+        let mut terminal = terminal(4, 2);
+        // Fill the main screen row to the right margin, creating a real
+        // pending-wrap condition (pending_wrap == true).
+        feed(&mut terminal, b"ABCD");
+        assert_eq!(terminal.cursor(), Cursor { column: 3, row: 0 });
+        // Enter alternate screen: saves main_pending_wrap and resets
+        // pending_wrap. Mode 47 does not save/restore the main cursor, so the
+        // main screen cursor stays at (3, 0).
+        feed(&mut terminal, b"\x1b[?47h");
+        assert!(terminal.is_alternate_screen());
+        assert_eq!(terminal.cursor(), Cursor { column: 0, row: 0 });
+        // Resize while on the alternate screen: main_pending_wrap must survive.
+        terminal.resize(4, 2).unwrap();
+        assert!(terminal.is_alternate_screen());
+        // Exit alternate screen: restores pending_wrap from main_pending_wrap.
+        feed(&mut terminal, b"\x1b[?47l");
+        assert!(!terminal.is_alternate_screen());
+        assert_eq!(terminal.cursor(), Cursor { column: 3, row: 0 });
+        // If main_pending_wrap was preserved, pending_wrap is still true, so the
+        // next printable wraps to the next line instead of overwriting the
+        // character at the right margin.
+        feed(&mut terminal, b"E");
         assert_eq!(line(&terminal, 0), "ABCD");
         assert_eq!(line(&terminal, 1), "E...");
     }
