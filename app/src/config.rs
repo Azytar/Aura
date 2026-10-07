@@ -69,15 +69,29 @@ impl RuntimeFontSize {
     }
 }
 
+/// Font rendering offsets and spacing, bundled so `FontGeometry::new` stays
+/// within the reasonable parameter-count limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlyphOffsets {
+    /// Horizontal glyph offset in pixels (visual only, does not change cell geometry).
+    pub offset_x: i32,
+    /// Vertical glyph offset in pixels (visual only, does not change cell geometry).
+    pub offset_y: i32,
+    /// Additional vertical space between lines in pixels.
+    pub line_spacing: i32,
+    /// Additional horizontal space between cells in pixels.
+    pub letter_spacing: i32,
+}
+
 /// Current font metrics plus the terminal geometry derived from them.
 /// Single source of truth: `app` builds this from the live `Font` metrics
 /// and hands the same values to window sizing, grid sizing, PTY winsize,
 /// and the renderer — never two independent calculations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontGeometry {
-    /// Rasterized cell width/height in pixels.
+    /// Rasterized cell width in pixels (includes letter_spacing).
     pub cell_width: u32,
-    /// Rasterized cell width/height in pixels.
+    /// Rasterized cell height in pixels (includes line_spacing).
     pub cell_height: u32,
     /// Outer window size holding `columns`×`rows` cells plus padding.
     pub pixel_width: u32,
@@ -87,11 +101,20 @@ pub struct FontGeometry {
     pub columns: usize,
     /// Terminal grid size this geometry was derived for.
     pub rows: usize,
+    /// Horizontal glyph offset (visual only).
+    pub offset_x: i32,
+    /// Vertical glyph offset (visual only).
+    pub offset_y: i32,
+    /// Additional vertical space between lines.
+    pub line_spacing: i32,
+    /// Additional horizontal space between cells.
+    pub letter_spacing: i32,
 }
 
 impl FontGeometry {
     /// Derives window pixels from cell metrics, grid size, and padding with
     /// saturating math so huge sizes degrade to clamped pixels, never wrap.
+    /// `line_spacing` and `letter_spacing` are added to cell dimensions.
     pub fn new(
         cell_width: u32,
         cell_height: u32,
@@ -99,20 +122,33 @@ impl FontGeometry {
         rows: usize,
         padding_x: u32,
         padding_y: u32,
+        glyph_offsets: GlyphOffsets,
     ) -> Self {
-        let pixel_width = (columns.saturating_mul(cell_width.max(1) as usize))
+        let GlyphOffsets {
+            offset_x,
+            offset_y,
+            line_spacing,
+            letter_spacing,
+        } = glyph_offsets;
+        let effective_cell_width = cell_width.saturating_add_signed(letter_spacing).max(1);
+        let effective_cell_height = cell_height.saturating_add_signed(line_spacing).max(1);
+        let pixel_width = (columns.saturating_mul(effective_cell_width as usize))
             .saturating_add(2 * padding_x as usize)
             .max(1) as u32;
-        let pixel_height = (rows.saturating_mul(cell_height.max(1) as usize))
+        let pixel_height = (rows.saturating_mul(effective_cell_height as usize))
             .saturating_add(2 * padding_y as usize)
             .max(1) as u32;
         Self {
-            cell_width: cell_width.max(1),
-            cell_height: cell_height.max(1),
+            cell_width: effective_cell_width,
+            cell_height: effective_cell_height,
             pixel_width: pixel_width.max(1),
             pixel_height,
             columns,
             rows,
+            offset_x,
+            offset_y,
+            line_spacing,
+            letter_spacing,
         }
     }
 
@@ -143,6 +179,22 @@ pub const DEFAULT_FONT_FAMILY: &str = "monospace";
 
 /// Default font size when no config is present.
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+
+/// Default horizontal glyph offset when no config is present.
+pub const DEFAULT_OFFSET_X: i32 = 0;
+/// Default vertical glyph offset when no config is present.
+pub const DEFAULT_OFFSET_Y: i32 = 0;
+/// Default line spacing when no config is present.
+pub const DEFAULT_LINE_SPACING: i32 = 0;
+/// Default letter spacing when no config is present.
+pub const DEFAULT_LETTER_SPACING: i32 = 0;
+
+/// Maximum absolute value for glyph offsets.
+pub const MAX_OFFSET: i32 = 32;
+/// Maximum line spacing value.
+pub const MAX_LINE_SPACING: i32 = 32;
+/// Maximum letter spacing value.
+pub const MAX_LETTER_SPACING: i32 = 16;
 
 /// Default terminal columns when no config is present.
 pub const DEFAULT_COLUMNS: usize = 120;
@@ -183,6 +235,14 @@ pub struct FontConfig {
     pub family: String,
     /// Font size in typographic pixels used for rasterization.
     pub size: f32,
+    /// Horizontal glyph offset in pixels (visual only, does not change cell geometry).
+    pub offset_x: i32,
+    /// Vertical glyph offset in pixels (visual only, does not change cell geometry).
+    pub offset_y: i32,
+    /// Additional vertical space between lines in pixels.
+    pub line_spacing: i32,
+    /// Additional horizontal space between cells in pixels.
+    pub letter_spacing: i32,
     /// Bold face configuration.
     pub bold: Option<FontStyleConfig>,
     /// Italic face configuration.
@@ -228,6 +288,11 @@ impl FontConfig {
             ));
         }
 
+        let offset_x = parse_offset(font, "offset_x", DEFAULT_OFFSET_X)?;
+        let offset_y = parse_offset(font, "offset_y", DEFAULT_OFFSET_Y)?;
+        let line_spacing = parse_spacing(font, "line_spacing", DEFAULT_LINE_SPACING)?;
+        let letter_spacing = parse_spacing(font, "letter_spacing", DEFAULT_LETTER_SPACING)?;
+
         let bold = FontStyleConfig::parse_section(font, "bold");
         let italic = FontStyleConfig::parse_section(font, "italic");
         let bold_italic = FontStyleConfig::parse_section(font, "bold_italic");
@@ -247,12 +312,62 @@ impl FontConfig {
         Ok(Self {
             family,
             size,
+            offset_x,
+            offset_y,
+            line_spacing,
+            letter_spacing,
             bold,
             italic,
             bold_italic,
             fallback_families,
         })
     }
+
+    /// Bundles the font rendering parameters that configure glyph positioning
+    /// and cell spacing for `FontGeometry::new`.
+    pub fn glyph_offsets(&self) -> GlyphOffsets {
+        GlyphOffsets {
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
+            line_spacing: self.line_spacing,
+            letter_spacing: self.letter_spacing,
+        }
+    }
+}
+
+/// Parses an offset value from the font table, clamping to valid range.
+fn parse_offset(font: &toml::Table, key: &'static str, default: i32) -> Result<i32, ConfigError> {
+    let value = font
+        .get(key)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(default as i64) as i32;
+    if !(-MAX_OFFSET..=MAX_OFFSET).contains(&value) {
+        return Err(ConfigError::invalid_value(
+            key,
+            format!("must be between -{MAX_OFFSET} and {MAX_OFFSET}"),
+        ));
+    }
+    Ok(value)
+}
+
+/// Parses a spacing value from the font table, clamping to valid range.
+fn parse_spacing(font: &toml::Table, key: &'static str, default: i32) -> Result<i32, ConfigError> {
+    let value = font
+        .get(key)
+        .and_then(|v| v.as_integer())
+        .unwrap_or(default as i64) as i32;
+    let max = if key == "line_spacing" {
+        MAX_LINE_SPACING
+    } else {
+        MAX_LETTER_SPACING
+    };
+    if !(0..=max).contains(&value) {
+        return Err(ConfigError::invalid_value(
+            key,
+            format!("must be between 0 and {max}"),
+        ));
+    }
+    Ok(value)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -337,6 +452,10 @@ impl AppConfig {
             font: FontConfig {
                 family: DEFAULT_FONT_FAMILY.to_string(),
                 size: DEFAULT_FONT_SIZE,
+                offset_x: DEFAULT_OFFSET_X,
+                offset_y: DEFAULT_OFFSET_Y,
+                line_spacing: DEFAULT_LINE_SPACING,
+                letter_spacing: DEFAULT_LETTER_SPACING,
                 bold: None,
                 italic: None,
                 bold_italic: None,
@@ -614,7 +733,7 @@ padding_y = 0
 
     #[test]
     fn font_geometry_is_single_source_of_truth() {
-        let geometry = FontGeometry::new(9, 20, 120, 32, 0, 0);
+        let geometry = FontGeometry::new(9, 20, 120, 32, 0, 0, GlyphOffsets::default());
         assert_eq!(geometry.pixel_width, 120 * 9);
         assert_eq!(geometry.pixel_height, 32 * 20);
         assert_eq!(geometry.columns, 120);
@@ -622,12 +741,12 @@ padding_y = 0
         let (px, py) = geometry.pty_pixels();
         assert_eq!((px, py), (120 * 9, 32 * 20));
 
-        let padded = FontGeometry::new(9, 20, 120, 32, 4, 4);
+        let padded = FontGeometry::new(9, 20, 120, 32, 4, 4, GlyphOffsets::default());
         assert_eq!(padded.pixel_width, 120 * 9 + 8);
         assert_eq!(padded.pixel_height, 32 * 20 + 8);
 
         // Zero cell dimensions degrade to 1px cells, never divide-by-zero.
-        let degenerate = FontGeometry::new(0, 0, 120, 32, 0, 0);
+        let degenerate = FontGeometry::new(0, 0, 120, 32, 0, 0, GlyphOffsets::default());
         assert_eq!((degenerate.cell_width, degenerate.cell_height), (1, 1));
         assert_eq!((degenerate.pixel_width, degenerate.pixel_height), (120, 32));
     }
@@ -636,7 +755,7 @@ padding_y = 0
     fn shared_grid_dimensions_agree_with_geometry() {
         assert_eq!(grid_dimensions(100, 64, 9, 16), (11, 4));
         assert_eq!(grid_dimensions(2, 3, 9, 16), (1, 1));
-        let geometry = FontGeometry::new(9, 16, 11, 4, 0, 0);
+        let geometry = FontGeometry::new(9, 16, 11, 4, 0, 0, GlyphOffsets::default());
         assert_eq!(
             grid_dimensions(geometry.pixel_width, geometry.pixel_height, 9, 16),
             (11, 4)
@@ -649,7 +768,8 @@ padding_y = 0
         // TIOCSWINSZ: rows/columns must be identical and the pixel lanes
         // must carry the window dimensions.
         for (cell_w, cell_h) in [(8, 17), (9, 20), (17, 34)] {
-            let geometry = FontGeometry::new(cell_w, cell_h, 120, 32, 3, 5);
+            let geometry =
+                FontGeometry::new(cell_w, cell_h, 120, 32, 3, 5, GlyphOffsets::default());
             let mut winsize =
                 aterm_core::PtySize::new(geometry.columns, geometry.rows).expect("valid winsize");
             // Pixel lanes are filled by the font-resize path after PtySize::new.

@@ -46,6 +46,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.window.lines,
         config.window.padding_x,
         config.window.padding_y,
+        config.font.glyph_offsets(),
     );
     let (pixel_width, pixel_height) = (geometry.pixel_width, geometry.pixel_height);
     let (connection, screen_index) = XCBConnection::connect(None)?;
@@ -101,6 +102,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let raw_connection = connection.as_raw_xcb_connection().cast();
     let mut renderer = Renderer::new(raw_connection, window, pixel_width, pixel_height)
         .map_err(io::Error::other)?;
+    renderer.set_glyph_offset(config.font.offset_x, config.font.offset_y);
     renderer
         .render(&mut terminal, &mut font, true)
         .map_err(io::Error::other)?;
@@ -818,6 +820,7 @@ fn resize_font(
         terminal.active_grid().height(),
         config.window.padding_x,
         config.window.padding_y,
+        config.font.glyph_offsets(),
     );
     // Keep the current grid size; only pixel geometry changed. Reflow policy
     // stays identical to a normal resize (no second reflow implementation).

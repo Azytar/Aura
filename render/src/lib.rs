@@ -41,6 +41,8 @@ struct PushGrid {
     cell_width: f32,
     cell_height: f32,
     ascent: f32,
+    offset_x: i32,
+    offset_y: i32,
     cursor: u32,
     cursor_visible: u32,
     selection_start: u32,
@@ -190,6 +192,8 @@ pub struct Renderer {
     pending_glyph_uploads: Vec<GlyphUpload>,
     glyphs_dirty: bool,
     grid_size: Option<(usize, usize)>,
+    offset_x: i32,
+    offset_y: i32,
 }
 
 /// Vulkan renderer for deterministic image readback without a window system.
@@ -221,6 +225,8 @@ pub struct OffscreenRenderer {
     atlas_uploaded: bool,
     color_uploaded: bool,
     show_cursor: bool,
+    offset_x: i32,
+    offset_y: i32,
 }
 
 impl OffscreenRenderer {
@@ -334,12 +340,20 @@ impl OffscreenRenderer {
             atlas_uploaded: false,
             color_uploaded: false,
             show_cursor: false,
+            offset_x: 0,
+            offset_y: 0,
         })
     }
 
     /// Enables the terminal cursor in snapshots; snapshots hide it by default.
     pub const fn set_show_cursor(&mut self, show: bool) {
         self.show_cursor = show;
+    }
+
+    /// Sets the glyph offset (visual only, does not change cell geometry).
+    pub const fn set_glyph_offset(&mut self, x: i32, y: i32) {
+        self.offset_x = x;
+        self.offset_y = y;
     }
 
     /// Marks the atlas as needing a full re-upload on the next render call.
@@ -525,6 +539,8 @@ impl OffscreenRenderer {
             cell_width: metrics.width as f32,
             cell_height: metrics.height as f32,
             ascent: metrics.ascent as f32,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
             cursor: (terminal.cursor().row * cols + terminal.cursor().column) as u32,
             cursor_visible: u32::from(self.show_cursor && terminal.modes().cursor_visible),
             selection_start: u32::MAX,
@@ -706,6 +722,8 @@ impl Renderer {
             pending_glyph_uploads: Vec::new(),
             glyphs_dirty: false,
             grid_size: None,
+            offset_x: 0,
+            offset_y: 0,
         })
     }
 
@@ -851,6 +869,8 @@ impl Renderer {
             cell_width: font.metrics().width as f32,
             cell_height: font.metrics().height as f32,
             ascent: font.metrics().ascent as f32,
+            offset_x: self.offset_x,
+            offset_y: self.offset_y,
             cursor: (terminal.cursor().row * width + terminal.cursor().column) as u32,
             cursor_visible: u32::from(
                 terminal.modes().cursor_visible
@@ -918,6 +938,12 @@ impl Renderer {
         self.uploaded_atlas = false;
         self.uploaded_color_atlas = false;
         self.pending_glyph_uploads.clear();
+    }
+
+    /// Sets the glyph offset (visual only, does not change cell geometry).
+    pub const fn set_glyph_offset(&mut self, x: i32, y: i32) {
+        self.offset_x = x;
+        self.offset_y = y;
     }
 
     /// Drops every cached glyph after a runtime font-size change so no stale
@@ -2314,17 +2340,19 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
         assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
-        assert_eq!(size_of::<PushGrid>(), 40);
+        assert_eq!(size_of::<PushGrid>(), 48);
         assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
         assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_height), 12);
         assert_eq!(std::mem::offset_of!(PushGrid, ascent), 16);
-        assert_eq!(std::mem::offset_of!(PushGrid, cursor), 20);
-        assert_eq!(std::mem::offset_of!(PushGrid, cursor_visible), 24);
-        assert_eq!(std::mem::offset_of!(PushGrid, selection_start), 28);
-        assert_eq!(std::mem::offset_of!(PushGrid, selection_end), 32);
-        assert_eq!(std::mem::offset_of!(PushGrid, cursor_style), 36);
+        assert_eq!(std::mem::offset_of!(PushGrid, offset_x), 20);
+        assert_eq!(std::mem::offset_of!(PushGrid, offset_y), 24);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor), 28);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor_visible), 32);
+        assert_eq!(std::mem::offset_of!(PushGrid, selection_start), 36);
+        assert_eq!(std::mem::offset_of!(PushGrid, selection_end), 40);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor_style), 44);
     }
 
     #[test]
