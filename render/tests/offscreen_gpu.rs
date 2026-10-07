@@ -85,8 +85,8 @@ fn underline_and_strikethrough_paint_foreground_rows() {
     let height = metrics.height;
     let mut terminal = Terminal::new(3, 1).expect("create terminal grid");
     terminal.process(b"\x1b[4m \x1b[24m \x1b[9m ");
-    let mut renderer = OffscreenRenderer::new(metrics.width * 3, height)
-        .expect("create offscreen renderer");
+    let mut renderer =
+        OffscreenRenderer::new(metrics.width * 3, height).expect("create offscreen renderer");
     let pixels = renderer
         .render(&mut terminal, &mut font)
         .expect("draw terminal and read back pixels");
@@ -141,14 +141,14 @@ fn color_emoji_samples_the_color_atlas() {
     }
     let mut terminal = Terminal::new(1, 1).expect("create terminal grid");
     terminal.process("😀".as_bytes());
-    let mut renderer = OffscreenRenderer::new(metrics.width, metrics.height)
-        .expect("create offscreen renderer");
+    let mut renderer =
+        OffscreenRenderer::new(metrics.width, metrics.height).expect("create offscreen renderer");
     let pixels = renderer
         .render(&mut terminal, &mut font)
         .expect("draw terminal and read back pixels");
-    let painted = pixels.chunks_exact(4).any(|rgba| {
-        rgba[0] != 24 || rgba[1] != 24 || rgba[2] != 24
-    });
+    let painted = pixels
+        .chunks_exact(4)
+        .any(|rgba| rgba[0] != 24 || rgba[1] != 24 || rgba[2] != 24);
     assert!(
         painted,
         "color emoji cell must contain non-background pixels",
@@ -271,17 +271,16 @@ fn mixed_fallback_frame_renders_all_atlases() {
     let lit_in_column = |column: u32| {
         (0..metrics.height).any(|y| {
             (0..metrics.width).any(|x| {
-                let index =
-                    ((y * metrics.width * 5 + column * metrics.width + x) * 4) as usize;
+                let index = ((y * metrics.width * 5 + column * metrics.width + x) * 4) as usize;
                 let rgba = &pixels[index..index + 4];
                 rgba[0] > 60 || rgba[1] > 60 || rgba[2] > 60
             })
         })
     };
     assert!(lit_in_column(0), "ASCII cell renders from the mask atlas");
-    assert!(lit_in_column(1), "CJK fallback cell renders from the mask atlas");
     assert!(
-        lit_in_column(3),
-        "emoji cell renders from the color atlas",
+        lit_in_column(1),
+        "CJK fallback cell renders from the mask atlas"
     );
+    assert!(lit_in_column(3), "emoji cell renders from the color atlas",);
 }

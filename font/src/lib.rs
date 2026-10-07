@@ -182,10 +182,7 @@ impl Font {
             metrics,
             atlas_size: DEFAULT_ATLAS_SIZE,
             atlas: vec![0; (DEFAULT_ATLAS_SIZE * DEFAULT_ATLAS_SIZE) as usize],
-            color_atlas: vec![
-                0;
-                (DEFAULT_ATLAS_SIZE * DEFAULT_ATLAS_SIZE * 4) as usize
-            ],
+            color_atlas: vec![0; (DEFAULT_ATLAS_SIZE * DEFAULT_ATLAS_SIZE * 4) as usize],
             shelf_x: 1,
             shelf_y: 1,
             shelf_height: 0,
@@ -211,7 +208,7 @@ impl Font {
     }
     /// Number of fallback faces loaded so far (zero until the first primary
     /// miss triggers on-demand loading).
-    pub const fn fallback_count(&self) -> usize {
+    pub fn fallback_count(&self) -> usize {
         self.fallbacks.len()
     }
 
@@ -245,8 +242,7 @@ impl Font {
         } else {
             self.fallbacks[face_id as usize - 1].index
         };
-        let face =
-            FontRef::from_index(face_bytes, loaded_index).ok_or("invalid loaded font")?;
+        let face = FontRef::from_index(face_bytes, loaded_index).ok_or("invalid loaded font")?;
         let mut scaler = self
             .context
             .builder(face)
@@ -307,8 +303,7 @@ impl Font {
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
             .ok_or("rasterized glyph dimensions overflow")?;
-        if (!color && image.content != Content::Mask) || image.data.len() != raster_bytes
-        {
+        if (!color && image.content != Content::Mask) || image.data.len() != raster_bytes {
             return Err("font rasterizer returned an unsupported glyph format".into());
         }
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
@@ -560,8 +555,7 @@ impl Font {
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
         // A full atlas degrades the cluster to an empty entry instead of
         // failing the frame; see `glyph` for the capacity policy.
-        let Some((atlas_x, atlas_y)) = self.allocate_in(padded_width, padded_height, false)
-        else {
+        let Some((atlas_x, atlas_y)) = self.allocate_in(padded_width, padded_height, false) else {
             let info = GlyphInfo {
                 uv_min: [0.0; 2],
                 uv_max: [0.0; 2],
@@ -610,7 +604,8 @@ impl Font {
         ))
     }
 
-    fn allocate_in(&mut self, width: u32, height: u32, color: bool) -> Option<(u32, u32)> {        if width > self.atlas_size || height > self.atlas_size {
+    fn allocate_in(&mut self, width: u32, height: u32, color: bool) -> Option<(u32, u32)> {
+        if width > self.atlas_size || height > self.atlas_size {
             return None;
         }
         let (shelf_x, shelf_y, shelf_height) = if color {
@@ -620,11 +615,7 @@ impl Font {
                 &mut self.color_shelf_height,
             )
         } else {
-            (
-                &mut self.shelf_x,
-                &mut self.shelf_y,
-                &mut self.shelf_height,
-            )
+            (&mut self.shelf_x, &mut self.shelf_y, &mut self.shelf_height)
         };
         if *shelf_x + width > self.atlas_size {
             *shelf_x = 1;
@@ -724,7 +715,11 @@ mod tests {
     fn fallback_faces_cover_cjk_and_symbols_without_touching_primary_metrics() {
         let mut font =
             Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
-        assert_eq!(font.fallback_count(), 0, "fallbacks stay unloaded until a miss");
+        assert_eq!(
+            font.fallback_count(),
+            0,
+            "fallbacks stay unloaded until a miss"
+        );
         let metrics = font.metrics();
         let (id, info, upload) = font.glyph('界', false, false).unwrap();
         if font.fallback_count() == 0 {
@@ -758,7 +753,10 @@ mod tests {
             eprintln!("emoji face has no raster for U+1F600 on this system");
             return;
         };
-        assert!(info.color, "emoji raster must be flagged for the color atlas");
+        assert!(
+            info.color,
+            "emoji raster must be flagged for the color atlas"
+        );
         assert!(upload.color);
         assert_eq!(
             upload.pixels.len(),
