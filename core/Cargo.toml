@@ -1,6 +1,7 @@
 [package]
 name = "aterm-core"
 version = "0.1.0"
+description = "VT parser, terminal grid, scrollback, Unicode handling, and PTY support"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
