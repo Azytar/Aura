@@ -1115,14 +1115,14 @@ impl Terminal {
                     let is_foreground = code == 38;
                     let color = match csi.param(index, u16::MAX) {
                         5 if index + 1 < csi.param_count as usize => {
-                            index += 1;
-                            Some(indexed_color(csi.param(index, 0).min(255) as u8))
+                            index += 2;
+                            Some(indexed_color(csi.param(index - 1, 0).min(255) as u8))
                         }
                         2 if index + 3 < csi.param_count as usize => {
                             let r = csi.param(index + 1, 0).min(255) as u32;
                             let g = csi.param(index + 2, 0).min(255) as u32;
                             let b = csi.param(index + 3, 0).min(255) as u32;
-                            index += 3;
+                            index += 4;
                             Some(RGB_COLOR_TAG | (r << 16) | (g << 8) | b)
                         }
                         _ => {
@@ -1707,6 +1707,21 @@ mod tests {
         assert_eq!(c.fg, DEFAULT_COLOR);
         assert_eq!(c.bg, DEFAULT_COLOR);
         assert_eq!(c.flags, 0);
+    }
+
+    #[test]
+    fn extended_color_components_are_fully_consumed() {
+        // A trailing zero component must not reset the rendition, and a
+        // 256-palette index matching an SGR code must not set its flag.
+        let mut terminal = terminal(3, 1);
+        feed(&mut terminal, b"\x1b[38;2;255;0;0mA\x1b[38;5;9mB");
+        let row = terminal.active_grid().row_at(0).unwrap();
+        let a = row.cells()[0];
+        let b = row.cells()[1];
+        assert_eq!(a.fg, RGB_COLOR_TAG | 0xff_00_00);
+        assert_eq!(a.flags, 0);
+        assert_eq!(b.fg, INDEXED_COLOR_TAG | 9);
+        assert_eq!(b.flags, 0);
     }
 
     #[test]
