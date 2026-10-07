@@ -5,9 +5,138 @@
 
 use std::path::{Path, PathBuf};
 
-/// Minimum/maximum supported font size in typographic pixels.
-pub const MIN_FONT_SIZE: f32 = 4.0;
-pub const MAX_FONT_SIZE: f32 = 96.0;
+/// Re-exported from `aterm-font`: the single source of truth for runtime
+/// font sizes. `config` validates the TOML startup size against the same
+/// range that `Font::set_size` clamps at runtime.
+pub use aterm_font::{FONT_SIZE_STEP, MAX_FONT_SIZE, MIN_FONT_SIZE, clamp_font_size};
+
+/// Runtime font-size state: `configured` never changes (TOML startup value),
+/// `current` moves with `Ctrl+Plus/Minus` and returns with `Ctrl+0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuntimeFontSize {
+    configured: f32,
+    current: f32,
+}
+
+impl RuntimeFontSize {
+    /// Creates the state from the validated TOML startup size.
+    pub fn new(configured: f32) -> Self {
+        let clamped = clamp_font_size(configured);
+        Self {
+            configured: clamped,
+            current: clamped,
+        }
+    }
+
+    /// Startup size from TOML; `Ctrl+0` restores this, never a hardcoded value.
+    /// Only read by tests (the live path keeps it inside `reset()`), so the
+    /// binary target allows dead code here by design.
+    #[allow(dead_code)]
+    pub const fn configured(&self) -> f32 {
+        self.configured
+    }
+
+    /// Live size used for metrics, atlas, and geometry.
+    pub const fn current(&self) -> f32 {
+        self.current
+    }
+
+    /// `Ctrl+Plus`: grows by one step, saturating at [`MAX_FONT_SIZE`].
+    /// Returns `true` when the size actually changed.
+    pub fn grow(&mut self) -> bool {
+        self.set(self.current + FONT_SIZE_STEP)
+    }
+
+    /// `Ctrl+Minus`: shrinks by one step, saturating at [`MIN_FONT_SIZE`].
+    /// Returns `true` when the size actually changed.
+    pub fn shrink(&mut self) -> bool {
+        self.set(self.current - FONT_SIZE_STEP)
+    }
+
+    /// `Ctrl+0`: restores the configured startup size.
+    /// Returns `true` when the size actually changed.
+    pub fn reset(&mut self) -> bool {
+        self.set(self.configured)
+    }
+
+    fn set(&mut self, requested: f32) -> bool {
+        let clamped = clamp_font_size(requested);
+        if clamped.to_bits() == self.current.to_bits() {
+            return false;
+        }
+        self.current = clamped;
+        true
+    }
+}
+
+/// Current font metrics plus the terminal geometry derived from them.
+/// Single source of truth: `app` builds this from the live `Font` metrics
+/// and hands the same values to window sizing, grid sizing, PTY winsize,
+/// and the renderer — never two independent calculations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontGeometry {
+    /// Rasterized cell width/height in pixels.
+    pub cell_width: u32,
+    /// Rasterized cell width/height in pixels.
+    pub cell_height: u32,
+    /// Outer window size holding `columns`×`rows` cells plus padding.
+    pub pixel_width: u32,
+    /// Outer window size holding `columns`×`rows` cells plus padding.
+    pub pixel_height: u32,
+    /// Terminal grid size this geometry was derived for.
+    pub columns: usize,
+    /// Terminal grid size this geometry was derived for.
+    pub rows: usize,
+}
+
+impl FontGeometry {
+    /// Derives window pixels from cell metrics, grid size, and padding with
+    /// saturating math so huge sizes degrade to clamped pixels, never wrap.
+    pub fn new(
+        cell_width: u32,
+        cell_height: u32,
+        columns: usize,
+        rows: usize,
+        padding_x: u32,
+        padding_y: u32,
+    ) -> Self {
+        let pixel_width = (columns.saturating_mul(cell_width.max(1) as usize))
+            .saturating_add(2 * padding_x as usize)
+            .max(1) as u32;
+        let pixel_height = (rows.saturating_mul(cell_height.max(1) as usize))
+            .saturating_add(2 * padding_y as usize)
+            .max(1) as u32;
+        Self {
+            cell_width: cell_width.max(1),
+            cell_height: cell_height.max(1),
+            pixel_width: pixel_width.max(1),
+            pixel_height,
+            columns,
+            rows,
+        }
+    }
+
+    /// PTY pixel lanes for `TIOCSWINSZ`, saturated into `u16` Linux limits.
+    pub fn pty_pixels(&self) -> (u16, u16) {
+        (
+            u16::try_from(self.pixel_width).unwrap_or(u16::MAX),
+            u16::try_from(self.pixel_height).unwrap_or(u16::MAX),
+        )
+    }
+}
+
+/// Derives how many complete cells fit in an inner (padding-free) window area.
+/// Shared by startup sizing and `ConfigureNotify` handling so both agree.
+pub fn grid_dimensions(
+    inner_width: u32,
+    inner_height: u32,
+    cell_width: u32,
+    cell_height: u32,
+) -> (usize, usize) {
+    let columns = (inner_width / cell_width.max(1)).max(1) as usize;
+    let rows = (inner_height / cell_height.max(1)).max(1) as usize;
+    (columns, rows)
+}
 
 /// Default font family name when no config is present.
 pub const DEFAULT_FONT_FAMILY: &str = "monospace";
@@ -431,6 +560,117 @@ padding_y = 0
         assert_eq!(config.window.lines, 32);
         assert_eq!(config.window.padding_x, 0);
         assert_eq!(config.window.padding_y, 0);
+    }
+
+    #[test]
+    fn runtime_font_size_tracks_configured_and_current() {
+        // Spec sequence: 14 → 13 → 12 → 13 → 14 → … → Ctrl+0.
+        let mut state = RuntimeFontSize::new(14.0);
+        assert_eq!(state.configured(), 14.0);
+        assert_eq!(state.current(), 14.0);
+        assert!(state.shrink());
+        assert_eq!(state.current(), 13.0);
+        assert_eq!(state.configured(), 14.0);
+        assert!(state.shrink());
+        assert_eq!(state.current(), 12.0);
+        assert!(state.grow());
+        assert_eq!(state.current(), 13.0);
+        assert!(state.reset());
+        assert_eq!(state.current(), 14.0);
+        // Reset at the configured size is a no-op.
+        assert!(!state.reset());
+    }
+
+    #[test]
+    fn runtime_font_size_respects_minimum_and_maximum() {
+        // Ctrl+- at minimum remains minimum; Ctrl++ at maximum remains maximum.
+        let mut state = RuntimeFontSize::new(MIN_FONT_SIZE);
+        assert!(!state.shrink());
+        assert_eq!(state.current(), MIN_FONT_SIZE);
+        assert!(state.grow());
+
+        let mut state = RuntimeFontSize::new(MAX_FONT_SIZE);
+        assert!(!state.grow());
+        assert_eq!(state.current(), MAX_FONT_SIZE);
+        assert!(state.shrink());
+
+        // Custom startup size survives the round trip: 18 → 17 → 16 → 17 → 18.
+        let mut state = RuntimeFontSize::new(18.0);
+        assert!(state.shrink());
+        assert_eq!(state.current(), 17.0);
+        assert!(state.shrink());
+        assert_eq!(state.current(), 16.0);
+        assert!(state.grow());
+        assert_eq!(state.current(), 17.0);
+        assert!(state.reset());
+        assert_eq!(state.current(), 18.0);
+
+        // A non-default startup size is its own reset target: 24 → reset → 24.
+        let mut state = RuntimeFontSize::new(24.0);
+        assert!(state.shrink());
+        assert!(state.reset());
+        assert_eq!(state.current(), 24.0);
+    }
+
+    #[test]
+    fn font_geometry_is_single_source_of_truth() {
+        let geometry = FontGeometry::new(9, 20, 120, 32, 0, 0);
+        assert_eq!(geometry.pixel_width, 120 * 9);
+        assert_eq!(geometry.pixel_height, 32 * 20);
+        assert_eq!(geometry.columns, 120);
+        assert_eq!(geometry.rows, 32);
+        let (px, py) = geometry.pty_pixels();
+        assert_eq!((px, py), (120 * 9, 32 * 20));
+
+        let padded = FontGeometry::new(9, 20, 120, 32, 4, 4);
+        assert_eq!(padded.pixel_width, 120 * 9 + 8);
+        assert_eq!(padded.pixel_height, 32 * 20 + 8);
+
+        // Zero cell dimensions degrade to 1px cells, never divide-by-zero.
+        let degenerate = FontGeometry::new(0, 0, 120, 32, 0, 0);
+        assert_eq!((degenerate.cell_width, degenerate.cell_height), (1, 1));
+        assert_eq!((degenerate.pixel_width, degenerate.pixel_height), (120, 32));
+    }
+
+    #[test]
+    fn shared_grid_dimensions_agree_with_geometry() {
+        assert_eq!(grid_dimensions(100, 64, 9, 16), (11, 4));
+        assert_eq!(grid_dimensions(2, 3, 9, 16), (1, 1));
+        let geometry = FontGeometry::new(9, 16, 11, 4, 0, 0);
+        assert_eq!(
+            grid_dimensions(geometry.pixel_width, geometry.pixel_height, 9, 16),
+            (11, 4)
+        );
+    }
+
+    #[test]
+    fn pty_winsize_matches_terminal_grid_from_geometry() {
+        // The same FontGeometry feeds Terminal::resize and the PTY's
+        // TIOCSWINSZ: rows/columns must be identical and the pixel lanes
+        // must carry the window dimensions.
+        for (cell_w, cell_h) in [(8, 17), (9, 20), (17, 34)] {
+            let geometry = FontGeometry::new(cell_w, cell_h, 120, 32, 3, 5);
+            let mut winsize =
+                aterm_core::PtySize::new(geometry.columns, geometry.rows).expect("valid winsize");
+            // Pixel lanes are filled by the font-resize path after PtySize::new.
+            let (px, py) = geometry.pty_pixels();
+            winsize.pixel_width = px;
+            winsize.pixel_height = py;
+            assert_eq!((winsize.columns, winsize.rows), (120, 32));
+            let terminal =
+                aterm_core::Terminal::new(geometry.columns, geometry.rows).expect("grid");
+            assert_eq!(terminal.active_grid().width(), usize::from(winsize.columns));
+            assert_eq!(terminal.active_grid().height(), usize::from(winsize.rows));
+            assert_eq!(
+                (winsize.pixel_width, winsize.pixel_height),
+                (px, py),
+                "pixel lanes follow the padded window size"
+            );
+            assert_eq!(
+                (px, py),
+                ((120 * cell_w + 6) as u16, (32 * cell_h + 10) as u16)
+            );
+        }
     }
 
     #[test]
