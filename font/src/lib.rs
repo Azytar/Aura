@@ -12,6 +12,16 @@ use swash::{
 use unicode_script::{Script, UnicodeScript};
 
 const DEFAULT_ATLAS_SIZE: u32 = 1024;
+const MAX_FALLBACKS: usize = 3;
+
+/// Well-known fallback faces tried in order when the primary face lacks a
+/// glyph: CJK coverage, color emoji, and extra symbols. Each entry is a file
+/// path plus the face index inside that file (collections hold several).
+const FALLBACK_CANDIDATES: &[(&str, usize)] = &[
+    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
+    ("/usr/share/fonts/noto/NotoColorEmoji.ttf", 0),
+    ("/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", 0),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellMetrics {
@@ -29,6 +39,9 @@ pub struct GlyphInfo {
     pub size: [f32; 2],
     pub bearing: [f32; 2],
     pub advance: f32,
+    /// True when the atlas pixels are RGBA8 (color emoji) rather than a
+    /// monochrome mask; the renderer samples a separate color atlas.
+    pub color: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,10 +51,15 @@ pub struct GlyphUpload {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// True when `pixels` holds `width * height` RGBA8 bytes for the color
+    /// atlas instead of `width * height` mask bytes.
+    pub color: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GlyphKey {
+    /// 0 selects the primary face, 1..=MAX_FALLBACKS a fallback face.
+    face: u8,
     identity: GlyphIdentity,
     bold: bool,
     italic: bool,
@@ -65,17 +83,29 @@ struct PositionedMask {
     pixels: Vec<u8>,
 }
 
-/// Owns one font face and rasterizes each glyph key at most once.
+struct FaceData {
+    bytes: Vec<u8>,
+    index: usize,
+}
+
+/// Owns one primary font face plus fallback faces and rasterizes each glyph
+/// key at most once. Cell metrics always come from the primary face; terminal
+/// semantics never depend on which face drew a glyph.
 pub struct Font {
     bytes: Vec<u8>,
     face_index: usize,
+    fallbacks: Vec<FaceData>,
     size: f32,
     metrics: CellMetrics,
     atlas_size: u32,
     atlas: Vec<u8>,
+    color_atlas: Vec<u8>,
     shelf_x: u32,
     shelf_y: u32,
     shelf_height: u32,
+    color_shelf_x: u32,
+    color_shelf_y: u32,
+    color_shelf_height: u32,
     glyphs: HashMap<GlyphKey, (u32, GlyphInfo)>,
     context: ScaleContext,
 }
@@ -144,13 +174,21 @@ impl Font {
         Ok(Self {
             bytes,
             face_index: 0,
+            fallbacks: load_fallbacks(),
             size,
             metrics,
             atlas_size: DEFAULT_ATLAS_SIZE,
             atlas: vec![0; (DEFAULT_ATLAS_SIZE * DEFAULT_ATLAS_SIZE) as usize],
+            color_atlas: vec![
+                0;
+                (DEFAULT_ATLAS_SIZE * DEFAULT_ATLAS_SIZE * 4) as usize
+            ],
             shelf_x: 1,
             shelf_y: 1,
             shelf_height: 0,
+            color_shelf_x: 1,
+            color_shelf_y: 1,
+            color_shelf_height: 0,
             glyphs: HashMap::new(),
             context: ScaleContext::new(),
         })
@@ -165,18 +203,26 @@ impl Font {
     pub fn atlas_pixels(&self) -> &[u8] {
         &self.atlas
     }
+    pub fn color_atlas_pixels(&self) -> &[u8] {
+        &self.color_atlas
+    }
+    /// Number of fallback faces loaded after the primary face.
+    pub fn fallback_count(&self) -> usize {
+        self.fallbacks.len()
+    }
 
     /// Returns a stable atlas index and uploads only on the first lookup.
+    /// Glyphs missing from the primary face fall back to the loaded fallback
+    /// faces; glyphs missing everywhere resolve to an empty entry.
     pub fn glyph(
         &mut self,
         ch: char,
         bold: bool,
         italic: bool,
     ) -> Result<(u32, GlyphInfo, Option<GlyphUpload>), String> {
-        let face =
-            FontRef::from_index(&self.bytes, self.face_index).ok_or("invalid loaded font")?;
-        let glyph_id = face.charmap().map(ch);
+        let (face_id, glyph_id) = self.resolve_face(ch);
         let key = GlyphKey {
+            face: face_id,
             identity: GlyphIdentity::Glyph(glyph_id),
             bold,
             italic,
@@ -185,6 +231,18 @@ impl Font {
             return Ok((index, info, None));
         }
 
+        let face_bytes: &[u8] = if face_id == 0 {
+            &self.bytes
+        } else {
+            &self.fallbacks[face_id as usize - 1].bytes
+        };
+        let loaded_index = if face_id == 0 {
+            self.face_index
+        } else {
+            self.fallbacks[face_id as usize - 1].index
+        };
+        let face =
+            FontRef::from_index(face_bytes, loaded_index).ok_or("invalid loaded font")?;
         let mut scaler = self
             .context
             .builder(face)
@@ -212,6 +270,7 @@ impl Font {
                 size: [0.0; 2],
                 bearing: [0.0; 2],
                 advance: self.metrics.width as f32,
+                color: false,
             };
             let index = self.glyphs.len() as u32;
             self.glyphs.insert(key, (index, info));
@@ -232,28 +291,51 @@ impl Font {
                 size: [0.0; 2],
                 bearing: [0.0; 2],
                 advance,
+                color: false,
             };
             self.glyphs.insert(key, (index, info));
             return Ok((index, info, None));
         }
+        let color = image.content == Content::Color;
+        let bytes_per_pixel = if color { 4 } else { 1 };
         let raster_bytes = (width as usize)
             .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
             .ok_or("rasterized glyph dimensions overflow")?;
-        if image.content != Content::Mask || image.data.len() != raster_bytes {
+        if (!color && image.content != Content::Mask) || image.data.len() != raster_bytes
+        {
             return Err("font rasterizer returned an unsupported glyph format".into());
         }
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
-        let (x, y) = self
-            .allocate(padded_width, padded_height)
-            .ok_or("grayscale glyph atlas is full")?;
+        // A full atlas degrades the glyph to an empty entry instead of
+        // failing the frame: atlas capacity stays bounded while the session
+        // keeps running.
+        let Some((x, y)) = self.allocate_in(padded_width, padded_height, color) else {
+            let info = GlyphInfo {
+                uv_min: [0.0; 2],
+                uv_max: [0.0; 2],
+                size: [0.0; 2],
+                bearing: [0.0; 2],
+                advance,
+                color,
+            };
+            self.glyphs.insert(key, (index, info));
+            return Ok((index, info, None));
+        };
         let x = x + 1;
         let y = y + 1;
+        let row_bytes = width as usize * bytes_per_pixel;
+        let atlas = if color {
+            &mut self.color_atlas
+        } else {
+            &mut self.atlas
+        };
         for row in 0..height {
-            let source = (row * width) as usize;
-            let target = ((y + row) * self.atlas_size + x) as usize;
-            self.atlas[target..target + width as usize]
-                .copy_from_slice(&image.data[source..source + width as usize]);
+            let source = (row as usize) * row_bytes;
+            let target = ((y + row) * self.atlas_size + x) as usize * bytes_per_pixel;
+            atlas[target..target + row_bytes]
+                .copy_from_slice(&image.data[source..source + row_bytes]);
         }
         let info = GlyphInfo {
             uv_min: [
@@ -267,6 +349,7 @@ impl Font {
             size: [width as f32, height as f32],
             bearing: [placement.left as f32, placement.top as f32],
             advance,
+            color,
         };
         self.glyphs.insert(key, (index, info));
         Ok((
@@ -278,8 +361,32 @@ impl Font {
                 width,
                 height,
                 pixels: image.data,
+                color,
             }),
         ))
+    }
+
+    /// Selects the first face whose charmap contains `ch`: the primary face,
+    /// then fallbacks in load order. Returns face 0 with id 0 when no face
+    /// provides the character.
+    fn resolve_face(&self, ch: char) -> (u8, u16) {
+        if let Some(face) = FontRef::from_index(&self.bytes, self.face_index)
+            && face.charmap().map(ch) != 0
+        {
+            return (0, face.charmap().map(ch));
+        }
+        for (position, fallback) in self.fallbacks.iter().enumerate() {
+            if position >= MAX_FALLBACKS {
+                break;
+            }
+            if let Some(face) = FontRef::from_index(&fallback.bytes, fallback.index) {
+                let glyph_id = face.charmap().map(ch);
+                if glyph_id != 0 {
+                    return (position as u8 + 1, glyph_id);
+                }
+            }
+        }
+        (0, 0)
     }
 
     /// Shapes and rasterizes one bounded grapheme as a single atlas entry.
@@ -311,6 +418,7 @@ impl Font {
             return self.glyph(text.chars().next().expect("nonempty text"), bold, italic);
         }
         let key = GlyphKey {
+            face: 0,
             identity: GlyphIdentity::Text {
                 grapheme: text.to_owned(),
                 pre_context: pre_context.to_owned(),
@@ -416,6 +524,7 @@ impl Font {
                 size: [0.0; 2],
                 bearing: [0.0; 2],
                 advance,
+                color: false,
             };
             self.glyphs.insert(key, (index, info));
             return Ok((index, info, None));
@@ -439,9 +548,21 @@ impl Font {
         }
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
-        let (atlas_x, atlas_y) = self
-            .allocate(padded_width, padded_height)
-            .ok_or("grayscale glyph atlas is full")?;
+        // A full atlas degrades the cluster to an empty entry instead of
+        // failing the frame; see `glyph` for the capacity policy.
+        let Some((atlas_x, atlas_y)) = self.allocate_in(padded_width, padded_height, false)
+        else {
+            let info = GlyphInfo {
+                uv_min: [0.0; 2],
+                uv_max: [0.0; 2],
+                size: [0.0; 2],
+                bearing: [0.0; 2],
+                advance,
+                color: false,
+            };
+            self.glyphs.insert(key, (index, info));
+            return Ok((index, info, None));
+        };
         let x = atlas_x + 1;
         let y = atlas_y + 1;
         for row in 0..height {
@@ -462,6 +583,7 @@ impl Font {
             size: [width as f32, height as f32],
             bearing: [left as f32, -top as f32],
             advance,
+            color: false,
         };
         self.glyphs.insert(key, (index, info));
         Ok((
@@ -473,25 +595,38 @@ impl Font {
                 width,
                 height,
                 pixels,
+                color: false,
             }),
         ))
     }
 
-    fn allocate(&mut self, width: u32, height: u32) -> Option<(u32, u32)> {
-        if width > self.atlas_size || height > self.atlas_size {
+    fn allocate_in(&mut self, width: u32, height: u32, color: bool) -> Option<(u32, u32)> {        if width > self.atlas_size || height > self.atlas_size {
             return None;
         }
-        if self.shelf_x + width > self.atlas_size {
-            self.shelf_x = 1;
-            self.shelf_y = self.shelf_y.checked_add(self.shelf_height)?;
-            self.shelf_height = 0;
+        let (shelf_x, shelf_y, shelf_height) = if color {
+            (
+                &mut self.color_shelf_x,
+                &mut self.color_shelf_y,
+                &mut self.color_shelf_height,
+            )
+        } else {
+            (
+                &mut self.shelf_x,
+                &mut self.shelf_y,
+                &mut self.shelf_height,
+            )
+        };
+        if *shelf_x + width > self.atlas_size {
+            *shelf_x = 1;
+            *shelf_y = shelf_y.checked_add(*shelf_height)?;
+            *shelf_height = 0;
         }
-        if self.shelf_y + height > self.atlas_size {
+        if *shelf_y + height > self.atlas_size {
             return None;
         }
-        let result = (self.shelf_x, self.shelf_y);
-        self.shelf_x += width;
-        self.shelf_height = self.shelf_height.max(height);
+        let result = (*shelf_x, *shelf_y);
+        *shelf_x += width;
+        *shelf_height = (*shelf_height).max(height);
         Some(result)
     }
 }
@@ -507,6 +642,28 @@ fn default_font_path() -> Option<PathBuf> {
     .into_iter()
     .map(PathBuf::from)
     .find(|path| path.is_file())
+}
+
+/// Loads existing fallback faces from well-known system paths, in priority
+/// order and bounded by `MAX_FALLBACKS`.
+fn load_fallbacks() -> Vec<FaceData> {
+    let mut faces = Vec::new();
+    for (path, index) in FALLBACK_CANDIDATES {
+        if faces.len() >= MAX_FALLBACKS {
+            break;
+        }
+        let candidate = PathBuf::from(path);
+        let Ok(bytes) = fs::read(&candidate) else {
+            continue;
+        };
+        if FontRef::from_index(&bytes, *index).is_some() {
+            faces.push(FaceData {
+                bytes,
+                index: *index,
+            });
+        }
+    }
+    faces
 }
 
 #[cfg(test)]
@@ -551,5 +708,50 @@ mod tests {
         assert!(Font::requires_contextual_shaping('न'));
         assert!(!Font::requires_contextual_shaping('A'));
         assert!(!Font::requires_contextual_shaping('漢'));
+    }
+
+    #[test]
+    fn fallback_faces_cover_cjk_and_symbols_without_touching_primary_metrics() {
+        let mut font =
+            Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
+        if font.fallback_count() == 0 {
+            eprintln!("no fallback faces installed; skipping CJK coverage check");
+            return;
+        }
+        let metrics = font.metrics();
+        let (id, info, upload) = font.glyph('界', false, false).unwrap();
+        assert!(info.size[0] > 0.0 && info.size[1] > 0.0);
+        assert!(!info.color);
+        let upload = upload.expect("first CJK lookup rasterizes and uploads");
+        assert!(!upload.color);
+        assert_eq!(upload.pixels.len(), (upload.width * upload.height) as usize);
+        // A cache hit reuses the stable index without a second upload.
+        let (cached_id, cached, upload) = font.glyph('界', false, false).unwrap();
+        assert_eq!(cached_id, id);
+        assert_eq!(cached, info);
+        assert!(upload.is_none());
+        // Primary metrics never depend on fallback faces.
+        assert_eq!(font.metrics(), metrics);
+    }
+
+    #[test]
+    fn color_emoji_resolves_to_rgba_uploads_when_present() {
+        let mut font =
+            Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
+        if font.fallback_count() == 0 {
+            eprintln!("no fallback faces installed; skipping emoji coverage check");
+            return;
+        }
+        let (_, info, upload) = font.glyph('😀', false, false).unwrap();
+        let Some(upload) = upload else {
+            eprintln!("emoji face has no raster for U+1F600 on this system");
+            return;
+        };
+        assert!(info.color, "emoji raster must be flagged for the color atlas");
+        assert!(upload.color);
+        assert_eq!(
+            upload.pixels.len(),
+            (upload.width * upload.height * 4) as usize
+        );
     }
 }
