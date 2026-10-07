@@ -123,13 +123,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         libc::EPOLLIN as u32 | libc::EPOLLHUP as u32,
     )?;
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
-    let mapping = connection
-        .get_keyboard_mapping(
-            connection.setup().min_keycode,
-            connection.setup().max_keycode - connection.setup().min_keycode + 1,
-        )?
-        .reply()?;
-    let keysyms_per_keycode = usize::from(mapping.keysyms_per_keycode);
+    let (mut keysyms, mut keysyms_per_keycode) = keyboard_mapping(&connection)?;
     let mut running = true;
     let mut invalidated = false;
     let mut cursor_blink_on = true;
@@ -138,6 +132,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
     let mut buffer = [0u8; 16 * 1024];
+    let mut stats = RenderStats::new();
 
     while running {
         let event_count =
@@ -160,6 +155,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 running = false
                             }
                             Event::DestroyNotify(_) => running = false,
+                            // The server sends this when the keymap changes;
+                            // without a refetch every key would mistranslate.
+                            Event::MappingNotify(_) => {
+                                (keysyms, keysyms_per_keycode) =
+                                    keyboard_mapping(&connection)?;
+                            }
                             Event::ConfigureNotify(configure) => {
                                 resize(
                                     &mut terminal,
@@ -175,7 +176,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Event::KeyPress(key) => {
                                 let sym = key_sym(
                                     &key,
-                                    &mapping.keysyms,
+                                    &keysyms,
                                     keysyms_per_keycode,
                                     connection.setup().min_keycode,
                                 );
@@ -225,7 +226,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 if let Some(bytes) = translate_key(
                                     &key,
-                                    mapping.keysyms.as_slice(),
+                                    keysyms.as_slice(),
                                     keysyms_per_keycode,
                                     connection.setup().min_keycode,
                                     terminal.modes().application_cursor,
@@ -358,6 +359,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     match pty.read(&mut buffer) {
                         Ok(0) => break,
                         Ok(length) => {
+                            stats.add_pty_bytes(length as u64);
                             let replies = terminal.process(&buffer[..length]);
                             for request in terminal.take_clipboard_requests() {
                                 let selection = match request.selection.as_slice() {
@@ -391,7 +393,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         )
                     };
                     cursor_blink_on = !cursor_blink_on;
-                    invalidated = true;
+                    // A hidden or steady cursor needs no blink repaints.
+                    if terminal.modes().cursor_visible && terminal.modes().cursor_blink {
+                        invalidated = true;
+                    }
                 }
                 _ => {}
             }
@@ -402,11 +407,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             invalidated = true;
         }
         if invalidated {
+            let frame_start = std::time::Instant::now();
             renderer
                 .render(&mut terminal, &mut font, cursor_blink_on)
                 .map_err(io::Error::other)?;
+            stats.add_frame(frame_start.elapsed());
             invalidated = false;
         }
+        stats.maybe_report();
         if pty.try_wait()?.is_some() {
             running = false;
         }
@@ -416,6 +424,69 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         libc::close(epoll);
     }
     Ok(())
+}
+
+/// Lightweight render counters reported to stderr every few seconds while
+/// frames are produced. No per-event logging; idle terminals stay silent.
+struct RenderStats {
+    window_start: std::time::Instant,
+    frames: u64,
+    pty_bytes: u64,
+    render_nanos: u128,
+}
+
+impl RenderStats {
+    fn new() -> Self {
+        Self {
+            window_start: std::time::Instant::now(),
+            frames: 0,
+            pty_bytes: 0,
+            render_nanos: 0,
+        }
+    }
+
+    fn add_pty_bytes(&mut self, bytes: u64) {
+        self.pty_bytes = self.pty_bytes.saturating_add(bytes);
+    }
+
+    fn add_frame(&mut self, elapsed: std::time::Duration) {
+        self.frames += 1;
+        self.render_nanos += elapsed.as_nanos();
+    }
+
+    fn maybe_report(&mut self) {
+        if self.window_start.elapsed() < std::time::Duration::from_secs(5) {
+            return;
+        }
+        if self.frames > 0 {
+            let seconds = self.window_start.elapsed().as_secs_f64().max(0.001);
+            eprintln!(
+                "aterm perf: {:.0} frames/s {:.0} KiB/s PTY {:.2} ms/frame",
+                self.frames as f64 / seconds,
+                self.pty_bytes as f64 / 1024.0 / seconds,
+                self.render_nanos as f64 / self.frames as f64 / 1_000_000.0,
+            );
+        }
+        *self = Self::new();
+    }
+}
+
+/// Fetches the full server keymap: symbols per keycode plus the stride.
+/// Called once at startup and again on every mapping notification so layout
+/// switches never leave key translation behind.
+fn keyboard_mapping(
+    connection: &XCBConnection,
+) -> Result<(Vec<u32>, usize), Box<dyn std::error::Error>> {
+    let mapping = connection
+        .get_keyboard_mapping(
+            connection.setup().min_keycode,
+            connection.setup().max_keycode - connection.setup().min_keycode + 1,
+        )?
+        .reply()?;
+    Ok((
+        mapping.keysyms,
+        usize::from(mapping.keysyms_per_keycode),
+    ))
 }
 
 fn arguments() -> Result<(Option<PathBuf>, f32), Box<dyn std::error::Error>> {
