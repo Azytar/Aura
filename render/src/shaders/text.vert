@@ -3,7 +3,7 @@ struct Cell { uint glyph; uint fg; uint bg; uint flags; };
 layout(set = 0, binding = 1, std430) readonly buffer Cells { Cell cells[]; };
 struct Glyph { vec4 uv; vec4 size_bearing; vec4 bearing_advance; };
 layout(set = 0, binding = 2, std430) readonly buffer Glyphs { Glyph glyphs[]; };
-layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; } grid;
+layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; uint cursor_style; } grid;
 layout(location = 0) out vec2 uv;
 layout(location = 1) flat out uint fg;
 layout(location = 2) flat out uint visible;
