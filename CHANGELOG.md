@@ -19,6 +19,19 @@ Release rules going forward:
 A version represents a release, not a commit; versions are not incremented
 per commit.
 
+## [Unreleased]
+
+### Added
+
+- Typed TOML configuration loaded once at startup from `~/.config/aterm/aterm.toml`.
+- Configurable font family and size with validation (4-96 px).
+- Size-aware glyph cache key so each font size rasterizes independently.
+- Atlas invalidation on font geometry changes, preventing stale CPU/GPU metadata.
+- Configurable terminal columns, lines, and padding.
+- Fallback family names loaded on demand when the primary face lacks a glyph.
+- Per-style face overrides parsed from config (bold, italic, bold-italic).
+- Benchmarks for font metrics and glyph cache behavior across sizes.
+
 ## [0.1.0] - 2026-10-06
 
 Initial technical release: a GPU terminal emulator with its own VT stack,

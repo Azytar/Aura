@@ -1,0 +1,59 @@
+# aterm configuration: font selection, sizing, and terminal geometry.
+#
+# This file is optional. When missing, aterm falls back to the documented
+# defaults below. Only override the fields you need.
+
+# ---------------------------------------------------------------------------
+# Font selection
+# ---------------------------------------------------------------------------
+# `family` accepts either a font family name or an explicit filesystem path.
+# When a name is given, aterm searches `/usr/share/fonts` and
+# `/usr/local/share/fonts` for a file whose internal family name or filename
+# stem matches (case-insensitive). An absolute or relative path is used
+# directly, which is the recommended way to select a specific font file.
+#
+# `size` is the rasterization size in typographic pixels. Each distinct size
+# produces its own metrics, glyph atlas, and rasterization. Values are clamped
+# to the 4.0-96.0 range.
+
+[font]
+family = "monospace"
+size = 14.0
+
+# Optional per-style face overrides. When omitted, the primary family is used
+# and the rasterizer applies synthetic bold/italic transformations.
+
+# [font.bold]
+# family = "Iosevka"
+# style = "Bold"
+
+# [font.italic]
+# family = "Iosevka"
+# style = "Italic"
+
+# [font.bold_italic]
+# family = "Iosevka"
+# style = "Bold Italic"
+
+# Optional fallback family names, tried in order when the primary face lacks
+# a glyph. Only families installed on the system are loaded.
+#
+# [font.fallback]
+# families = [
+#     "Noto Sans CJK",
+#     "Noto Color Emoji",
+# ]
+
+# ---------------------------------------------------------------------------
+# Terminal geometry
+# ---------------------------------------------------------------------------
+# `columns` and `lines` are the initial terminal grid size in cells.
+# `padding_x` and `padding_y` add extra pixels around the grid inside the
+# window. Padding does not change the number of cells; it only affects the
+# outer window dimensions.
+
+[window]
+columns = 120
+lines = 32
+padding_x = 0
+padding_y = 0
