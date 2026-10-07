@@ -59,6 +59,7 @@ fn push_cursor_style(style: aterm_core::CursorStyle) -> u32 {
 
 /// First and one-past-end cell rows of the underline decoration.
 /// Mirrors the `thick` computation in the background shader.
+#[cfg(test)]
 fn underline_rows(cell_height: u32) -> (u32, u32) {
     let thick = (cell_height >> 4).max(1);
     (cell_height - thick, cell_height)
@@ -66,6 +67,7 @@ fn underline_rows(cell_height: u32) -> (u32, u32) {
 
 /// First and one-past-end cell rows of the strikethrough decoration.
 /// Mirrors the background shader centering.
+#[cfg(test)]
 fn strikethrough_rows(cell_height: u32) -> (u32, u32) {
     let thick = (cell_height >> 4).max(1);
     let start = cell_height / 2 - thick / 2;
@@ -73,6 +75,7 @@ fn strikethrough_rows(cell_height: u32) -> (u32, u32) {
 }
 
 /// Pixel span of thin (bar/underline) cursors. Mirrors the background shader.
+#[cfg(test)]
 fn cursor_span(cell_extent: u32) -> u32 {
     2 * (cell_extent >> 4).max(1)
 }
@@ -122,6 +125,8 @@ struct FrameSetup<'a> {
     layout: vk::DescriptorSetLayout,
     atlas_view: vk::ImageView,
     sampler: vk::Sampler,
+    color_atlas_view: vk::ImageView,
+    color_sampler: vk::Sampler,
 }
 
 struct AtlasUploadContext<'a> {
@@ -172,11 +177,16 @@ pub struct Renderer {
     atlas_memory: vk::DeviceMemory,
     atlas_view: vk::ImageView,
     atlas_sampler: vk::Sampler,
+    color_atlas: vk::Image,
+    color_atlas_memory: vk::DeviceMemory,
+    color_atlas_view: vk::ImageView,
+    color_atlas_sampler: vk::Sampler,
     frames: Vec<Frame>,
     frame_index: usize,
     gpu_cells: Vec<GpuCell>,
     gpu_glyphs: Vec<GpuGlyph>,
     uploaded_atlas: bool,
+    uploaded_color_atlas: bool,
     pending_glyph_uploads: Vec<GlyphUpload>,
     glyphs_dirty: bool,
     grid_size: Option<(usize, usize)>,
@@ -199,12 +209,17 @@ pub struct OffscreenRenderer {
     atlas_memory: vk::DeviceMemory,
     atlas_view: vk::ImageView,
     atlas_sampler: vk::Sampler,
+    color_atlas: vk::Image,
+    color_atlas_memory: vk::DeviceMemory,
+    color_atlas_view: vk::ImageView,
+    color_atlas_sampler: vk::Sampler,
     target: vk::Image,
     target_memory: vk::DeviceMemory,
     target_view: vk::ImageView,
     extent: vk::Extent2D,
     frames: Vec<Frame>,
     atlas_uploaded: bool,
+    color_uploaded: bool,
     show_cursor: bool,
 }
 
@@ -273,7 +288,9 @@ impl OffscreenRenderer {
             true,
         )?;
         let (atlas, atlas_memory, atlas_view, atlas_sampler) =
-            create_atlas(&instance, &device, physical)?;
+            create_atlas(&instance, &device, physical, vk::Format::R8_UNORM)?;
+        let (color_atlas, color_atlas_memory, color_atlas_view, color_atlas_sampler) =
+            create_atlas(&instance, &device, physical, vk::Format::R8G8B8A8_UNORM)?;
         let (target, target_memory, target_view) =
             create_offscreen_target(&instance, &device, physical, width, height)?;
         let descriptor_pool = create_descriptor_pool(&device)?;
@@ -286,6 +303,8 @@ impl OffscreenRenderer {
             layout: descriptor_layout,
             atlas_view,
             sampler: atlas_sampler,
+            color_atlas_view,
+            color_sampler: color_atlas_sampler,
         })?;
         Ok(Self {
             _entry: entry,
@@ -303,12 +322,17 @@ impl OffscreenRenderer {
             atlas_memory,
             atlas_view,
             atlas_sampler,
+            color_atlas,
+            color_atlas_memory,
+            color_atlas_view,
+            color_atlas_sampler,
             target,
             target_memory,
             target_view,
             extent: vk::Extent2D { width, height },
             frames,
             atlas_uploaded: false,
+            color_uploaded: false,
             show_cursor: false,
         })
     }
@@ -381,7 +405,14 @@ impl OffscreenRenderer {
                         info.uv_max[1],
                     ],
                     size_bearing: [info.size[0], info.size[1], info.bearing[0], info.bearing[1]],
-                    bearing_advance: [info.bearing[0], info.bearing[1], info.advance, 0.0],
+                    // The padding lane carries the color-atlas selector the
+                    // text shader reads; the std430 layout is unchanged.
+                    bearing_advance: [
+                        info.bearing[0],
+                        info.bearing[1],
+                        info.advance,
+                        u32::from(info.color) as f32,
+                    ],
                 };
                 // Grow the glyph table without truncating entries that earlier
                 // cells in this frame already recorded; `resize` would shrink it
@@ -424,21 +455,55 @@ impl OffscreenRenderer {
                     atlas: self.atlas,
                 },
                 font.atlas_pixels(),
+                false,
             )?;
-            self.atlas_uploaded = true;
-        } else if !uploads.is_empty() {
-            upload_atlas_regions(
+            upload_offscreen_atlas(
                 AtlasUploadContext {
                     instance: &self.instance,
                     device: &self.device,
                     physical: self.physical,
                     queue: self.queue,
                     queue_family: self.queue_family,
-                    atlas: self.atlas,
+                    atlas: self.color_atlas,
                 },
-                &uploads,
+                font.color_atlas_pixels(),
                 true,
             )?;
+            self.atlas_uploaded = true;
+            self.color_uploaded = true;
+        } else if !uploads.is_empty() {
+            // Monochrome and color uploads target different atlas images.
+            let (color_uploads, mask_uploads): (Vec<GlyphUpload>, Vec<GlyphUpload>) =
+                uploads.into_iter().partition(|upload| upload.color);
+            if !mask_uploads.is_empty() {
+                upload_atlas_regions(
+                    AtlasUploadContext {
+                        instance: &self.instance,
+                        device: &self.device,
+                        physical: self.physical,
+                        queue: self.queue,
+                        queue_family: self.queue_family,
+                        atlas: self.atlas,
+                    },
+                    &mask_uploads,
+                    true,
+                )?;
+            }
+            if !color_uploads.is_empty() {
+                upload_atlas_regions(
+                    AtlasUploadContext {
+                        instance: &self.instance,
+                        device: &self.device,
+                        physical: self.physical,
+                        queue: self.queue,
+                        queue_family: self.queue_family,
+                        atlas: self.color_atlas,
+                    },
+                    &color_uploads,
+                    self.color_uploaded,
+                )?;
+                self.color_uploaded = true;
+            }
         }
         let readback = create_buffer(
             &self.instance,
@@ -582,7 +647,9 @@ impl Renderer {
             true,
         )?;
         let (atlas, atlas_memory, atlas_view, atlas_sampler) =
-            create_atlas(&instance, &device, physical)?;
+            create_atlas(&instance, &device, physical, vk::Format::R8_UNORM)?;
+        let (color_atlas, color_atlas_memory, color_atlas_view, color_atlas_sampler) =
+            create_atlas(&instance, &device, physical, vk::Format::R8G8B8A8_UNORM)?;
         let descriptor_pool = create_descriptor_pool(&device)?;
         let frames = create_frames(FrameSetup {
             instance: &instance,
@@ -593,6 +660,8 @@ impl Renderer {
             layout: descriptor_layout,
             atlas_view,
             sampler: atlas_sampler,
+            color_atlas_view,
+            color_sampler: color_atlas_sampler,
         })?;
         let present_ready = create_present_semaphores(&device, swap.images.len())?;
         Ok(Self {
@@ -620,11 +689,16 @@ impl Renderer {
             atlas_memory,
             atlas_view,
             atlas_sampler,
+            color_atlas,
+            color_atlas_memory,
+            color_atlas_view,
+            color_atlas_sampler,
             frames,
             frame_index: 0,
             gpu_cells: Vec::new(),
             gpu_glyphs: vec![GpuGlyph::zeroed()],
             uploaded_atlas: false,
+            uploaded_color_atlas: false,
             pending_glyph_uploads: Vec::new(),
             glyphs_dirty: false,
             grid_size: None,
@@ -708,12 +782,40 @@ impl Renderer {
             self.glyphs_dirty = false;
         }
         if !self.uploaded_atlas {
-            self.upload_atlas(Some(font.atlas_pixels()), &[])?;
+            self.upload_atlas(
+                self.atlas,
+                false,
+                Some(font.atlas_pixels()),
+                &[],
+                false,
+            )?;
+            self.upload_atlas(
+                self.color_atlas,
+                false,
+                Some(font.color_atlas_pixels()),
+                &[],
+                true,
+            )?;
             self.uploaded_atlas = true;
+            self.uploaded_color_atlas = true;
             self.pending_glyph_uploads.clear();
         } else if !self.pending_glyph_uploads.is_empty() {
-            self.upload_atlas(None, &self.pending_glyph_uploads)?;
-            self.pending_glyph_uploads.clear();
+            let pending = std::mem::take(&mut self.pending_glyph_uploads);
+            let (color_uploads, mask_uploads): (Vec<GlyphUpload>, Vec<GlyphUpload>) =
+                pending.into_iter().partition(|upload| upload.color);
+            if !mask_uploads.is_empty() {
+                self.upload_atlas(self.atlas, true, None, &mask_uploads, false)?;
+            }
+            if !color_uploads.is_empty() {
+                self.upload_atlas(
+                    self.color_atlas,
+                    self.uploaded_color_atlas,
+                    None,
+                    &color_uploads,
+                    true,
+                )?;
+                self.uploaded_color_atlas = true;
+            }
         }
         let frame = &mut self.frames[frame_index];
         unsafe { self.device.reset_fences(&[frame.fence]) }
@@ -923,7 +1025,14 @@ impl Renderer {
                 info.uv_max[1],
             ],
             size_bearing: [info.size[0], info.size[1], info.bearing[0], info.bearing[1]],
-            bearing_advance: [info.bearing[0], info.bearing[1], info.advance, 0.0],
+            // The padding lane carries the color-atlas selector the text
+            // shader reads; the std430 layout is unchanged.
+            bearing_advance: [
+                info.bearing[0],
+                info.bearing[1],
+                info.advance,
+                u32::from(info.color) as f32,
+            ],
         };
         if glyph as usize >= old_length || self.gpu_glyphs[glyph as usize] != metadata {
             self.glyphs_dirty = true;
@@ -937,10 +1046,16 @@ impl Renderer {
         })
     }
 
+    /// Uploads one atlas image: either a full replacement or incremental
+    /// glyph regions. `color` selects RGBA8 validation for the color atlas;
+    /// monochrome uploads use one byte per pixel.
     fn upload_atlas(
         &self,
+        image: vk::Image,
+        initialized: bool,
         full_atlas: Option<&[u8]>,
         uploads: &[GlyphUpload],
+        color: bool,
     ) -> Result<(), String> {
         let mut staging_data = Vec::new();
         let mut regions = Vec::new();
@@ -960,11 +1075,14 @@ impl Renderer {
                     }),
             );
         } else {
+            let bytes_per_pixel = if color { 4 } else { 1 };
             for upload in uploads {
                 let expected = (upload.width as usize)
                     .checked_mul(upload.height as usize)
+                    .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
                     .ok_or("glyph upload dimensions overflow")?;
-                if upload.pixels.len() != expected
+                if upload.color != color
+                    || upload.pixels.len() != expected
                     || upload
                         .x
                         .checked_add(upload.width)
@@ -1035,25 +1153,25 @@ impl Renderer {
         unsafe { self.device.begin_command_buffer(command, &begin) }
             .map_err(vk_error("begin atlas upload"))?;
         let to_transfer = [vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(if self.uploaded_atlas {
+            .src_stage_mask(if initialized {
                 vk::PipelineStageFlags2::FRAGMENT_SHADER
             } else {
                 vk::PipelineStageFlags2::NONE
             })
-            .src_access_mask(if self.uploaded_atlas {
+            .src_access_mask(if initialized {
                 vk::AccessFlags2::SHADER_SAMPLED_READ
             } else {
                 vk::AccessFlags2::NONE
             })
             .dst_stage_mask(vk::PipelineStageFlags2::COPY)
             .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .old_layout(if self.uploaded_atlas {
+            .old_layout(if initialized {
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
             } else {
                 vk::ImageLayout::UNDEFINED
             })
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .image(self.atlas)
+            .image(image)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1066,7 +1184,7 @@ impl Renderer {
             self.device.cmd_copy_buffer_to_image(
                 command,
                 staging.handle,
-                self.atlas,
+                image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &regions,
             )
@@ -1078,7 +1196,7 @@ impl Renderer {
             .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(self.atlas)
+            .image(image)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1128,6 +1246,12 @@ impl Drop for OffscreenRenderer {
             self.device.destroy_image_view(self.atlas_view, None);
             self.device.destroy_image(self.atlas, None);
             self.device.free_memory(self.atlas_memory, None);
+            self.device
+                .destroy_sampler(self.color_atlas_sampler, None);
+            self.device
+                .destroy_image_view(self.color_atlas_view, None);
+            self.device.destroy_image(self.color_atlas, None);
+            self.device.free_memory(self.color_atlas_memory, None);
             self.device.destroy_image_view(self.target_view, None);
             self.device.destroy_image(self.target, None);
             self.device.free_memory(self.target_memory, None);
@@ -1216,8 +1340,14 @@ fn create_offscreen_target(
     Ok((image, memory, view))
 }
 
-fn upload_offscreen_atlas(context: AtlasUploadContext<'_>, pixels: &[u8]) -> Result<(), String> {
-    if pixels.len() != (ATLAS_SIZE * ATLAS_SIZE) as usize {
+fn upload_offscreen_atlas(
+    context: AtlasUploadContext<'_>,
+    pixels: &[u8],
+    color: bool,
+) -> Result<(), String> {
+    let bytes_per_pixel = if color { 4 } else { 1 };
+    let expected = (ATLAS_SIZE * ATLAS_SIZE) as usize * bytes_per_pixel;
+    if pixels.len() != expected {
         return Err("font atlas byte count does not match the Vulkan atlas extent".into());
     }
     let upload = GlyphUpload {
@@ -1226,6 +1356,7 @@ fn upload_offscreen_atlas(context: AtlasUploadContext<'_>, pixels: &[u8]) -> Res
         width: ATLAS_SIZE,
         height: ATLAS_SIZE,
         pixels: pixels.to_vec(),
+        color,
     };
     upload_atlas_regions(context, &[upload], false)
 }
@@ -1246,8 +1377,10 @@ fn upload_atlas_regions(
     let mut data = Vec::new();
     let mut regions = Vec::with_capacity(uploads.len());
     for upload in uploads {
+        let bytes_per_pixel = if upload.color { 4 } else { 1 };
         let expected = (upload.width as usize)
             .checked_mul(upload.height as usize)
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
             .ok_or("atlas upload dimensions overflow")?;
         if upload.width == 0
             || upload.height == 0
@@ -1261,7 +1394,7 @@ fn upload_atlas_regions(
                 .checked_add(upload.height)
                 .is_none_or(|bottom| bottom > ATLAS_SIZE)
         {
-            return Err("glyph upload is outside the grayscale atlas".into());
+            return Err("glyph upload is outside the glyph atlas".into());
         }
         let offset = data.len().checked_add(3).ok_or("atlas offset overflow")? & !3;
         data.resize(offset, 0);
@@ -1421,6 +1554,12 @@ impl Drop for Renderer {
             self.device.destroy_image_view(self.atlas_view, None);
             self.device.destroy_image(self.atlas, None);
             self.device.free_memory(self.atlas_memory, None);
+            self.device
+                .destroy_sampler(self.color_atlas_sampler, None);
+            self.device
+                .destroy_image_view(self.color_atlas_view, None);
+            self.device.destroy_image(self.color_atlas, None);
+            self.device.free_memory(self.color_atlas_memory, None);
             for view in self.image_views.drain(..) {
                 self.device.destroy_image_view(view, None);
             }
@@ -1574,6 +1713,11 @@ fn create_descriptor_layout(device: &Device) -> Result<vk::DescriptorSetLayout, 
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(4)
+            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
     ];
     let info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
     unsafe { device.create_descriptor_set_layout(&info, None) }
@@ -1680,7 +1824,7 @@ fn create_descriptor_pool(device: &Device) -> Result<vk::DescriptorPool, String>
         },
         vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            descriptor_count: FRAMES as u32,
+            descriptor_count: (FRAMES * 2) as u32,
         },
     ];
     let info = vk::DescriptorPoolCreateInfo::default()
@@ -1713,6 +1857,8 @@ fn create_frames(setup: FrameSetup<'_>) -> Result<Vec<Frame>, String> {
         layout,
         atlas_view,
         sampler,
+        color_atlas_view,
+        color_sampler,
     } = setup;
     let layouts = [layout; FRAMES];
     let allocation = vk::DescriptorSetAllocateInfo::default()
@@ -1767,6 +1913,10 @@ fn create_frames(setup: FrameSetup<'_>) -> Result<Vec<Frame>, String> {
             .sampler(sampler)
             .image_view(atlas_view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+        let color_image_info = [vk::DescriptorImageInfo::default()
+            .sampler(color_sampler)
+            .image_view(color_atlas_view)
+            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
         let writes = [
             vk::WriteDescriptorSet::default()
                 .dst_set(set)
@@ -1783,6 +1933,11 @@ fn create_frames(setup: FrameSetup<'_>) -> Result<Vec<Frame>, String> {
                 .dst_binding(3)
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .image_info(&image_info),
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(4)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&color_image_info),
         ];
         unsafe { device.update_descriptor_sets(&writes, &[]) };
         frames.push(Frame {
@@ -1804,10 +1959,11 @@ fn create_atlas(
     instance: &Instance,
     device: &Device,
     physical: vk::PhysicalDevice,
+    format: vk::Format,
 ) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView, vk::Sampler), String> {
     let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
-        .format(vk::Format::R8_UNORM)
+        .format(format)
         .extent(vk::Extent3D {
             width: ATLAS_SIZE,
             height: ATLAS_SIZE,
@@ -1839,7 +1995,7 @@ fn create_atlas(
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
-        .format(vk::Format::R8_UNORM)
+        .format(format)
         .subresource_range(
             vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
