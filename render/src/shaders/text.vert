@@ -7,6 +7,7 @@ layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; flo
 layout(location = 0) out vec2 uv;
 layout(location = 1) flat out uint fg;
 layout(location = 2) flat out uint visible;
+layout(location = 3) flat out uint color_flag;
 void main() {
     uint index = gl_InstanceIndex;
     uint col = index % grid.cols;
@@ -23,5 +24,6 @@ void main() {
                        pixel.y * 2.0 / (float(grid.rows) * grid.cell_height) - 1.0, 0.0, 1.0);
     uv = mix(glyph.uv.xy, glyph.uv.zw, corner);
     fg = (cell.flags & 64u) != 0u ? cell.bg : cell.fg;
+    color_flag = uint(glyph.bearing_advance.w + 0.5);
     if (grid.cursor_visible != 0u && index == grid.cursor) fg = (cell.flags & 64u) != 0u ? cell.fg : cell.bg;
 }

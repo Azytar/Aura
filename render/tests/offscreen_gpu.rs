@@ -125,6 +125,38 @@ fn underline_and_strikethrough_paint_foreground_rows() {
 
 #[test]
 #[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn color_emoji_samples_the_color_atlas() {
+    // A color glyph must paint non-background texels through the RGBA path;
+    // a monochrome-only pipeline would leave the cell background.
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    let metrics = font.metrics();
+    if font.fallback_count() == 0 {
+        eprintln!("no fallback faces installed; skipping color atlas check");
+        return;
+    }
+    let (_, info, _) = font.glyph('😀', false, false).unwrap();
+    if !info.color {
+        eprintln!("emoji face has no color raster on this system");
+        return;
+    }
+    let mut terminal = Terminal::new(1, 1).expect("create terminal grid");
+    terminal.process("😀".as_bytes());
+    let mut renderer = OffscreenRenderer::new(metrics.width, metrics.height)
+        .expect("create offscreen renderer");
+    let pixels = renderer
+        .render(&mut terminal, &mut font)
+        .expect("draw terminal and read back pixels");
+    let painted = pixels.chunks_exact(4).any(|rgba| {
+        rgba[0] != 24 || rgba[1] != 24 || rgba[2] != 24
+    });
+    assert!(
+        painted,
+        "color emoji cell must contain non-background pixels",
+    );
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn cursor_shapes_invert_expected_regions() {
     // A cursor on a space cell inverts exactly the shape region and leaves
     // the rest of the cell background.
