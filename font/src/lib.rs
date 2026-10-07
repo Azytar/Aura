@@ -90,11 +90,13 @@ struct FaceData {
 
 /// Owns one primary font face plus fallback faces and rasterizes each glyph
 /// key at most once. Cell metrics always come from the primary face; terminal
-/// semantics never depend on which face drew a glyph.
+/// semantics never depend on which face drew a glyph. Fallback faces load on
+/// the first primary miss so plain sessions never pay their cost.
 pub struct Font {
     bytes: Vec<u8>,
     face_index: usize,
     fallbacks: Vec<FaceData>,
+    fallbacks_loaded: bool,
     size: f32,
     metrics: CellMetrics,
     atlas_size: u32,
@@ -174,7 +176,8 @@ impl Font {
         Ok(Self {
             bytes,
             face_index: 0,
-            fallbacks: load_fallbacks(),
+            fallbacks: Vec::new(),
+            fallbacks_loaded: false,
             size,
             metrics,
             atlas_size: DEFAULT_ATLAS_SIZE,
@@ -206,8 +209,9 @@ impl Font {
     pub fn color_atlas_pixels(&self) -> &[u8] {
         &self.color_atlas
     }
-    /// Number of fallback faces loaded after the primary face.
-    pub fn fallback_count(&self) -> usize {
+    /// Number of fallback faces loaded so far (zero until the first primary
+    /// miss triggers on-demand loading).
+    pub const fn fallback_count(&self) -> usize {
         self.fallbacks.len()
     }
 
@@ -368,13 +372,17 @@ impl Font {
     }
 
     /// Selects the first face whose charmap contains `ch`: the primary face,
-    /// then fallbacks in load order. Returns face 0 with id 0 when no face
-    /// provides the character.
-    fn resolve_face(&self, ch: char) -> (u8, u16) {
+    /// then fallbacks in load order. Fallback files load on the first primary
+    /// miss. Returns face 0 with id 0 when no face provides the character.
+    fn resolve_face(&mut self, ch: char) -> (u8, u16) {
         if let Some(face) = FontRef::from_index(&self.bytes, self.face_index)
             && face.charmap().map(ch) != 0
         {
             return (0, face.charmap().map(ch));
+        }
+        if !self.fallbacks_loaded {
+            self.fallbacks = load_fallbacks();
+            self.fallbacks_loaded = true;
         }
         for (position, fallback) in self.fallbacks.iter().enumerate() {
             if position >= MAX_FALLBACKS {
@@ -716,12 +724,13 @@ mod tests {
     fn fallback_faces_cover_cjk_and_symbols_without_touching_primary_metrics() {
         let mut font =
             Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
+        assert_eq!(font.fallback_count(), 0, "fallbacks stay unloaded until a miss");
+        let metrics = font.metrics();
+        let (id, info, upload) = font.glyph('界', false, false).unwrap();
         if font.fallback_count() == 0 {
             eprintln!("no fallback faces installed; skipping CJK coverage check");
             return;
         }
-        let metrics = font.metrics();
-        let (id, info, upload) = font.glyph('界', false, false).unwrap();
         assert!(info.size[0] > 0.0 && info.size[1] > 0.0);
         assert!(!info.color);
         let upload = upload.expect("first CJK lookup rasterizes and uploads");
@@ -740,11 +749,11 @@ mod tests {
     fn color_emoji_resolves_to_rgba_uploads_when_present() {
         let mut font =
             Font::load(None, 14.0).expect("Linux test environment provides a monospace font");
+        let (_, info, upload) = font.glyph('😀', false, false).unwrap();
         if font.fallback_count() == 0 {
             eprintln!("no fallback faces installed; skipping emoji coverage check");
             return;
         }
-        let (_, info, upload) = font.glyph('😀', false, false).unwrap();
         let Some(upload) = upload else {
             eprintln!("emoji face has no raster for U+1F600 on this system");
             return;
