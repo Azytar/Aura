@@ -2,7 +2,7 @@
 layout(location = 0) out vec4 color;
 struct Cell { uint glyph; uint fg; uint bg; uint flags; };
 layout(set = 0, binding = 1, std430) readonly buffer Cells { Cell cells[]; };
-layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; } grid;
+layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; uint cursor_style; } grid;
 vec4 unpack_color(uint c) { return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), 255.0) / 255.0; }
 void main() {
     uvec2 p = uvec2(gl_FragCoord.xy);
@@ -16,6 +16,19 @@ void main() {
     if (grid.selection_start != 0xffffffffu && index >= grid.selection_start && index <= grid.selection_end) {
         bg = 0x00406090u;
     }
-    if (grid.cursor_visible != 0u && index == grid.cursor) bg = fg;
+    uint ch = uint(grid.cell_height);
+    // Mirrors underline_rows/strikethrough_rows/cursor_span in the renderer:
+    // one decoration row per 16 cell rows, at least one; thin cursors are double.
+    uint thick = max(ch >> 4u, 1u);
+    bool is_cursor = grid.cursor_visible != 0u && index == grid.cursor;
+    if (is_cursor && grid.cursor_style == 0u) bg = fg;
     color = unpack_color(bg);
+    float local_y = float(p.y) - float(row) * grid.cell_height;
+    float local_x = float(p.x) - float(col) * grid.cell_width;
+    bool paint = false;
+    if ((cell.flags & 16u) != 0u && local_y >= float(ch - thick)) paint = true;
+    if ((cell.flags & 32u) != 0u && local_y >= float(ch / 2u - thick / 2u) && local_y < float(ch / 2u - thick / 2u + thick)) paint = true;
+    if (is_cursor && grid.cursor_style == 1u && local_y >= float(ch - 2u * thick)) paint = true;
+    if (is_cursor && grid.cursor_style == 2u && local_x < float(2u * thick)) paint = true;
+    if (paint) color = vec4(unpack_color(fg).rgb, 1.0);
 }

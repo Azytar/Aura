@@ -73,3 +73,115 @@ fn glyph_cache_hits_keep_later_table_entries() {
     );
     assert!(cell_bright(2), "second A cell renders glyph pixels");
 }
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn underline_and_strikethrough_paint_foreground_rows() {
+    // Spaces isolate decorations from glyph pixels: the bottom row of an
+    // underlined cell and the middle row of a struck cell must carry the
+    // foreground color while plain cells stay background.
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    let metrics = font.metrics();
+    let height = metrics.height;
+    let mut terminal = Terminal::new(3, 1).expect("create terminal grid");
+    terminal.process(b"\x1b[4m \x1b[24m \x1b[9m ");
+    let mut renderer = OffscreenRenderer::new(metrics.width * 3, height)
+        .expect("create offscreen renderer");
+    let pixels = renderer
+        .render(&mut terminal, &mut font)
+        .expect("draw terminal and read back pixels");
+    let pixel = |column: u32, y: u32| {
+        let index = ((y * metrics.width * 3 + column * metrics.width) * 4) as usize;
+        &pixels[index..index + 4]
+    };
+    let foreground = [216, 216, 216, 255];
+    let background = [24, 24, 24, 255];
+    assert_eq!(
+        pixel(0, height - 1),
+        &foreground,
+        "underlined cell paints its bottom row",
+    );
+    assert_eq!(
+        pixel(0, 0),
+        &background,
+        "underlined cell keeps its top row background",
+    );
+    assert_eq!(
+        pixel(1, height - 1),
+        &background,
+        "plain cell has no underline row",
+    );
+    assert_eq!(
+        pixel(2, height / 2),
+        &foreground,
+        "struck cell paints its middle row",
+    );
+    assert_eq!(
+        pixel(2, height - 1),
+        &background,
+        "struck cell has no underline row",
+    );
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn cursor_shapes_invert_expected_regions() {
+    // A cursor on a space cell inverts exactly the shape region and leaves
+    // the rest of the cell background.
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    let metrics = font.metrics();
+    let (width, height) = (metrics.width, metrics.height);
+    let foreground = [216, 216, 216, 255];
+    let background = [24, 24, 24, 255];
+    for (sequence, check) in [
+        ("\x1b[2 q", "block"),
+        ("\x1b[4 q", "underline"),
+        ("\x1b[6 q", "bar"),
+    ] {
+        let mut terminal = Terminal::new(1, 1).expect("create terminal grid");
+        terminal.process(b" ");
+        terminal.process(b"\r");
+        terminal.process(sequence.as_bytes());
+        let mut renderer =
+            OffscreenRenderer::new(width, height).expect("create offscreen renderer");
+        renderer.set_show_cursor(true);
+        let pixels = renderer
+            .render(&mut terminal, &mut font)
+            .expect("draw terminal and read back pixels");
+        let pixel = |x: u32, y: u32| {
+            let index = ((y * width + x) * 4) as usize;
+            &pixels[index..index + 4]
+        };
+        match check {
+            "block" => {
+                assert_eq!(pixel(0, 0), &foreground, "block cursor inverts cell");
+                assert_eq!(
+                    pixel(width - 1, height - 1),
+                    &foreground,
+                    "block cursor covers the cell corner",
+                );
+            }
+            "underline" => {
+                assert_eq!(
+                    pixel(0, height - 1),
+                    &foreground,
+                    "underline cursor paints the bottom row",
+                );
+                assert_eq!(
+                    pixel(0, 0),
+                    &background,
+                    "underline cursor keeps the top row",
+                );
+            }
+            "bar" => {
+                assert_eq!(pixel(0, 0), &foreground, "bar cursor paints the left edge");
+                assert_eq!(
+                    pixel(width - 1, 0),
+                    &background,
+                    "bar cursor keeps the right edge",
+                );
+            }
+            _ => unreachable!("cursor shape matrix covers block, underline, and bar"),
+        }
+    }
+}

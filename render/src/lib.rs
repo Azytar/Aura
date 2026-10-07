@@ -45,6 +45,36 @@ struct PushGrid {
     cursor_visible: u32,
     selection_start: u32,
     selection_end: u32,
+    cursor_style: u32,
+}
+
+/// Maps a DECSCUSR cursor shape to the push-constant encoding.
+fn push_cursor_style(style: aterm_core::CursorStyle) -> u32 {
+    match style {
+        aterm_core::CursorStyle::Block => 0,
+        aterm_core::CursorStyle::Underline => 1,
+        aterm_core::CursorStyle::Bar => 2,
+    }
+}
+
+/// First and one-past-end cell rows of the underline decoration.
+/// Mirrors the `thick` computation in the background shader.
+fn underline_rows(cell_height: u32) -> (u32, u32) {
+    let thick = (cell_height >> 4).max(1);
+    (cell_height - thick, cell_height)
+}
+
+/// First and one-past-end cell rows of the strikethrough decoration.
+/// Mirrors the background shader centering.
+fn strikethrough_rows(cell_height: u32) -> (u32, u32) {
+    let thick = (cell_height >> 4).max(1);
+    let start = cell_height / 2 - thick / 2;
+    (start, start + thick)
+}
+
+/// Pixel span of thin (bar/underline) cursors. Mirrors the background shader.
+fn cursor_span(cell_extent: u32) -> u32 {
+    2 * (cell_extent >> 4).max(1)
 }
 
 struct Buffer {
@@ -175,6 +205,7 @@ pub struct OffscreenRenderer {
     extent: vk::Extent2D,
     frames: Vec<Frame>,
     atlas_uploaded: bool,
+    show_cursor: bool,
 }
 
 impl OffscreenRenderer {
@@ -278,7 +309,13 @@ impl OffscreenRenderer {
             extent: vk::Extent2D { width, height },
             frames,
             atlas_uploaded: false,
+            show_cursor: false,
         })
+    }
+
+    /// Enables the terminal cursor in snapshots; snapshots hide it by default.
+    pub const fn set_show_cursor(&mut self, show: bool) {
+        self.show_cursor = show;
     }
 
     /// Renders the current viewport and returns tightly packed RGBA8 pixels.
@@ -418,9 +455,12 @@ impl OffscreenRenderer {
             cell_height: metrics.height as f32,
             ascent: metrics.ascent as f32,
             cursor: (terminal.cursor().row * cols + terminal.cursor().column) as u32,
-            cursor_visible: 0,
+            cursor_visible: u32::from(
+                self.show_cursor && terminal.modes().cursor_visible
+            ),
             selection_start: u32::MAX,
             selection_end: u32::MAX,
+            cursor_style: push_cursor_style(terminal.modes().cursor_style),
         };
         record_frame(
             &self.device,
@@ -714,7 +754,7 @@ impl Renderer {
             cursor: (terminal.cursor().row * width + terminal.cursor().column) as u32,
             cursor_visible: u32::from(
                 terminal.modes().cursor_visible
-                    && cursor_blink_on
+                    && (!terminal.modes().cursor_blink || cursor_blink_on)
                     && terminal.viewport_offset() == 0,
             ),
             selection_start: terminal
@@ -723,6 +763,7 @@ impl Renderer {
             selection_end: terminal
                 .selection_cell_range()
                 .map_or(u32::MAX, |range| range.1),
+            cursor_style: push_cursor_style(terminal.modes().cursor_style),
         };
         record_frame(
             &self.device,
@@ -2103,7 +2144,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
         assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
-        assert_eq!(size_of::<PushGrid>(), 36);
+        assert_eq!(size_of::<PushGrid>(), 40);
         assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
         assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
@@ -2113,6 +2154,31 @@ mod tests {
         assert_eq!(std::mem::offset_of!(PushGrid, cursor_visible), 24);
         assert_eq!(std::mem::offset_of!(PushGrid, selection_start), 28);
         assert_eq!(std::mem::offset_of!(PushGrid, selection_end), 32);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor_style), 36);
+    }
+
+    #[test]
+    fn decoration_geometry_matches_shader_formulas() {
+        // One decoration row per 16 cell rows, at least one; underline sits on
+        // the cell bottom edge inside the descent zone.
+        assert_eq!(underline_rows(1), (0, 1));
+        assert_eq!(underline_rows(12), (11, 12));
+        assert_eq!(underline_rows(20), (19, 20));
+        assert_eq!(underline_rows(32), (30, 32));
+        // Strikethrough stays centered on the cell.
+        assert_eq!(strikethrough_rows(1), (0, 1));
+        assert_eq!(strikethrough_rows(12), (6, 7));
+        assert_eq!(strikethrough_rows(20), (10, 11));
+        assert_eq!(strikethrough_rows(32), (15, 17));
+        // Thin cursors are twice the decoration thickness, at least two pixels.
+        assert_eq!(cursor_span(1), 2);
+        assert_eq!(cursor_span(9), 2);
+        assert_eq!(cursor_span(20), 2);
+        assert_eq!(cursor_span(48), 6);
+        // Cursor styles map to the documented push-constant encoding.
+        assert_eq!(push_cursor_style(aterm_core::CursorStyle::Block), 0);
+        assert_eq!(push_cursor_style(aterm_core::CursorStyle::Underline), 1);
+        assert_eq!(push_cursor_style(aterm_core::CursorStyle::Bar), 2);
     }
 
     #[test]
