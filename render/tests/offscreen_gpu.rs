@@ -217,3 +217,71 @@ fn cursor_shapes_invert_expected_regions() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn inverse_and_truecolor_cells_use_deterministic_colors() {
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    let metrics = font.metrics();
+    let mut terminal = Terminal::new(2, 1).expect("create terminal grid");
+    terminal.process(b"\x1b[7m \x1b[27m\x1b[38;2;255;0;0mA");
+    let mut renderer = OffscreenRenderer::new(metrics.width * 2, metrics.height)
+        .expect("create offscreen renderer");
+    let pixels = renderer
+        .render(&mut terminal, &mut font)
+        .expect("draw terminal and read back pixels");
+    let pixel = |column: u32, x: u32, y: u32| {
+        let index = ((y * metrics.width * 2 + column * metrics.width + x) * 4) as usize;
+        &pixels[index..index + 4]
+    };
+    // Inverse swaps the default palette: background carries the foreground.
+    assert_eq!(
+        pixel(0, 0, 0),
+        &[216, 216, 216, 255],
+        "inverse cell background uses the foreground color",
+    );
+    // The truecolor A must show red-dominant glyph pixels somewhere.
+    let red = (0..metrics.height).any(|y| {
+        (0..metrics.width).any(|x| {
+            let rgba = pixel(1, x, y);
+            rgba[0] > 150 && rgba[1] < 100 && rgba[2] < 100
+        })
+    });
+    assert!(red, "truecolor cell renders red glyph pixels");
+}
+
+#[test]
+#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
+fn mixed_fallback_frame_renders_all_atlases() {
+    // ASCII (mask atlas, primary face), CJK (mask atlas, fallback face),
+    // and emoji (color atlas) share one frame and one glyph table.
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    if font.fallback_count() == 0 {
+        eprintln!("no fallback faces installed; skipping mixed frame check");
+        return;
+    }
+    let metrics = font.metrics();
+    let mut terminal = Terminal::new(5, 1).expect("create terminal grid");
+    terminal.process("A界😀".as_bytes());
+    let mut renderer = OffscreenRenderer::new(metrics.width * 5, metrics.height)
+        .expect("create offscreen renderer");
+    let pixels = renderer
+        .render(&mut terminal, &mut font)
+        .expect("draw terminal and read back pixels");
+    let lit_in_column = |column: u32| {
+        (0..metrics.height).any(|y| {
+            (0..metrics.width).any(|x| {
+                let index =
+                    ((y * metrics.width * 5 + column * metrics.width + x) * 4) as usize;
+                let rgba = &pixels[index..index + 4];
+                rgba[0] > 60 || rgba[1] > 60 || rgba[2] > 60
+            })
+        })
+    };
+    assert!(lit_in_column(0), "ASCII cell renders from the mask atlas");
+    assert!(lit_in_column(1), "CJK fallback cell renders from the mask atlas");
+    assert!(
+        lit_in_column(3),
+        "emoji cell renders from the color atlas",
+    );
+}
