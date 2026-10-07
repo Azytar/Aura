@@ -1492,6 +1492,46 @@ mod tests {
     }
 
     #[test]
+    fn narrow_grids_count_terminal_cell_widths_not_characters() {
+        // `A界😀B` is four characters but six terminal columns (1+2+2+1
+        // per the same `unicode-width` table `put_char` uses). Column
+        // ownership must follow cell widths, not character counts.
+        assert_eq!(UnicodeWidthStr::width("A界😀B"), 6);
+
+        // Six columns hold the whole sequence: leading/spacer pairs for
+        // the wide glyphs and B in the last column.
+        let mut fitting = terminal(6, 1);
+        feed(&mut fitting, "A界😀B".as_bytes());
+        let row = fitting.active_grid().row_at(0).unwrap();
+        assert_eq!(row.cells()[0].content, 'A' as u32);
+        assert!(row.cells()[1].flags().contains(CellFlags::WIDE_LEADING));
+        assert!(row.cells()[2].flags().contains(CellFlags::WIDE_SPACER));
+        assert!(row.cells()[3].flags().contains(CellFlags::WIDE_LEADING));
+        assert!(row.cells()[4].flags().contains(CellFlags::WIDE_SPACER));
+        assert_eq!(row.cells()[5].content, 'B' as u32);
+        assert!(!row.is_wrapped());
+        assert_eq!(fitting.cursor(), Cursor { column: 5, row: 0 });
+        assert_eq!(fitting.scrollback_len(), 0);
+
+        // One column short: `A界😀` fills the row exactly (1+2+2 = 5),
+        // `B` wraps, and the single-row terminal scrolls the full row
+        // into scrollback instead of dropping it silently.
+        let mut narrow = terminal(5, 1);
+        feed(&mut narrow, "A界😀B".as_bytes());
+        let row = narrow.active_grid().row_at(0).unwrap();
+        assert_eq!(row.cells()[0].content, 'B' as u32);
+        assert!(
+            row.cells()[1..]
+                .iter()
+                .all(|cell| cell.content == 0 && cell.flags() == CellFlags::default()),
+            "only the wrapped B remains on the fresh row"
+        );
+        assert!(row.is_wrapped());
+        assert_eq!(narrow.scrollback_len(), 1);
+        assert_eq!(narrow.cursor(), Cursor { column: 1, row: 0 });
+    }
+
+    #[test]
     fn full_screen_output_builds_scrollback_and_viewport_does_not_move_live_cursor() {
         let mut terminal = terminal(4, 2);
         feed(&mut terminal, b"1\r\n2\r\n3\r\n4");
@@ -1618,6 +1658,32 @@ mod tests {
         assert_eq!(terminal.selection_cell_range(), Some((0, 11)));
         terminal.clear_selection();
         assert!(terminal.selection().is_none());
+    }
+
+    #[test]
+    fn font_size_resize_preserves_state_without_clearing() {
+        // Simulates the font-zoom path: same columns×rows, pixel geometry
+        // changes underneath. Content, modes, cursor, alternate screen,
+        // and scrollback must all survive.
+        let mut terminal = terminal(10, 3);
+        feed(&mut terminal, b"hello\x1b[1mB\x1b[0m\r\nworld");
+        feed(&mut terminal, b"\x1b[?1049hALT");
+        assert!(terminal.is_alternate_screen());
+        feed(&mut terminal, b"\x1b[?1049l");
+        assert!(!terminal.is_alternate_screen());
+        let scrollback_before = terminal.scrollback_len();
+        let modes_before = terminal.modes();
+        // Wide + combining state must survive a same-size resize.
+        feed(&mut terminal, "界e\u{301}".as_bytes());
+        let cursor_before = terminal.cursor();
+        terminal.resize(10, 3).unwrap();
+        assert_eq!(terminal.cursor(), cursor_before);
+        assert_eq!(terminal.modes(), modes_before);
+        assert_eq!(terminal.scrollback_len(), scrollback_before);
+        assert!(!terminal.is_alternate_screen());
+        // Grid still honors wide-leading/spacer pairing after resize.
+        let row = terminal.active_grid().row_at(cursor_before.row).unwrap();
+        assert!(row.cells().iter().any(|cell| cell.content != 0));
     }
 
     #[test]
