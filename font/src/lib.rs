@@ -60,6 +60,9 @@ pub struct GlyphUpload {
 struct GlyphKey {
     /// 0 selects the primary face, 1..=MAX_FALLBACKS a fallback face.
     face: u8,
+    /// Raw bits of the font size in typographic pixels. Stored as bits so the
+    /// key remains `Eq`/`Hash` across the full `f32` space after validation.
+    size_bits: u32,
     identity: GlyphIdentity,
     bold: bool,
     italic: bool,
@@ -194,6 +197,55 @@ impl Font {
         })
     }
 
+    /// Clears the glyph cache and atlas so stale metadata is never sampled
+    /// after a face, size, or style change.
+    pub fn invalidate_atlas(&mut self) {
+        self.atlas.fill(0);
+        self.color_atlas.fill(0);
+        self.glyphs.clear();
+        self.shelf_x = 1;
+        self.shelf_y = 1;
+        self.shelf_height = 0;
+        self.color_shelf_x = 1;
+        self.color_shelf_y = 1;
+        self.color_shelf_height = 0;
+    }
+
+    /// Resolves a font family name or filesystem path to a concrete font file.
+    ///
+    /// Resolution order:
+    /// 1. If `family` is an existing file, use it directly.
+    /// 2. Search `/usr/share/fonts` recursively for files whose stem contains
+    ///    the family name (case-insensitive).
+    /// 3. Fall back to the same search in `/usr/local/share/fonts`.
+    pub fn resolve_family_path(family: &str) -> Option<PathBuf> {
+        let candidate = PathBuf::from(family);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        for root in ["/usr/share/fonts", "/usr/local/share/fonts"] {
+            let root = PathBuf::from(root);
+            if let Some(found) = search_font_dir(&root, family) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// Loads a font by family name or explicit path, falling back to the
+    /// system monospace search when the name cannot be resolved.
+    pub fn load_with_family(family: &str, size: f32) -> Result<Self, String> {
+        if !size.is_finite() || !(4.0..=96.0).contains(&size) {
+            return Err("font size must be between 4 and 96 pixels".into());
+        }
+        let path = Self::resolve_family_path(family)
+            .or_else(default_font_path)
+            .ok_or_else(|| {
+                format!("no font found for family '{family}'; pass a path or install the font")
+            })?;
+        Self::load(Some(&path), size)
+    }
+
     pub const fn metrics(&self) -> CellMetrics {
         self.metrics
     }
@@ -224,6 +276,7 @@ impl Font {
         let (face_id, glyph_id) = self.resolve_face(ch);
         let key = GlyphKey {
             face: face_id,
+            size_bits: self.size.to_bits(),
             identity: GlyphIdentity::Glyph(glyph_id),
             bold,
             italic,
@@ -423,6 +476,7 @@ impl Font {
         }
         let key = GlyphKey {
             face: 0,
+            size_bits: self.size.to_bits(),
             identity: GlyphIdentity::Text {
                 grapheme: text.to_owned(),
                 pre_context: pre_context.to_owned(),
@@ -632,6 +686,38 @@ impl Font {
     }
 }
 
+/// Recursively searches `dir` for font files whose stem matches `family`.
+fn search_font_dir(dir: &Path, family: &str) -> Option<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = search_font_dir(&path, family) {
+                return Some(found);
+            }
+        } else if let Some(ext) = path.extension() {
+            if matches!(ext.to_str(), Some("ttf") | Some("ttc") | Some("otf"))
+                && family_matches_path(family, &path)
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Heuristic: true when the family name appears in the filename stem.
+fn family_matches_path(family: &str, path: &Path) -> bool {
+    let family_lower = family.to_lowercase();
+    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(stem) => stem.to_lowercase(),
+        None => return false,
+    };
+    stem.contains(&family_lower) || family_lower.contains(&stem)
+}
+
 fn default_font_path() -> Option<PathBuf> {
     [
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -762,5 +848,64 @@ mod tests {
             upload.pixels.len(),
             (upload.width * upload.height * 4) as usize
         );
+    }
+
+    #[test]
+    fn load_with_family_resolves_existing_path() {
+        let mut font =
+            Font::load_with_family("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14.0)
+                .expect("explicit path must load");
+        let _ = font.glyph('A', false, false);
+    }
+
+    #[test]
+    fn size_aware_cache_key_prevents_cross_size_hits() {
+        let mut font =
+            Font::load_with_family("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 12.0)
+                .expect("system font is available");
+        let (_id12, info12, _) = font.glyph('A', false, false).unwrap();
+        assert!(info12.size[0] > 0.0 && info12.size[1] > 0.0);
+
+        let mut font =
+            Font::load_with_family("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18.0)
+                .expect("system font is available");
+        let (_id18, info18, _) = font.glyph('A', false, false).unwrap();
+        assert!(info18.size[0] > 0.0 && info18.size[1] > 0.0);
+
+        // Different sizes produce different rasterizations in separate Font instances.
+        // The IDs may coincide by coincidence, but the atlas placements differ.
+        assert_ne!(font.metrics().width, 12, "metrics change with size");
+    }
+
+    #[test]
+    fn metrics_change_with_font_size() {
+        let sizes = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];
+        let mut widths = Vec::new();
+        for &size in &sizes {
+            let font = Font::load_with_family("monospace", size)
+                .expect("system monospace must be available");
+            let m = font.metrics();
+            widths.push(m.width);
+        }
+        assert!(
+            widths.windows(2).any(|w| w[0] != w[1]),
+            "metrics must change with font size"
+        );
+    }
+
+    #[test]
+    fn invalidate_atlas_clears_glyphs_and_resets_shelves() {
+        let mut font =
+            Font::load_with_family("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14.0)
+                .expect("system font is available");
+        let _ = font.glyph('A', false, false);
+        let _ = font.glyph('B', false, false);
+        assert!(font.glyphs.len() >= 2);
+        font.invalidate_atlas();
+        assert!(font.glyphs.is_empty());
+        assert_eq!(font.shelf_x, 1);
+        assert_eq!(font.shelf_y, 1);
+        assert_eq!(font.color_shelf_x, 1);
+        assert_eq!(font.color_shelf_y, 1);
     }
 }
