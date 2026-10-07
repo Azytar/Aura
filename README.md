@@ -18,7 +18,8 @@ considered stable.
 
 - Linux with X11 (`DISPLAY` set) and a Vulkan 1.3 device with
   `dynamicRendering` and `synchronization2` (e.g. Mesa RADV/ANV).
-- A monospace font. Resolution order: `--font PATH`, then well-known system
+- A monospace font. Resolution order: explicit path, family name search in
+  `/usr/share/fonts` and `/usr/local/share/fonts`, then well-known system
   paths (`DejaVuSansMono`, `LiberationMono`, `NotoSansMono`). CJK, emoji,
   and symbol fallback faces load on demand from standard Noto paths when
   present; otherwise those glyphs render as blank cells.
@@ -44,10 +45,13 @@ the binary; no runtime data files are needed.
 ## Run
 
 ```sh
-./target/release/aterm [--font PATH] [--font-size PIXELS]
+./target/release/aterm
 aterm --help
 aterm --version
 ```
+
+Font and terminal geometry are configured in `~/.config/aterm/aterm.toml`.
+An example configuration is provided in `examples/aterm.toml`.
 
 ## Local install
 
@@ -80,4 +84,5 @@ install -Dm644 aterm.desktop /usr/share/applications/aterm.desktop
   `core/fuzz` target runs as plain libFuzzer mutation runs (10k, no crashes).
 - Underline and strikethrough render as solid bars; hyperlink text has no
   distinct style yet.
-- No font configuration file: primary via `--font`, fallbacks auto-detected.
+- Font configuration is startup-only; live reload and DPI-aware scaling are
+  not implemented.
