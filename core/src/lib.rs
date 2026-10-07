@@ -9,6 +9,6 @@ pub use grid::{ActiveScreen, Cell, CellFlags, Cursor, Grid, GridError, Row, Term
 pub use parser::{Csi, Event as ParserEvent, Parser};
 pub use pty::{Pty, PtyError, PtySize};
 pub use terminal::{
-    DEFAULT_COLOR, INDEXED_COLOR_TAG, Modes, MouseTracking, Osc52Write, RGB_COLOR_TAG,
-    SelectionPoint, ShellMarker, Terminal,
+    DEFAULT_COLOR, INDEXED_COLOR_TAG, CursorStyle, Modes, MouseTracking, Osc52Write,
+    RGB_COLOR_TAG, SelectionPoint, ShellMarker, Terminal,
 };
