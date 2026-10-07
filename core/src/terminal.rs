@@ -35,6 +35,18 @@ pub enum ShellMarker {
     CommandFinished(Option<i32>),
 }
 
+/// DECSCUSR cursor shape selected with `CSI Ps SP q`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CursorStyle {
+    /// Blinking or steady full-cell block (Ps 0, 1, 2).
+    #[default]
+    Block,
+    /// Blinking or steady underline bar (Ps 3, 4).
+    Underline,
+    /// Blinking or steady vertical bar (Ps 5, 6).
+    Bar,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionPoint {
     pub row: usize,
@@ -50,6 +62,8 @@ pub struct Modes {
     pub mouse_tracking: MouseTracking,
     pub mouse_sgr: bool,
     pub bracketed_paste: bool,
+    pub cursor_style: CursorStyle,
+    pub cursor_blink: bool,
 }
 
 impl Default for Modes {
@@ -62,6 +76,8 @@ impl Default for Modes {
             mouse_tracking: MouseTracking::Off,
             mouse_sgr: false,
             bracketed_paste: false,
+            cursor_style: CursorStyle::Block,
+            cursor_blink: true,
         }
     }
 }
@@ -669,6 +685,11 @@ impl Terminal {
             b'c' if csi.param(0, 0) == 0 => replies.extend_from_slice(b"\x1b[?1;2c"),
             b'n' if csi.param(0, 0) == 5 => replies.extend_from_slice(b"\x1b[0n"),
             b'n' if csi.param(0, 0) == 6 => self.report_cursor(replies, false),
+            b'q'
+                if csi.intermediate_len == 1 && csi.intermediates[0] == b' ' =>
+            {
+                self.set_cursor_style(csi.param(0, 0))
+            }
             _ => {}
         }
     }
@@ -980,6 +1001,21 @@ impl Terminal {
             0
         };
         self.set_cursor(0, row);
+    }
+
+    /// Applies DECSCUSR (`CSI Ps SP q`); unknown values keep the prior style.
+    fn set_cursor_style(&mut self, style: u16) {
+        let (shape, blink) = match style {
+            0 | 1 => (CursorStyle::Block, true),
+            2 => (CursorStyle::Block, false),
+            3 => (CursorStyle::Underline, true),
+            4 => (CursorStyle::Underline, false),
+            5 => (CursorStyle::Bar, true),
+            6 => (CursorStyle::Bar, false),
+            _ => return,
+        };
+        self.modes.cursor_style = shape;
+        self.modes.cursor_blink = blink;
     }
 
     fn set_dec_modes(&mut self, csi: &crate::Csi, enabled: bool) {
@@ -1750,6 +1786,32 @@ mod tests {
         assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Off);
         assert!(!terminal.modes().mouse_sgr);
         assert!(!terminal.modes().bracketed_paste);
+    }
+
+    #[test]
+    fn cursor_style_follows_decscusr_and_survives_screen_switches() {
+        let mut terminal = terminal(4, 2);
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Block);
+        assert!(terminal.modes().cursor_blink);
+        feed(&mut terminal, b"\x1b[4 q");
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Underline);
+        assert!(!terminal.modes().cursor_blink);
+        feed(&mut terminal, b"\x1b[5 q");
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Bar);
+        assert!(terminal.modes().cursor_blink);
+        feed(&mut terminal, b"\x1b[2 q");
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Block);
+        assert!(!terminal.modes().cursor_blink);
+        // Unknown Ps values and a missing space intermediate keep the style.
+        feed(&mut terminal, b"\x1b[9 q\x1b[3q");
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Block);
+        // The style is terminal-global: alternate screen entry and exit keep it.
+        feed(&mut terminal, b"\x1b[3 q\x1b[?1049h\x1b[?1049l");
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Underline);
+        // DECTCEM visibility stays independent of the shape.
+        feed(&mut terminal, b"\x1b[?25l");
+        assert!(!terminal.modes().cursor_visible);
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Underline);
     }
 
     #[test]
