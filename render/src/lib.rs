@@ -920,8 +920,21 @@ impl Renderer {
         self.pending_glyph_uploads.clear();
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+    /// Drops every cached glyph after a runtime font-size change so no stale
+    /// metadata (old UVs, sizes, bearings) survives next to the new atlas.
+    /// The next `render` re-rasterizes through the fresh `Font` cache and
+    /// re-uploads both atlases and the glyph table, then returns to idle.
+    pub fn invalidate_font(&mut self) {
         self.invalidate_atlas();
+        self.gpu_glyphs.clear();
+        self.gpu_glyphs.push(GpuGlyph::zeroed());
+        self.gpu_cells.clear();
+        self.glyphs_dirty = true;
+        self.grid_size = None;
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+        self.invalidate_font();
         unsafe { self.device.device_wait_idle() }
             .map_err(vk_error("wait before swapchain resize"))?;
         let context = SurfaceContext {
