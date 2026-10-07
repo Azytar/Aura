@@ -1890,4 +1890,60 @@ mod tests {
             assert!(line(&terminal, 0).starts_with(expected));
         }
     }
+
+    #[test]
+    fn hostile_output_keeps_terminal_invariants() {
+        // Long OSC/DCS, invalid UTF-8, overlong CSI, rapid mode toggles,
+        // wide-cell abuse, and control aborts must neither panic nor corrupt
+        // grid state, chunked or contiguous.
+        let mut hostile = Vec::new();
+        hostile.extend_from_slice(b"\x1b]0;");
+        hostile.extend(std::iter::repeat_n(b'A', 5000));
+        hostile.extend_from_slice(b"\x07\x1bP");
+        hostile.extend(std::iter::repeat_n(b'B', 3000));
+        hostile.extend_from_slice(b"\x1b\\\xff\xfe\x80 invalid \xc3(");
+        hostile.extend_from_slice(b"\x1b[");
+        for _ in 0..40 {
+            hostile.extend_from_slice(b"1;");
+        }
+        hostile.extend_from_slice(b"H\x1b[?1049h\x1b[?1000h\x1b[?1049l\x1b[?1000l");
+        hostile.extend_from_slice(&"界界é́́".as_bytes().repeat(200));
+        hostile.extend_from_slice(b"\x1b[5;20r\x1b[r\x18\x1a");
+        let mut contiguous = terminal(80, 24);
+        let mut chunked = terminal(80, 24);
+        contiguous.process(&hostile);
+        for chunk in hostile.chunks(7) {
+            chunked.process(chunk);
+        }
+        assert_eq!(contiguous.active_grid(), chunked.active_grid());
+        assert_eq!(contiguous.cursor(), chunked.cursor());
+        let grid = contiguous.active_grid();
+        let cursor = contiguous.cursor();
+        assert!(cursor.column < grid.width() && cursor.row < grid.height());
+        for row in 0..grid.height() {
+            for column in 0..grid.width() {
+                let cell = grid.cell(row, column).unwrap();
+                if cell.flags().contains(CellFlags::WIDE_SPACER) {
+                    assert!(
+                        column > 0
+                            && grid
+                                .cell(row, column - 1)
+                                .unwrap()
+                                .flags()
+                                .contains(CellFlags::WIDE_LEADING)
+                    );
+                }
+                if cell.flags().contains(CellFlags::WIDE_LEADING) {
+                    assert!(
+                        column + 1 < grid.width()
+                            && grid
+                                .cell(row, column + 1)
+                                .unwrap()
+                                .flags()
+                                .contains(CellFlags::WIDE_SPACER)
+                    );
+                }
+            }
+        }
+    }
 }
