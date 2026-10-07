@@ -63,7 +63,7 @@ Vulkan 1.3 renderer, and X11 frontend, validated as described below.
   shell markers.
 - Underline, strikethrough, inverse, and block/bar/underline cursor
   rendering driven by terminal state (including DECSCUSR styles).
-- Minimal CLI: `--help`, `--version`, `--font PATH`, `--font-size PIXELS`.
+- Minimal CLI: `--help`, `--version`.
 - Benchmarks for parser, grid, scroll, reflow, glyph cache, shaping, and
   rasterization workloads; VT parser fuzz corpus and target.
 
