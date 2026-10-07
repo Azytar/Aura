@@ -1,6 +1,7 @@
 [package]
 name = "aterm-font"
 version = "0.1.0"
+description = "Font shaping, rasterization, glyph cache, and atlas management"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

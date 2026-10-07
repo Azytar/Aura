@@ -5,9 +5,14 @@ integration, glyph atlas, and Vulkan 1.3 renderer with an X11 frontend.
 
 ## Status
 
-Technical release candidate: core, renderer, and application are tested,
-including real X11 presentation and offscreen GPU readback validation.
+Version 0.1.0: core, renderer, and application are tested, including real
+X11 presentation and offscreen GPU readback validation.
 See `CHANGELOG.md` for the validated scope and known limitations.
+
+The project follows [Semantic Versioning 2.0.0](https://semver.org/);
+the versioning policy and the rules for future releases are documented in
+`CHANGELOG.md`. While the version is `0.y.z`, the public API is not
+considered stable.
 
 ## Requirements
 
