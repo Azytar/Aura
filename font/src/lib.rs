@@ -252,6 +252,7 @@ impl Font {
         let sources = [
             Source::Outline,
             Source::Bitmap(swash::scale::StrikeWith::BestFit),
+            Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
         ];
         let mut image = swash::scale::image::Image::new();
         let mut renderer = Render::new(&sources);
@@ -453,6 +454,7 @@ impl Font {
         let sources = [
             Source::Outline,
             Source::Bitmap(swash::scale::StrikeWith::BestFit),
+            Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
         ];
         let mut image = swash::scale::image::Image::new();
         let mut renderer = Render::new(&sources);
