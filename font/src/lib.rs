@@ -730,13 +730,30 @@ fn search_font_dir(dir: &Path, family: &str) -> Option<PathBuf> {
 }
 
 /// Heuristic: true when the family name appears in the filename stem.
+///
+/// Three matching strategies are tried, in order of strictness:
+/// 1. Case-insensitive substring match on the raw stem (e.g. `"monospace"`
+///    matches `DejaVuSansMono-Regular`).
+/// 2. Case-insensitive substring match on the raw family against the stem.
+/// 3. Normalized match ignoring non-alphanumeric characters, so multi-word
+///    family names like `"FiraCode Nerd Font"` resolve to stems such as
+///    `FiraCodeNerdFont-Regular` without hardcoding a path.
 fn family_matches_path(family: &str, path: &Path) -> bool {
     let family_lower = family.to_lowercase();
     let stem = match path.file_stem().and_then(|s| s.to_str()) {
         Some(stem) => stem.to_lowercase(),
         None => return false,
     };
-    stem.contains(&family_lower) || family_lower.contains(&stem)
+    if stem.contains(&family_lower) || family_lower.contains(&stem) {
+        return true;
+    }
+    normalize_name(&stem).contains(&normalize_name(&family_lower))
+}
+
+/// Removes non-alphanumeric characters so that family names with spaces,
+/// hyphens, or other punctuation match font file stems that omit them.
+fn normalize_name(name: &str) -> String {
+    name.chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
 fn default_font_path() -> Option<PathBuf> {
@@ -1074,5 +1091,185 @@ mod tests {
         assert_eq!(font.shelf_y, 1);
         assert_eq!(font.color_shelf_x, 1);
         assert_eq!(font.color_shelf_y, 1);
+    }
+
+    #[test]
+    fn family_name_matching_handles_spaces_and_punctuation() {
+        assert!(normalize_name("FiraCode Nerd Font") == "FiraCodeNerdFont");
+        assert!(normalize_name("FiraCode-Nerd") == "FiraCodeNerd");
+        // Stems without spaces contain the normalized family.
+        assert!(family_matches_path(
+            "FiraCode Nerd Font",
+            Path::new("/usr/share/fonts/TTF/FiraCodeNerdFont-Regular.ttf")
+        ));
+        // Exact stem match still works.
+        assert!(family_matches_path(
+            "mono",
+            Path::new("/sys/FooMonoBar.ttf")
+        ));
+        // Completely unrelated names do not match.
+        assert!(!family_matches_path(
+            "Comic Sans",
+            Path::new("/usr/share/fonts/FiraCodeNerdFont-Regular.ttf")
+        ));
+    }
+
+    // --- FiraCode Nerd Font tests ---
+    // These exercise the existing pipeline (metrics, shaping, atlas, scaling)
+    // with a real Nerd Font installed on the system. They skip gracefully when
+    // the font is absent so they never depend on a hardcoded path. No Nerd
+    // Font-specific code is added; this is pure pipeline validation.
+
+    #[test]
+    fn nerd_font_resolves_and_has_valid_metrics() {
+        let path = Font::resolve_family_path("FiraCode Nerd Font");
+        if path.is_none() {
+            eprintln!("FiraCode Nerd Font not installed; skipping");
+            return;
+        }
+        let font =
+            Font::load(path.as_deref(), 14.0).expect("resolved FiraCode Nerd Font path must load");
+        let metrics = font.metrics();
+        assert!(
+            metrics.width > 0 && metrics.height >= metrics.width,
+            "metrics must be positive and tall enough for monospace: {metrics:?}"
+        );
+        assert!(metrics.ascent > 0 && metrics.descent > 0);
+    }
+
+    #[test]
+    fn nerd_font_renders_ascii_unicode_cjk_and_nerd_glyphs() {
+        let path = Font::resolve_family_path("FiraCode Nerd Font");
+        if path.is_none() {
+            eprintln!("FiraCode Nerd Font not installed; skipping");
+            return;
+        }
+        let mut font =
+            Font::load(Some(&path.unwrap()), 14.0).expect("FiraCode Nerd Font must load");
+        // ASCII: basic Latin glyphs must produce a mask upload.
+        let (_, ascii, upload) = font.glyph('A', false, false).unwrap();
+        assert!(ascii.size[0] > 0.0 && ascii.size[1] > 0.0);
+        assert!(upload.is_some(), "ASCII glyph must rasterize");
+        assert!(!upload.as_ref().unwrap().color);
+
+        // Accented Unicode: é (U+00E9) is directly encodable in the font's cmap.
+        let (_, _, upload) = font.glyph('é', false, false).unwrap();
+        assert!(upload.is_some(), "accented glyph must rasterize");
+
+        // CJK: FiraCode Nerd Font includes CJK coverage; if the primary face
+        // lacks the glyph it falls back to a CJK face (loaded on demand).
+        let (_, cjk, _) = font.glyph('中', false, false).unwrap();
+        if font.fallback_count() == 0 {
+            // Primary face itself provided the glyph.
+            assert!(
+                cjk.size[0] > 0.0 && cjk.size[1] > 0.0,
+                "CJK glyph must have pixels from the primary face: {cjk:?}"
+            );
+        } else {
+            // Fallback face provided the glyph.
+            assert!(
+                cjk.size[0] > 0.0 && cjk.size[1] > 0.0,
+                "CJK glyph must have pixels from a fallback face: {cjk:?}"
+            );
+        }
+
+        // Nerd Font icon: U+F015 (home icon from Font Awesome, in the PUA).
+        let (_, nerd, upload) = font.glyph('\u{f015}', false, false).unwrap();
+        assert!(
+            nerd.size[0] > 0.0 && nerd.size[1] > 0.0,
+            "Nerd Font icon must have pixels: {nerd:?}"
+        );
+        // The icon is expected at 14px and must not corrupt the atlas.
+        assert!(
+            upload.is_some(),
+            "Nerd Font icon must produce an atlas upload at 14px"
+        );
+
+        // Combining sequence: é as e + U+0301 must shape into one entry.
+        let (_, shaped, upload) = font.glyph_text("e\u{301}", false, false).unwrap();
+        assert!(shaped.size[0] > 0.0 && shaped.size[1] > 0.0);
+        assert!(upload.is_some(), "shaped grapheme must rasterize");
+    }
+
+    #[test]
+    fn nerd_font_atlas_rebuilds_on_size_change() {
+        let path = Font::resolve_family_path("FiraCode Nerd Font");
+        if path.is_none() {
+            eprintln!("FiraCode Nerd Font not installed; skipping");
+            return;
+        }
+        let mut font =
+            Font::load(Some(&path.unwrap()), 12.0).expect("FiraCode Nerd Font must load at 12px");
+        let (_, info12, _) = font.glyph('A', false, false).unwrap();
+        let metrics12 = font.metrics();
+        assert!(info12.size[0] > 0.0 && info12.size[1] > 0.0);
+
+        // Grow to 24px: atlas, glyph cache, and metrics must all refresh.
+        assert!(font.set_size(24.0).unwrap());
+        assert!(font.glyphs.is_empty(), "cache must clear after resize");
+        assert_eq!(font.shelf_x, 1);
+        assert_eq!(font.color_shelf_x, 1);
+        let (_, info24, upload) = font.glyph('A', false, false).unwrap();
+        assert!(upload.is_some(), "new size must re-rasterize");
+        assert!(
+            info24.size[0] > info12.size[0] && info24.size[1] > info12.size[1],
+            "24px glyph must be larger than 12px"
+        );
+        let metrics24 = font.metrics();
+        assert!(metrics24.width > metrics12.width);
+
+        // CJK and Nerd Font icon also re-rasterize at the new size.
+        let (_, _, upload) = font.glyph('中', false, false).unwrap();
+        assert!(upload.is_some(), "CJK must re-rasterize after resize");
+        let (_, _, upload) = font.glyph('\u{f015}', false, false).unwrap();
+        assert!(
+            upload.is_some(),
+            "Nerd Font icon must re-rasterize after resize"
+        );
+
+        // Return to 12px: must reproduce the original size exactly.
+        assert!(font.set_size(12.0).unwrap());
+        let (_, info12b, _) = font.glyph('A', false, false).unwrap();
+        assert_eq!(
+            info12b.size, info12.size,
+            "12 -> 24 -> 12 reproduces same glyph"
+        );
+    }
+
+    #[test]
+    fn nerd_font_runtime_scaling_produces_different_glyph_sizes() {
+        let path = Font::resolve_family_path("FiraCode Nerd Font");
+        if path.is_none() {
+            eprintln!("FiraCode Nerd Font not installed; skipping");
+            return;
+        }
+        let mut font = Font::load(Some(&path.unwrap()), MIN_FONT_SIZE).expect("load at min size");
+        let (_, small, _) = font.glyph('A', false, false).unwrap();
+        assert!(small.size[0] > 0.0 && small.size[1] > 0.0);
+
+        // Simulate a runtime zoom sequence (12 -> 16 -> 20 -> 12).
+        for size in [12.0, 16.0, 20.0, 12.0] {
+            assert!(font.set_size(size).unwrap());
+            let metrics = font.metrics();
+            assert!(metrics.width > 0 && metrics.height > 0);
+            let (_, info, upload) = font.glyph('A', false, false).unwrap();
+            assert!(
+                upload.is_some(),
+                "must re-rasterize after size change to {size}px"
+            );
+            assert!(
+                info.size[0] > 0.0 && info.size[1] > 0.0,
+                "glyph must have pixels at {size}px"
+            );
+        }
+        // Verify the 20px glyph is genuinely larger than the 12px one.
+        font.set_size(12.0).unwrap();
+        let (_, info12, _) = font.glyph('A', false, false).unwrap();
+        font.set_size(20.0).unwrap();
+        let (_, info20, _) = font.glyph('A', false, false).unwrap();
+        assert!(
+            info20.size[0] > info12.size[0] && info20.size[1] > info12.size[1],
+            "20px glyph must be larger than 12px"
+        );
     }
 }
