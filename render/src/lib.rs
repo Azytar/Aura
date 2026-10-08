@@ -638,7 +638,8 @@ impl Renderer {
             surface,
             queue_family,
         };
-        let swap = create_swapchain(&surface_context, width, height)?;
+        let params = surface_parameters(&surface_context, width, height)?;
+        let swap = create_swapchain(&surface_context, &params)?;
         let descriptor_layout = create_descriptor_layout(&device)?;
         let push_range = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
@@ -794,7 +795,7 @@ impl Renderer {
         } {
             Ok(result) => result,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                self.resize(self.extent.width, self.extent.height)?;
+                self.recreate_swapchain(self.extent.width, self.extent.height, true)?;
                 return Ok(());
             }
             Err(error) => return Err(format!("acquire swapchain image: {error:?}")),
@@ -928,7 +929,7 @@ impl Renderer {
         match present_status {
             Ok(present_suboptimal) if !suboptimal && !present_suboptimal => {}
             Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {
-                self.resize(self.extent.width, self.extent.height)?;
+                self.recreate_swapchain(self.extent.width, self.extent.height, true)?;
             }
             Err(error) => return Err(format!("present frame: {error:?}")),
         }
@@ -961,10 +962,33 @@ impl Renderer {
         self.grid_size = None;
     }
 
+    /// Reconciles the swapchain with the current surface after a window or pixel
+    /// geometry change.
+    ///
+    /// Window geometry and font geometry are separate concerns: resizing a
+    /// window changes how much of the terminal is visible, never how glyphs are
+    /// rasterized, so this must not touch the font caches. `invalidate_font` is
+    /// the explicit, font-only counterpart.
+    ///
+    /// The surface decides the real extent, so the live swapchain is reused
+    /// whenever the surface would create an identical one. Repeated
+    /// `ConfigureNotify` events carrying the same geometry therefore cost one
+    /// surface query and no Vulkan work.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-        self.invalidate_font();
-        unsafe { self.device.device_wait_idle() }
-            .map_err(vk_error("wait before swapchain resize"))?;
+        self.recreate_swapchain(width, height, false).map(|_| ())
+    }
+
+    /// Recreates the swapchain when the surface no longer matches it.
+    ///
+    /// `force` bypasses the reuse check and is used only where the presentation
+    /// layer has already reported the swapchain unusable (`OUT_OF_DATE` or
+    /// `SUBOPTIMAL` from acquire or present); there a fresh swapchain is needed
+    /// even though the cached parameters still look identical.
+    ///
+    /// Returns whether a recreation happened. The early return happens before
+    /// any image is acquired, so a reused swapchain can never leave a frame
+    /// half-presented against a destroyed one.
+    fn recreate_swapchain(&mut self, width: u32, height: u32, force: bool) -> Result<bool, String> {
         let context = SurfaceContext {
             device: &self.device,
             surface_loader: &self.surface_loader,
@@ -973,7 +997,29 @@ impl Renderer {
             surface: self.surface,
             queue_family: self.queue_family,
         };
-        let swap = create_swapchain(&context, width, height)?;
+        let params = surface_parameters(&context, width, height)?;
+        if !force
+            && swapchain_can_be_reused(
+                &params,
+                self.extent,
+                self.format,
+                self.swapchain_images.len(),
+            )
+        {
+            return Ok(false);
+        }
+        // A surface reporting no area cannot back a swapchain. Keep the live one
+        // and let the next geometry event rebuild it once the surface is valid
+        // again; creating here would fail and, on the present path, return an
+        // error that takes the frontend down.
+        if params.extent.width == 0 || params.extent.height == 0 {
+            return Ok(false);
+        }
+        // The swapchain and its image views are still referenced by command
+        // buffers that may be pending, so all device work must retire first.
+        unsafe { self.device.device_wait_idle() }
+            .map_err(vk_error("wait before swapchain resize"))?;
+        let swap = create_swapchain(&context, &params)?;
         let present_ready = create_present_semaphores(&self.device, swap.images.len())?;
         let replacement_pipelines = if swap.format != self.format {
             Some((
@@ -1019,7 +1065,7 @@ impl Renderer {
         self.present_ready = present_ready;
         self.format = swap.format;
         self.extent = swap.extent;
-        Ok(())
+        Ok(true)
     }
 
     fn convert_cell(
@@ -1655,18 +1701,37 @@ fn choose_device(
     Err("no Vulkan 1.3 physical device supports graphics and XCB presentation".into())
 }
 
-fn create_swapchain(
+/// Surface parameters a swapchain would be created with right now.
+///
+/// On X11 `caps.current_extent` is authoritative and the requested
+/// `width`/`height` are only a hint for surfaces that report no fixed extent,
+/// which is why a redundant `ConfigureNotify` cannot be recognised from the
+/// numbers the caller passes in. These are the values the surface decides.
+struct SurfaceParameters {
+    extent: vk::Extent2D,
+    format: vk::Format,
+    color_space: vk::ColorSpaceKHR,
+    image_count: u32,
+    pre_transform: vk::SurfaceTransformFlagsKHR,
+}
+
+/// Queries the surface for the parameters a swapchain would be created with.
+///
+/// This is a pure query: it performs no Vulkan work and no device wait, so it
+/// is cheap enough to run on every `ConfigureNotify` to find out whether a
+/// recreation would actually differ from the live swapchain.
+fn surface_parameters(
     context: &SurfaceContext<'_>,
     width: u32,
     height: u32,
-) -> Result<SwapchainState, String> {
+) -> Result<SurfaceParameters, String> {
     let SurfaceContext {
-        device,
+        device: _,
         surface_loader,
-        swapchain_loader: loader,
+        swapchain_loader: _,
         physical,
         surface,
-        queue_family: family,
+        queue_family: _,
     } = context;
     let caps =
         unsafe { surface_loader.get_physical_device_surface_capabilities(*physical, *surface) }
@@ -1679,7 +1744,6 @@ fn create_swapchain(
         .find(|item| item.format == vk::Format::B8G8R8A8_UNORM)
         .or(formats.first())
         .ok_or("XCB surface has no supported image format")?;
-    let format = selected_format.format;
     let extent = if caps.current_extent.width != u32::MAX {
         caps.current_extent
     } else {
@@ -1688,23 +1752,62 @@ fn create_swapchain(
             height: height.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
         }
     };
-    let count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {
+    let image_count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 {
         u32::MAX
     } else {
         caps.max_image_count
     });
+    Ok(SurfaceParameters {
+        extent,
+        format: selected_format.format,
+        color_space: selected_format.color_space,
+        image_count,
+        pre_transform: caps.current_transform,
+    })
+}
+
+/// Decides whether the live swapchain can back another frame for `params`.
+///
+/// Pure, so the invariant is testable without a GPU: the swapchain is only
+/// reusable when the surface would create an identical one, and a surface that
+/// currently reports no area can never back a swapchain at all.
+fn swapchain_can_be_reused(
+    params: &SurfaceParameters,
+    extent: vk::Extent2D,
+    format: vk::Format,
+    images: usize,
+) -> bool {
+    params.extent.width != 0
+        && params.extent.height != 0
+        && params.extent == extent
+        && params.format == format
+        && params.image_count == images as u32
+}
+
+fn create_swapchain(
+    context: &SurfaceContext<'_>,
+    params: &SurfaceParameters,
+) -> Result<SwapchainState, String> {
+    let SurfaceContext {
+        device,
+        surface_loader: _,
+        swapchain_loader: loader,
+        physical: _,
+        surface,
+        queue_family: family,
+    } = context;
     let families = [*family];
     let info = vk::SwapchainCreateInfoKHR::default()
         .surface(*surface)
-        .min_image_count(count)
-        .image_format(format)
-        .image_color_space(selected_format.color_space)
-        .image_extent(extent)
+        .min_image_count(params.image_count)
+        .image_format(params.format)
+        .image_color_space(params.color_space)
+        .image_extent(params.extent)
         .image_array_layers(1)
         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .queue_family_indices(&families)
-        .pre_transform(caps.current_transform)
+        .pre_transform(params.pre_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(vk::PresentModeKHR::FIFO)
         .clipped(true);
@@ -1717,7 +1820,7 @@ fn create_swapchain(
         let view_info = vk::ImageViewCreateInfo::default()
             .image(*image)
             .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
+            .format(params.format)
             .subresource_range(
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1733,8 +1836,8 @@ fn create_swapchain(
         handle: swapchain,
         images,
         views,
-        format,
-        extent,
+        format: params.format,
+        extent: params.extent,
     })
 }
 
@@ -2329,14 +2432,13 @@ fn vk_error(context: &'static str) -> impl FnOnce(vk::Result) -> String {
 
 /// Rows whose cell data must be rebuilt from terminal state this frame.
 ///
-/// The terminal reports only rows that *changed* since the previous frame.
-/// The renderer, however, drops its own cell cache (`gpu_cells`) and glyph
-/// table every time the grid size changes or `invalidate_font()` runs — and
-/// `invalidate_font()` runs on every swapchain recreation. In that situation
-/// the changed-row set can be empty even though every cached cell was just
-/// cleared, which would draw a blank grid for the rest of the process. So a
-/// stale cache forces a full rebuild from the viewport instead of relying on
-/// the changed-row set.
+/// The terminal reports only rows that *changed* since the previous frame. The
+/// renderer, however, drops its own cell cache (`gpu_cells`) and glyph table
+/// whenever `invalidate_font()` runs, and `invalidate_font()` marks the grid
+/// stale by clearing `grid_size`. In that situation the changed-row set can be
+/// empty even though every cached cell was just cleared, which would draw a
+/// blank grid for the rest of the process. So a stale cache forces a full
+/// rebuild from the viewport instead of relying on the changed-row set.
 pub(crate) fn rows_to_rebuild(height: usize, dirty: Vec<usize>, cache_invalid: bool) -> Vec<usize> {
     if cache_invalid {
         (0..height).collect()
@@ -2407,12 +2509,157 @@ mod tests {
         assert_eq!(color(DEFAULT_COLOR, false), 0x00181818);
     }
 
+    fn test_params(extent: (u32, u32), images: u32) -> SurfaceParameters {
+        SurfaceParameters {
+            extent: vk::Extent2D {
+                width: extent.0,
+                height: extent.1,
+            },
+            format: vk::Format::B8G8R8A8_UNORM,
+            color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            image_count: images,
+            pre_transform: vk::SurfaceTransformFlagsKHR::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn identical_surface_parameters_reuse_the_live_swapchain() {
+        // A redundant ConfigureNotify must not destroy and recreate the very
+        // swapchain it already owns; this is the point of the check.
+        let params = test_params((900, 680), 4);
+        assert!(
+            swapchain_can_be_reused(
+                &params,
+                vk::Extent2D {
+                    width: 900,
+                    height: 680
+                },
+                vk::Format::B8G8R8A8_UNORM,
+                4,
+            ),
+            "same extent, format, and image count must reuse the swapchain"
+        );
+    }
+
+    #[test]
+    fn every_changing_surface_parameter_forces_a_recreation() {
+        let params = test_params((900, 680), 4);
+        let extent = vk::Extent2D {
+            width: 900,
+            height: 680,
+        };
+        // Extent change in either axis.
+        assert!(!swapchain_can_be_reused(
+            &params,
+            vk::Extent2D {
+                width: 901,
+                height: 680
+            },
+            params.format,
+            4
+        ));
+        assert!(!swapchain_can_be_reused(
+            &params,
+            vk::Extent2D {
+                width: 900,
+                height: 681
+            },
+            params.format,
+            4
+        ));
+        // Format change, which also drives pipeline recreation.
+        assert!(!swapchain_can_be_reused(
+            &params,
+            extent,
+            vk::Format::R8G8B8A8_UNORM,
+            4
+        ));
+        // The driver may hand out a different image count, which has to be
+        // matched by `present_ready` or present indexes out of bounds.
+        assert!(!swapchain_can_be_reused(&params, extent, params.format, 3));
+        assert!(!swapchain_can_be_reused(&params, extent, params.format, 5));
+    }
+
+    #[test]
+    fn zero_area_surfaces_never_reuse_or_recreate() {
+        // A surface with no area cannot back a swapchain, so the live one is
+        // kept until geometry returns. Counting it as "different" would make
+        // the renderer try to create an invalid swapchain.
+        for (w, h) in [(0, 680), (900, 0), (0, 0)] {
+            let params = test_params((w, h), 4);
+            assert!(
+                !swapchain_can_be_reused(&params, params.extent, params.format, 4),
+                "{w}x{h} is not a usable swapchain extent"
+            );
+        }
+    }
+
+    #[test]
+    fn redundant_configure_notice_sequence_makes_no_progress() {
+        // The observed transition: several ConfigureNotify carrying the same
+        // geometry, then a real change, then the same geometry again. Only the
+        // steps where a surface parameter actually differs may recreate.
+        let steps = [
+            ((900u32, 680u32), 4u32),
+            ((900, 680), 4),
+            ((900, 680), 4),
+            ((700, 500), 4),
+            ((700, 500), 4),
+            ((700, 500), 4),
+            ((900, 680), 4),
+        ];
+        let (mut live_extent, mut live_images) = (
+            vk::Extent2D {
+                width: 0,
+                height: 0,
+            },
+            0usize,
+        );
+        let mut recreations = 0;
+        for &((w, h), images) in &steps {
+            let params = test_params((w, h), images);
+            if !swapchain_can_be_reused(
+                &params,
+                live_extent,
+                vk::Format::B8G8R8A8_UNORM,
+                live_images,
+            ) && params.extent.width != 0
+                && params.extent.height != 0
+            {
+                recreations += 1;
+                live_extent = params.extent;
+                live_images = params.image_count as usize;
+            }
+        }
+        // 7 events, 3 distinct geometries -> exactly 3 recreations.
+        assert_eq!(recreations, 3, "only real geometry changes may recreate");
+    }
+
+    #[test]
+    fn stale_cached_extent_still_recreates_when_the_surface_moved() {
+        // A ConfigureNotify can arrive whose requested size equals the live one
+        // while the surface has already moved on; the cached extent is stale, so
+        // the reuse check must reject it and rebuild.
+        let params = test_params((700, 500), 4);
+        assert!(
+            !swapchain_can_be_reused(
+                &params,
+                vk::Extent2D {
+                    width: 1133,
+                    height: 1024
+                },
+                params.format,
+                4,
+            ),
+            "a stale cached extent must not be reused"
+        );
+    }
+
     #[test]
     fn fresh_cell_cache_rebuilds_every_row() {
-        // `invalidate_font()` runs on every swapchain recreation and clears
-        // `gpu_cells`, so a terminal with nothing new to report must still
-        // repaint. Otherwise the post-recreate frame draws an empty grid and
-        // the terminal content never comes back.
+        // `invalidate_font()` clears `gpu_cells`, so a terminal with nothing
+        // new to report must still repaint. Otherwise the frame after a font
+        // change draws an empty grid and the content never comes back.
         assert_eq!(
             rows_to_rebuild(4, vec![], true),
             (0..4).collect::<Vec<_>>(),
