@@ -841,6 +841,11 @@ fn resize_font(
             .height(geometry.pixel_height),
     )?;
     connection.flush()?;
+    // A new size re-rasterizes every glyph, so the renderer's glyph table, cell
+    // cache, and both atlases are stale and must be dropped. This is the only
+    // path that does so: `Renderer::resize` reconciles the swapchain alone and
+    // must not invalidate font state for a plain window resize.
+    renderer.invalidate_font();
     renderer
         .resize(geometry.pixel_width, geometry.pixel_height)
         .map_err(io::Error::other)?;
