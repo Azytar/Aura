@@ -744,11 +744,13 @@ impl Renderer {
                 "terminal grid exceeds per-frame SSBO capacity ({MAX_COLS}x{MAX_ROWS})"
             ));
         }
+        let mut grid_rebuilt = false;
         if self.grid_size != Some((width, height)) {
             for frame in &mut self.frames {
                 frame.dirty_rows.fill(true);
             }
             self.grid_size = Some((width, height));
+            grid_rebuilt = true;
         }
         self.gpu_cells.resize(
             count,
@@ -759,7 +761,7 @@ impl Renderer {
                 flags: 0,
             },
         );
-        let dirty = terminal.take_dirty_rows();
+        let dirty = rows_to_rebuild(height, terminal.take_dirty_rows(), grid_rebuilt);
         for row in dirty {
             for frame in &mut self.frames {
                 frame.dirty_rows[row] = true;
@@ -2325,6 +2327,24 @@ fn vk_error(context: &'static str) -> impl FnOnce(vk::Result) -> String {
     move |error| format!("{context}: {error:?}")
 }
 
+/// Rows whose cell data must be rebuilt from terminal state this frame.
+///
+/// The terminal reports only rows that *changed* since the previous frame.
+/// The renderer, however, drops its own cell cache (`gpu_cells`) and glyph
+/// table every time the grid size changes or `invalidate_font()` runs — and
+/// `invalidate_font()` runs on every swapchain recreation. In that situation
+/// the changed-row set can be empty even though every cached cell was just
+/// cleared, which would draw a blank grid for the rest of the process. So a
+/// stale cache forces a full rebuild from the viewport instead of relying on
+/// the changed-row set.
+pub(crate) fn rows_to_rebuild(height: usize, dirty: Vec<usize>, cache_invalid: bool) -> Vec<usize> {
+    if cache_invalid {
+        (0..height).collect()
+    } else {
+        dirty
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2385,6 +2405,43 @@ mod tests {
         assert_eq!(color(INDEXED_COLOR_TAG | 1, true), 0x0000cd);
         assert_eq!(color(INDEXED_COLOR_TAG | 196, true), 0x0000ff);
         assert_eq!(color(DEFAULT_COLOR, false), 0x00181818);
+    }
+
+    #[test]
+    fn fresh_cell_cache_rebuilds_every_row() {
+        // `invalidate_font()` runs on every swapchain recreation and clears
+        // `gpu_cells`, so a terminal with nothing new to report must still
+        // repaint. Otherwise the post-recreate frame draws an empty grid and
+        // the terminal content never comes back.
+        assert_eq!(
+            rows_to_rebuild(4, vec![], true),
+            (0..4).collect::<Vec<_>>(),
+            "a stale cache must rebuild the whole grid even with no dirty rows"
+        );
+        assert_eq!(
+            rows_to_rebuild(1, vec![], true),
+            vec![0],
+            "single-row grids are rebuilt too"
+        );
+        assert_eq!(
+            rows_to_rebuild(4, vec![1, 3], true),
+            (0..4).collect::<Vec<_>>(),
+            "dirty rows are subsumed by the full rebuild"
+        );
+        assert_eq!(
+            rows_to_rebuild(0, vec![], true),
+            Vec::<usize>::new(),
+            "empty grids stay empty"
+        );
+    }
+
+    #[test]
+    fn intact_cell_cache_only_rebuilds_dirty_rows() {
+        // Guards the hot path: an unchanged cache must not degrade into a
+        // full-grid rebuild on every frame.
+        assert_eq!(rows_to_rebuild(4, vec![1], false), vec![1]);
+        assert_eq!(rows_to_rebuild(4, vec![], false), Vec::<usize>::new());
+        assert_eq!(rows_to_rebuild(4, vec![0, 2], false), vec![0, 2]);
     }
 
     #[test]
