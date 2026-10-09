@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=AURA Terminal
+GenericName=Terminal Emulator
+Comment=GPU-accelerated terminal emulator for Linux
+Exec=aura
+TryExec=aura
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;vulkan;console;
+StartupNotify=true

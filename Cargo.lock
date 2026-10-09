@@ -3,21 +3,6 @@
 version = 4
 
 [[package]]
-name = "app"
-version = "0.1.0"
-dependencies = [
- "as-raw-xcb-connection",
- "aterm-core",
- "aterm-font",
- "aterm-render",
- "base64",
- "dirs",
- "libc",
- "toml",
- "x11rb",
-]
-
-[[package]]
 name = "as-raw-xcb-connection"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -33,32 +18,66 @@ dependencies = [
 ]
 
 [[package]]
-name = "aterm-core"
+name = "aura-app"
 version = "0.1.0"
 dependencies = [
- "aterm-font",
+ "as-raw-xcb-connection",
+ "aura-config",
+ "aura-core",
+ "aura-pty",
+ "aura-render",
+ "aura-text",
+ "base64",
  "libc",
+ "toml",
+ "x11rb",
+]
+
+[[package]]
+name = "aura-config"
+version = "0.1.0"
+dependencies = [
+ "aura-core",
+ "aura-pty",
+ "aura-text",
+ "dirs",
+ "toml",
+]
+
+[[package]]
+name = "aura-core"
+version = "0.1.0"
+dependencies = [
+ "aura-text",
  "unicode-segmentation",
  "unicode-width",
 ]
 
 [[package]]
-name = "aterm-font"
+name = "aura-pty"
+version = "0.1.0"
+dependencies = [
+ "aura-core",
+ "libc",
+]
+
+[[package]]
+name = "aura-render"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "aura-core",
+ "aura-text",
+ "bytemuck",
+]
+
+[[package]]
+name = "aura-text"
 version = "0.1.0"
 dependencies = [
  "rustybuzz",
  "swash",
  "unicode-script",
-]
-
-[[package]]
-name = "aterm-render"
-version = "0.1.0"
-dependencies = [
- "ash",
- "aterm-core",
- "aterm-font",
- "bytemuck",
 ]
 
 [[package]]

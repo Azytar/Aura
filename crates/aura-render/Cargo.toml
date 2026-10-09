@@ -1,0 +1,19 @@
+[package]
+name = "aura-render"
+version = "0.1.0"
+description = "Terminal cell, glyph, and decoration drawing over the AURA Vulkan backend"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aura-core = { path = "../aura-core" }
+aura-text = { path = "../aura-text" }
+ash = "0.38.0"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+
+[lints]
+workspace = true

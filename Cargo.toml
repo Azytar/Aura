@@ -1,5 +1,12 @@
 [workspace]
-members = ["core", "font", "render", "app"]
+members = [
+    "crates/aura-app",
+    "crates/aura-config",
+    "crates/aura-core",
+    "crates/aura-pty",
+    "crates/aura-render",
+    "crates/aura-text",
+]
 resolver = "3"
 
 [workspace.package]
@@ -12,4 +19,3 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 all = "warn"
-

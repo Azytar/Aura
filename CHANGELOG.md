@@ -23,7 +23,38 @@ per commit.
 
 ### Added
 
-- Typed TOML configuration loaded once at startup from `~/.config/aterm/aterm.toml`.
+- Workspace restructured into the AURA crate layout: `crates/aura-core`,
+  `crates/aura-pty`, `crates/aura-text`, `crates/aura-render`,
+  `crates/aura-config`, and `crates/aura-app`, with shaders under `shaders/`
+  and the binary renamed to `aura`.
+- `aura-pty` as an independent crate: the only place that calls `openpty`,
+  `setsid`, `TIOCSCTTY`, and `TIOCSWINSZ`. `aura-core` no longer owns any
+  file-descriptor logic, so terminal state has no OS dependencies left.
+- `aura-config` as an independent crate: TOML discovery under
+  `~/.config/aura/config.toml`, validation, and terminal geometry.
+
+### Fixed
+
+- Background push-constant layout drift: `background.frag` declared its
+  push-constant block without `offset_x`/`offset_y`, so every field after
+  `ascent` was read two `u32` slots earlier than the Rust `PushGrid` and the
+  vertex stages wrote it. The fragment stage read `cursor_visible` from
+  `offset_y` (always 0, so the cursor cell was never inverted), and treated
+  the real cursor index as `selection_start`. Any cursor in cell 0 or 1
+  painted that cell with the selection background colour, and the block
+  cursor never appeared over blank cells.
+- The offscreen GPU readback suite is no longer `#[ignore]`d. It now prints a
+  skip reason when no Vulkan device is reachable, so `cargo test` really runs
+  those assertions on capable hosts instead of silently hiding them.
+
+### Changed
+
+- Configuration moved from `~/.config/aterm/aterm.toml` to
+  `~/.config/aura/config.toml`; the example file is `examples/aura.toml`.
+
+## [0.1.0] - 2026-10-06
+
+- Typed TOML configuration loaded once at startup from `~/.config/aura/config.toml`.
 - Configurable font family and size with validation (6-72 px).
 - Runtime font zoom: `Ctrl+Plus` / `Ctrl+Minus` adjust the live size by
   1.0 px (clamped to 6-72 px) with fresh rasterization, atlas rebuild, and
