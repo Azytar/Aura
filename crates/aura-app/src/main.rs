@@ -83,6 +83,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ),
     )?;
     set_title(&connection, window, "Terminal")?;
+    set_window_properties(&connection, window, &geometry)?;
     let mut clipboard = Clipboard::new(&connection)?;
     connection.change_property32(
         PropMode::REPLACE,
@@ -600,6 +601,101 @@ fn set_title(
     Ok(())
 }
 
+/// ICCCM `WM_SIZE_HINTS` flag bits (section 4.1.2.3).
+const P_SIZE: u32 = 1 << 1;
+const P_MIN_SIZE: u32 = 1 << 4;
+const P_RESIZE_INC: u32 = 1 << 6;
+const P_BASE_SIZE: u32 = 1 << 8;
+
+/// Publishes the size hints that make window resizing land on whole cells.
+///
+/// The `WM_NORMAL_HINTS` payload is the 18-word ICCCM structure. Setting
+/// `base_width`/`base_height` to the padding and `width_inc`/`height_inc` to
+/// one cell means a window manager can only ever present a size that holds a
+/// whole number of cells, so a resize never clips a half row or column. The
+/// minimum size is one cell plus padding, which keeps a squeezed window
+/// usable instead of degenerate.
+fn set_size_hints(
+    connection: &XCBConnection,
+    window: u32,
+    geometry: &FontGeometry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let hints_atom = connection
+        .intern_atom(false, b"WM_NORMAL_HINTS")?
+        .reply()?
+        .atom;
+    let size_hints_type = connection
+        .intern_atom(false, b"WM_SIZE_HINTS")?
+        .reply()?
+        .atom;
+    let padding_x = geometry
+        .pixel_width
+        .saturating_sub(geometry.columns as u32 * geometry.cell_width)
+        / 2;
+    let padding_y = geometry
+        .pixel_height
+        .saturating_sub(geometry.rows as u32 * geometry.cell_height)
+        / 2;
+    let hints: [u32; 18] = [
+        P_SIZE | P_MIN_SIZE | P_RESIZE_INC | P_BASE_SIZE,
+        0,
+        0, // x, y placeholders
+        geometry.pixel_width,
+        geometry.pixel_height,
+        padding_x + geometry.cell_width,
+        padding_y + geometry.cell_height, // min_width, min_height
+        0,
+        0, // max_width, max_height
+        geometry.cell_width,
+        geometry.cell_height, // width_inc, height_inc
+        0,
+        0,
+        0,
+        0, // min/max aspect ratios
+        padding_x,
+        padding_y, // base_width, base_height
+        1,         // win_gravity: NorthWest
+    ];
+    connection.change_property32(
+        PropMode::REPLACE,
+        window,
+        hints_atom,
+        size_hints_type,
+        &hints,
+    )?;
+    Ok(())
+}
+
+/// Publishes the window properties AURA needs for correct desktop
+/// integration: `_NET_WM_PID` so launchers, taskbars, and tooling can map the
+/// window back to this process, `WM_CLASS` so the `.desktop` entry matches,
+/// and the cell-aligned size hints.
+fn set_window_properties(
+    connection: &XCBConnection,
+    window: u32,
+    geometry: &FontGeometry,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let net_wm_pid = connection.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
+    connection.change_property32(
+        PropMode::REPLACE,
+        window,
+        net_wm_pid,
+        AtomEnum::CARDINAL,
+        &[std::process::id()],
+    )?;
+    // ICCCM WM_CLASS is two NUL-terminated strings: res_name then res_class.
+    connection.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        b"aura\0AURA Terminal\0",
+    )?;
+    set_size_hints(connection, window, geometry)?;
+    connection.flush()?;
+    Ok(())
+}
+
 const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
 
 fn decode_clipboard_payload(encoded: &[u8]) -> Option<Vec<u8>> {
@@ -846,6 +942,8 @@ fn resize_font(
     // path that does so: `Renderer::resize` reconciles the swapchain alone and
     // must not invalidate font state for a plain window resize.
     renderer.invalidate_font();
+    // Cell metrics changed, so the resize increments and minimum size move too.
+    set_size_hints(connection, window, &geometry)?;
     renderer
         .resize(geometry.pixel_width, geometry.pixel_height)
         .map_err(io::Error::other)?;
