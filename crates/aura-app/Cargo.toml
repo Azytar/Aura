@@ -16,6 +16,7 @@ aura-core = { path = "../aura-core" }
 aura-pty = { path = "../aura-pty" }
 aura-render = { path = "../aura-render" }
 aura-text = { path = "../aura-text" }
+ash = "0.38.0"
 as-raw-xcb-connection = "1.0"
 base64 = "0.22.1"
 libc = "0.2"

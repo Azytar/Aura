@@ -2,6 +2,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 
 use as_raw_xcb_connection::AsRawXcbConnection;
+use ash::vk;
 use aura_config::{AppConfig, FontGeometry, RuntimeFontSize, grid_dimensions};
 use aura_core::{MouseTracking, SelectionPoint, Terminal};
 use aura_pty::{Pty, PtySize};
@@ -511,7 +512,7 @@ impl RenderStats {
         if self.frames > 0 {
             let seconds = self.window_start.elapsed().as_secs_f64().max(0.001);
             eprintln!(
-                "aterm perf: {:.0} frames/s {:.0} KiB/s PTY {:.2} ms/frame",
+                "aura perf: {:.0} frames/s {:.0} KiB/s PTY {:.2} ms/frame",
                 self.frames as f64 / seconds,
                 self.pty_bytes as f64 / 1024.0 / seconds,
                 self.render_nanos as f64 / self.frames as f64 / 1_000_000.0,
@@ -541,30 +542,238 @@ type LaunchOptions = Option<()>;
 
 #[allow(clippy::never_loop)]
 fn arguments() -> Result<LaunchOptions, Box<dyn std::error::Error>> {
+    let mut launch = Some(());
     for arg in std::env::args_os().skip(1) {
         match arg.to_str() {
             Some("--help" | "-h") => {
+                launch = None;
                 println!(
-                    "aterm {} - GPU terminal emulator (Vulkan/X11)\n\n\
-                     Usage: aterm [OPTIONS]\n\n\
+                    "aura {} - GPU-accelerated terminal emulator for Linux\n\n\
+                     Usage: aura [OPTIONS]\n\n\
                      Options:\n  \
                      -h, --help       print this help and exit\n  \
-                     -V, --version    print the version and exit\n\n\
+                     -V, --version    print the version and exit\n  \
+                     --doctor         report display, font, config, and Vulkan\n  \
+                     diagnostics, then exit\n\n\
                      Font and terminal geometry are configured in:\n  \
-                     ~/.config/aura/config.toml",
+                     ~/.config/aura/config.toml\n\n\
+                     With no argument aura starts an interactive shell. When the\n  \
+                     configuration file is absent the built-in defaults are used.",
                     env!("CARGO_PKG_VERSION")
                 );
-                return Ok(None);
             }
             Some("--version" | "-V") => {
-                println!("aterm {}", env!("CARGO_PKG_VERSION"));
-                return Ok(None);
+                launch = None;
+                println!("aura {}", env!("CARGO_PKG_VERSION"));
+            }
+            Some("--doctor") => {
+                launch = None;
+                doctor();
             }
             Some(other) => return Err(format!("unknown argument: {other}").into()),
             None => return Err("arguments must be valid UTF-8".into()),
         }
     }
-    Ok(Some(()))
+    Ok(launch)
+}
+
+/// Reports what AURA can see on this machine, without starting a window or a
+/// shell. Every line is actionable: the point is to answer "is my Vulkan /
+/// display / font setup usable?" without reading a crash backtrace.
+///
+/// Nothing here opens the PTY, spawns a child, or writes to the user's
+/// clipboard, and no file contents are echoed beyond the configuration path.
+fn doctor() {
+    println!("AURA Terminal {}", env!("CARGO_PKG_VERSION"));
+    println!();
+
+    println!("Display");
+    println!(
+        "  DISPLAY              {}",
+        std::env::var("DISPLAY").unwrap_or_else(|_| "<unset>".into())
+    );
+    println!(
+        "  WAYLAND_DISPLAY      {}",
+        std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "<unset>".into())
+    );
+    println!(
+        "  XDG_SESSION_TYPE     {}",
+        std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "<unset>".into())
+    );
+    println!(
+        "  XDG_RUNTIME_DIR      {}",
+        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "<unset>".into())
+    );
+    println!();
+
+    println!("Configuration");
+    match AppConfig::config_path() {
+        Some(path) => {
+            let present = path.is_file();
+            println!("  path                 {}", path.display());
+            println!(
+                "  status               {}",
+                if present {
+                    "loaded"
+                } else {
+                    "absent; defaults are in effect"
+                }
+            );
+            if present {
+                match AppConfig::load_from_path(Some(&path)) {
+                    Ok(config) => {
+                        println!("  parsed               yes");
+                        println!(
+                            "  font                 {} @ {}px",
+                            config.font.family, config.font.size
+                        );
+                        println!(
+                            "  window               {}x{} cells, padding {}x{}",
+                            config.window.columns,
+                            config.window.lines,
+                            config.window.padding_x,
+                            config.window.padding_y
+                        );
+                    }
+                    Err(error) => println!("  parsed               NO: {error}"),
+                }
+            }
+        }
+        None => println!("  path                 <no config directory available>"),
+    }
+    println!();
+
+    println!("Fonts");
+    for family in [
+        "monospace",
+        "DejaVu Sans Mono",
+        "Liberation Mono",
+        "Noto Sans Mono",
+    ] {
+        match Font::load_with_family(family, 12.0) {
+            Ok(font) => {
+                println!(
+                    "  {family:<21} OK  cell {}x{}, ascent {} descent {}",
+                    font.metrics().width,
+                    font.metrics().height,
+                    font.metrics().ascent,
+                    font.metrics().descent
+                );
+            }
+            Err(error) => println!("  {family:<21} --  {error}"),
+        }
+    }
+    println!();
+
+    println!("Vulkan");
+    // ash can load the loader and enumerate devices without a surface, so a
+    // missing display is not a blocker here.
+    match probe_vulkan() {
+        Ok(devices) if devices.is_empty() => {
+            println!("  loader               OK");
+            println!("  devices              none found");
+        }
+        Ok(devices) => {
+            println!("  loader               OK");
+            for device in devices {
+                println!(
+                    "  device               {} (Vulkan {}.{}.{}, {})",
+                    device.name,
+                    device.api_version.0,
+                    device.api_version.1,
+                    device.api_version.2,
+                    device.driver
+                );
+                println!(
+                    "  dynamic rendering    {}",
+                    yes_no(device.dynamic_rendering)
+                );
+                println!(
+                    "  synchronization2      {}",
+                    yes_no(device.synchronization2)
+                );
+            }
+        }
+        Err(error) => println!("  unavailable          {error}"),
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+struct VulkanDevice {
+    name: String,
+    api_version: (u32, u32, u32),
+    driver: String,
+    dynamic_rendering: bool,
+    synchronization2: bool,
+}
+
+/// Enumerates physical devices through ash. Returns an error only when the
+/// Vulkan loader itself cannot be loaded or no instance can be created.
+fn probe_vulkan() -> Result<Vec<VulkanDevice>, String> {
+    let entry =
+        unsafe { ash::Entry::load() }.map_err(|error| format!("cannot load loader: {error}"))?;
+    let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+    let instance = match unsafe {
+        entry.create_instance(
+            &vk::InstanceCreateInfo::default().application_info(&app),
+            None,
+        )
+    } {
+        Ok(instance) => instance,
+        Err(vk::Result::ERROR_INCOMPATIBLE_DRIVER) => {
+            return Err("no compatible Vulkan driver".into());
+        }
+        Err(error) => return Err(format!("instance creation failed: {error}")),
+    };
+    let mut devices = Vec::new();
+    for physical in unsafe { instance.enumerate_physical_devices() }
+        .map_err(|error| format!("device enumeration failed: {error}"))?
+    {
+        let properties = unsafe { instance.get_physical_device_properties(physical) };
+        let name = std::ffi::CStr::from_bytes_until_nul(unsafe {
+            std::slice::from_raw_parts(
+                properties.device_name.as_ptr().cast(),
+                properties.device_name.len(),
+            )
+        })
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "<unnamed>".to_string());
+        let mut device_12_properties = vk::PhysicalDeviceVulkan12Properties::default();
+        let mut properties12 =
+            vk::PhysicalDeviceProperties2::default().push_next(&mut device_12_properties);
+        unsafe { instance.get_physical_device_properties2(physical, &mut properties12) };
+        let mut dynamic_rendering = vk::PhysicalDeviceDynamicRenderingFeatures::default();
+        let mut synchronization2 = vk::PhysicalDeviceSynchronization2Features::default();
+        let mut features = vk::PhysicalDeviceFeatures2::default()
+            .push_next(&mut dynamic_rendering)
+            .push_next(&mut synchronization2);
+        unsafe { instance.get_physical_device_features2(physical, &mut features) };
+        let api_version = (
+            vk::api_version_major(properties.api_version),
+            vk::api_version_minor(properties.api_version),
+            vk::api_version_patch(properties.api_version),
+        );
+        devices.push(VulkanDevice {
+            name,
+            api_version,
+            // The concrete driver name (radv, anv, nvidia, ...) lives in the
+            // Vulkan 1.2 properties, which is what users recognise.
+            driver: match device_12_properties.driver_id {
+                vk::DriverId::MESA_RADV => "Mesa RADV".to_owned(),
+                vk::DriverId::MESA_NVK => "Mesa NVK".to_owned(),
+                vk::DriverId::INTEL_OPEN_SOURCE_MESA => "Mesa ANV".to_owned(),
+                vk::DriverId::MESA_LLVMPIPE => "Mesa llvmpipe (software)".to_owned(),
+                vk::DriverId::NVIDIA_PROPRIETARY => "NVIDIA proprietary".to_owned(),
+                other => format!("{other:?}"),
+            },
+            dynamic_rendering: dynamic_rendering.dynamic_rendering == vk::TRUE,
+            synchronization2: synchronization2.synchronization2 == vk::TRUE,
+        });
+    }
+    Ok(devices)
 }
 
 fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
@@ -727,7 +936,7 @@ impl Clipboard {
             primary_atom: AtomEnum::PRIMARY.into(),
             utf8_atom: atom(b"UTF8_STRING")?,
             targets_atom: atom(b"TARGETS")?,
-            property_atom: atom(b"ATERM_CLIPBOARD")?,
+            property_atom: atom(b"AURA_CLIPBOARD")?,
             clipboard_contents: Vec::new(),
             primary_contents: Vec::new(),
         })
