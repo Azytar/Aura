@@ -1,0 +1,22 @@
+[package]
+name = "aura-config"
+version = "0.1.0"
+description = "TOML configuration discovery, validation, and terminal geometry for AURA Terminal"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+aura-text = { path = "../aura-text" }
+dirs = "6.0"
+toml = "0.9"
+
+[dev-dependencies]
+aura-core = { path = "../aura-core" }
+aura-pty = { path = "../aura-pty" }
+
+[lints]
+workspace = true

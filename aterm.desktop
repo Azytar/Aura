@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=aterm
-Comment=GPU terminal emulator (Vulkan/X11)
-Exec=/usr/local/bin/aterm
-Terminal=false
-Categories=System;TerminalEmulator;
-StartupNotify=true

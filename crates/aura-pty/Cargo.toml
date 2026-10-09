@@ -1,0 +1,19 @@
+[package]
+name = "aura-pty"
+version = "0.1.0"
+description = "Linux pseudoterminal allocation, child-process supervision, and window-size propagation"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2.179"
+
+[dev-dependencies]
+aura-core = { path = "../aura-core" }
+
+[lints]
+workspace = true

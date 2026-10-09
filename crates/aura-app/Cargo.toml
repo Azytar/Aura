@@ -1,0 +1,26 @@
+[package]
+name = "aura-app"
+version = "0.1.0"
+description = "AURA Terminal: a GPU-accelerated terminal emulator for Linux"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "aura"
+path = "src/main.rs"
+
+[dependencies]
+aura-config = { path = "../aura-config" }
+aura-core = { path = "../aura-core" }
+aura-pty = { path = "../aura-pty" }
+aura-render = { path = "../aura-render" }
+aura-text = { path = "../aura-text" }
+as-raw-xcb-connection = "1.0"
+base64 = "0.22.1"
+libc = "0.2"
+toml = "0.9"
+x11rb = { version = "0.14.0", features = ["as-raw-xcb-connection", "allow-unsafe-code"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "aura-core"
+version = "0.1.0"
+description = "VT parser, terminal grid, scrollback, and Unicode handling for AURA Terminal"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "workloads"
+harness = false
+
+[dependencies]
+unicode-segmentation = "1.12.0"
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+aura-text = { path = "../aura-text" }
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "aura-text"
+version = "0.1.0"
+description = "Font discovery, shaping, rasterization, glyph cache, and atlas management for AURA Terminal"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "glyph_workloads"
+harness = false
+
+[dependencies]
+rustybuzz = "0.20.1"
+swash = "0.2.10"
+unicode-script = "0.5.8"
+
+[lints]
+workspace = true
