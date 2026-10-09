@@ -58,7 +58,19 @@ CHILD_PID="$(pgrep -P "$AURA_PID" | head -1)"
 [ -n "$CHILD_PID" ] || fail "aura did not spawn a child shell process"
 printf '   child shell pid %s\n' "$CHILD_PID"
 
+# A live window manager can hand focus elsewhere between steps (another
+# window, an OSD, leftovers from an earlier run). Re-assert focus before every
+# input so a keystroke never lands in somebody else's window.
+focus_window() {
+    xdotool windowfocus --sync "$WID" >/dev/null 2>&1 || true
+    xdotool windowactivate --sync "$WID" >/dev/null 2>&1 || true
+    [ "$(xdotool getwindowfocus 2>/dev/null)" = "$WID" ] || return 1
+}
+
+focus_window || fail "could not focus the aura window"
+
 send_line() {
+    focus_window || fail "lost focus before typing"
     xdotool type --delay 12 "$1"
     xdotool key --clearmodifiers Return
 }
