@@ -2,7 +2,11 @@
 layout(location = 0) out vec4 color;
 struct Cell { uint glyph; uint fg; uint bg; uint flags; };
 layout(set = 0, binding = 1, std430) readonly buffer Cells { Cell cells[]; };
-layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; uint cursor_style; } grid;
+// Push-constant members must stay in the exact order and type of the Rust
+// `PushGrid` and of the vertex stages; every stage declares the whole block so
+// field offsets cannot drift between stages. `offset_x`/`offset_y` are unused
+// here but are part of the shared layout.
+layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; int offset_x; int offset_y; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; uint cursor_style; } grid;
 vec4 unpack_color(uint c) { return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), 255.0) / 255.0; }
 void main() {
     uvec2 p = uvec2(gl_FragCoord.xy);
