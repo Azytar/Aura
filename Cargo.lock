@@ -22,6 +22,7 @@ name = "aura-app"
 version = "0.1.0"
 dependencies = [
  "as-raw-xcb-connection",
+ "ash",
  "aura-config",
  "aura-core",
  "aura-pty",
