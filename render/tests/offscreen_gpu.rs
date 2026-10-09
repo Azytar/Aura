@@ -2,9 +2,26 @@ use aterm_core::Terminal;
 use aterm_font::Font;
 use aterm_render::OffscreenRenderer;
 
+/// Reports whether this host can create the offscreen Vulkan device the
+/// assertions need. Machines without a GPU (or without the ICD loader) degrade
+/// to a printed skip instead of a false failure, so `cargo test` really runs
+/// these assertions wherever the hardware allows it.
+fn require_gpu() -> bool {
+    match OffscreenRenderer::new(1, 1) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("Vulkan device unavailable: {error}");
+            false
+        }
+    }
+}
+
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn renders_terminal_cells_and_reads_back_expected_colors() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     let mut font = Font::load(None, 18.0).expect("load system monospace font");
     let metrics = font.metrics();
     let mut terminal = Terminal::new(3, 2).expect("create terminal grid");
@@ -44,8 +61,11 @@ fn renders_terminal_cells_and_reads_back_expected_colors() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn glyph_cache_hits_keep_later_table_entries() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // "ABA" assigns ids 0,1 then hits id 0 again; a truncating table update
     // would drop entry 1 and leave the middle cell without sampled pixels.
     let mut font = Font::load(None, 18.0).expect("load system monospace font");
@@ -75,8 +95,11 @@ fn glyph_cache_hits_keep_later_table_entries() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn underline_and_strikethrough_paint_foreground_rows() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // Spaces isolate decorations from glyph pixels: the bottom row of an
     // underlined cell and the middle row of a struck cell must carry the
     // foreground color while plain cells stay background.
@@ -124,8 +147,11 @@ fn underline_and_strikethrough_paint_foreground_rows() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn color_emoji_samples_the_color_atlas() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // A color glyph must paint non-background texels through the RGBA path;
     // a monochrome-only pipeline would leave the cell background. The grid
     // must be two cells wide: a 1x1 grid replaces any wide glyph with
@@ -170,8 +196,11 @@ fn color_emoji_samples_the_color_atlas() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn cursor_shapes_invert_expected_regions() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // A cursor on a space cell inverts exactly the shape region and leaves
     // the rest of the cell background.
     let mut font = Font::load(None, 18.0).expect("load system monospace font");
@@ -233,8 +262,11 @@ fn cursor_shapes_invert_expected_regions() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn inverse_and_truecolor_cells_use_deterministic_colors() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     let mut font = Font::load(None, 18.0).expect("load system monospace font");
     let metrics = font.metrics();
     let mut terminal = Terminal::new(2, 1).expect("create terminal grid");
@@ -265,8 +297,11 @@ fn inverse_and_truecolor_cells_use_deterministic_colors() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn mixed_fallback_frame_renders_all_atlases() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // ASCII (mask atlas, primary face), CJK (mask atlas, fallback face),
     // and emoji (color atlas) share one frame and one glyph table.
     // `A界😀` occupies exactly five terminal columns (1+2+2).
@@ -307,8 +342,11 @@ fn mixed_fallback_frame_renders_all_atlases() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn font_resize_repaints_ascii_cells_with_fresh_rasterization() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // Ordinary narrow glyphs only: 12 -> 24 re-rasterizes (bright pixel
     // coverage grows with the cell) and returning to 12 reproduces the
     // original frame byte-for-byte — no size-24 atlas/cache may leak.
@@ -397,8 +435,11 @@ fn font_resize_repaints_ascii_cells_with_fresh_rasterization() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn font_resize_rerasterizes_wide_cells_with_terminal_cell_ownership() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // `A界B` occupies four terminal columns: A=1, 界=2 (leading + spacer),
     // B=1. Placement is asserted from terminal-cell ownership, never from
     // a one-character-per-column assumption.
@@ -485,8 +526,11 @@ fn font_resize_rerasterizes_wide_cells_with_terminal_cell_ownership() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn font_resize_repaints_color_emoji_from_fresh_color_atlas() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // `A😀B` occupies four terminal columns (A=1, 😀=2, B=1). The emoji
     // must come from the RGBA atlas at BOTH sizes — a 12px atlas reused
     // at 24px would paint chromatic pixels at the wrong scale or not at all.
@@ -564,8 +608,11 @@ fn font_resize_repaints_color_emoji_from_fresh_color_atlas() {
 }
 
 #[test]
-#[ignore = "requires an accessible Vulkan 1.3 graphics device"]
 fn font_resize_keeps_combining_grapheme_in_one_cell() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
     // `e` + U+0301 is a single terminal cell at every size; the composed
     // glyph must re-rasterize with the rest of the font, not vanish or
     // split when the size changes.
