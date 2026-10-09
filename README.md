@@ -6,9 +6,10 @@ a Vulkan renderer.
 
 ## Status
 
-The terminal core, text stack, PTY supervision, and Vulkan renderer are
-implemented and tested, including offscreen GPU readback assertions that run
-as part of `cargo test` on machines with a usable Vulkan device.
+Version 0.1.0: the terminal core, text stack, PTY supervision, and Vulkan
+renderer are implemented and tested, including offscreen GPU readback
+assertions that run as part of `cargo test` on machines with a usable Vulkan
+device.
 
 See `CHANGELOG.md` for the validated scope and known limitations, and
 `docs/ARCHITECTURE.md` for how the crates fit together.
