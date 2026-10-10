@@ -9,19 +9,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "aterm-core"
+name = "aura-core"
 version = "0.1.0"
 dependencies = [
- "libc",
  "unicode-segmentation",
  "unicode-width",
 ]
 
 [[package]]
-name = "aterm-core-fuzz"
+name = "aura-core-fuzz"
 version = "0.0.0"
 dependencies = [
- "aterm-core",
+ "aura-core",
  "libfuzzer-sys",
 ]
 

@@ -83,26 +83,47 @@ send_line() {
     xdotool key --clearmodifiers Return
 }
 
-# Polls the window title, which bash rewrites at every prompt unless a command
-# is still running.
-wait_for_title() {
-    local want="$1" i
-    for i in $(seq 1 30); do
-        [ "$(xdotool getwindowname "$WID" 2>/dev/null)" = "$want" ] && return 0
-        sleep 0.2
+# --- 1. keyboard -> PTY -> real bash -> parser -> window title ----------
+# NOTE on `xdotool type`: it synthesizes characters by rebinding scratch
+# keycodes and restoring them afterwards. When it restores, the server can emit
+# MappingNotify *before* some of the synthetic KeyPress events, and AURA then
+# translates that keycode against the restored map - so the character bash sees
+# differs from the one intended. A physical keyboard cannot do this.
+#
+# The command is therefore re-sent until the title shows the round trip
+# actually completed, rather than asserting on one shot at a racy input path.
+# Retrying is not papering over a terminal bug: the failure mode is a skewed
+# command line, which is visible as a bash "command not found", never as a
+# wrong terminal result.
+round_trip_title() {
+    local format="$1" want="$2" attempt
+    for attempt in $(seq 1 4); do
+        focus_window || fail "lost focus before typing"
+        xdotool type --delay 12 "$format"
+        xdotool key --clearmodifiers Return
+        # Poll the title; bash rewrites it at the next prompt unless a command
+        # is still running, hence the trailing sleep.
+        local i
+        for i in $(seq 1 15); do
+            [ "$(xdotool getwindowname "$WID" 2>/dev/null)" = "$want" ] && return 0
+            sleep 0.2
+        done
+        # A skewed send can leave bash in a quote continuation, which would
+        # eat every later retry. Abort the pending line, then start clean.
+        focus_window || true
+        xdotool key --clearmodifiers ctrl+c
+        sleep 0.4
+        send_line 'clear' >/dev/null 2>&1 || true
     done
     return 1
 }
 
-# --- 1. keyboard -> PTY -> real bash -> parser -> window title ----------
-send_line 'printf "\033]0;%s\a" "AURA_E2E_TITLE"; sleep 3'
-wait_for_title "AURA_E2E_TITLE" \
+round_trip_title 'printf "\033]0;%s\a" "AURA_E2E_TITLE"; sleep 3' "AURA_E2E_TITLE" \
     || fail "window title never became AURA_E2E_TITLE (got '$(xdotool getwindowname "$WID")')"
 printf '   keyboard -> pty -> bash -> parser -> title: OK\n'
 
 # --- 2. shell arithmetic proves a real interactive bash ----------------
-send_line 'printf "\033]0;%s\a" "$((6 * 7))"; sleep 3'
-wait_for_title "42" \
+round_trip_title 'printf "\033]0;%s\a" "$((6 * 7))"; sleep 3' "42" \
     || fail "shell arithmetic reported '$(xdotool getwindowname "$WID")', expected '42'"
 printf '   interactive bash session: OK\n'
 

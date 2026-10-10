@@ -22,7 +22,7 @@ fn main() {
     let opts = match arguments() {
         Ok(opts) => opts,
         Err(error) => {
-            eprintln!("aterm: {error}");
+            eprintln!("aura: {error}");
             std::process::exit(1);
         }
     };
@@ -30,7 +30,7 @@ fn main() {
         return;
     }
     if let Err(error) = run() {
-        eprintln!("aterm: {error}");
+        eprintln!("aura: {error}");
         std::process::exit(1);
     }
 }

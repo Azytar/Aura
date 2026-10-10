@@ -240,7 +240,7 @@ impl OffscreenRenderer {
             return Err("offscreen target dimensions must be nonzero".into());
         }
         let entry = unsafe { Entry::load() }.map_err(|error| format!("Vulkan loader: {error}"))?;
-        let app_name = CString::new("aterm-offscreen").expect("static string has no nul");
+        let app_name = CString::new("aura-offscreen").expect("static string has no nul");
         let app = vk::ApplicationInfo::default()
             .application_name(&app_name)
             .application_version(vk::make_api_version(0, 0, 1, 0))
@@ -612,7 +612,7 @@ impl Renderer {
     ) -> Result<Self, String> {
         // Entry owns the dynamically loaded Vulkan loader for the entire instance lifetime.
         let entry = unsafe { Entry::load() }.map_err(|error| format!("Vulkan loader: {error}"))?;
-        let app_name = CString::new("aterm").expect("static string has no nul");
+        let app_name = CString::new("aura").expect("static string has no nul");
         let app = vk::ApplicationInfo::default()
             .application_name(&app_name)
             .application_version(vk::make_api_version(0, 0, 1, 0))
