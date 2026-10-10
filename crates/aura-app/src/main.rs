@@ -395,25 +395,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::MotionNotify(motion) => {
-                                if terminal.modes().mouse_tracking == MouseTracking::Drag {
-                                    if let Some(button) = held_button(motion.state) {
-                                        if let Some(bytes) = mouse_report(
-                                            terminal.modes(),
-                                            MouseEvent {
-                                                button,
-                                                x: motion.event_x,
-                                                y: motion.event_y,
-                                                state: motion.state,
-                                                released: false,
-                                                motion: true,
-                                            },
-                                            configured_metrics(&font, &config),
-                                            [config.window.padding_x, config.window.padding_y],
-                                        ) {
-                                            input.push(&bytes);
-                                        }
-                                    }
-                                } else if let Some(anchor) = selection_anchor {
+                                if terminal.modes().mouse_tracking == MouseTracking::Drag
+                                    && let Some(button) = held_button(motion.state)
+                                    && let Some(bytes) = mouse_report(
+                                        terminal.modes(),
+                                        MouseEvent {
+                                            button,
+                                            x: motion.event_x,
+                                            y: motion.event_y,
+                                            state: motion.state,
+                                            released: false,
+                                            motion: true,
+                                        },
+                                        configured_metrics(&font, &config),
+                                        [config.window.padding_x, config.window.padding_y],
+                                    )
+                                {
+                                    input.push(&bytes);
+                                } else if terminal.modes().mouse_tracking != MouseTracking::Drag
+                                    && let Some(anchor) = selection_anchor
+                                {
                                     let point = selection_point(
                                         motion.event_x,
                                         motion.event_y,
