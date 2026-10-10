@@ -110,7 +110,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|error| io::Error::other(format!("terminal grid: {error:?}")))?;
     apply_configured_modes(&mut terminal, &config);
     terminal.set_scrollback_limit(config.scrollback.lines);
-    let mut pty = Pty::spawn_shell(PtySize::new(columns, rows)?)?;
+    // The child sees the window pixels from the start; later resizes keep
+    // these lanes current so SIGWINCH observers never see them drop to zero.
+    let mut last_winsize = PtySize::new(columns, rows)?;
+    (last_winsize.pixel_width, last_winsize.pixel_height) = geometry.pty_pixels();
+    let mut pty = Pty::spawn_shell(last_winsize)?;
     // XCB stays alive in this scope, so the raw pointer remains valid until Renderer is dropped.
     let raw_connection = connection.as_raw_xcb_connection().cast();
     let mut renderer = Renderer::new(raw_connection, window, pixel_width, pixel_height)
@@ -232,6 +236,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 resize(
                                     &mut terminal,
                                     &mut pty,
+                                    &mut last_winsize,
                                     &mut renderer,
                                     (
                                         configured_metrics(&font, &config).width,
@@ -258,6 +263,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             &mut font,
                                             &mut terminal,
                                             &mut pty,
+                                            &mut last_winsize,
                                             &connection,
                                             window,
                                             &mut renderer,
@@ -1143,6 +1149,7 @@ impl Clipboard {
 fn resize(
     terminal: &mut Terminal,
     pty: &mut Pty,
+    last_winsize: &mut PtySize,
     renderer: &mut Renderer,
     metrics: (u32, u32),
     padding: (u32, u32),
@@ -1153,11 +1160,21 @@ fn resize(
     let inner_width = u32::from(event.width).saturating_sub(2 * padding_x).max(1);
     let inner_height = u32::from(event.height).saturating_sub(2 * padding_y).max(1);
     let (width, height) = grid_dimensions(inner_width, inner_height, cell_width, cell_height);
+    // The window pixels are the PTY pixel lanes; they change on every
+    // ConfigureNotify, even when the cell count does not.
+    let mut winsize = PtySize::new(width, height)?;
+    winsize.pixel_width = event.width;
+    winsize.pixel_height = event.height;
     if terminal.active_grid().width() != width || terminal.active_grid().height() != height {
         terminal
             .resize(width, height)
             .map_err(|error| io::Error::other(format!("terminal resize: {error:?}")))?;
-        pty.resize(PtySize::new(width, height)?)?;
+    }
+    // One ioctl per real change: repeated ConfigureNotify events for the
+    // same geometry must not resend SIGWINCH to the child.
+    if *last_winsize != winsize {
+        pty.resize(winsize)?;
+        *last_winsize = winsize;
     }
     renderer
         .resize(
@@ -1182,6 +1199,7 @@ fn resize_font(
     font: &mut Font,
     terminal: &mut Terminal,
     pty: &mut Pty,
+    last_winsize: &mut PtySize,
     connection: &XCBConnection,
     window: u32,
     renderer: &mut Renderer,
@@ -1209,6 +1227,7 @@ fn resize_font(
     winsize.pixel_width = px;
     winsize.pixel_height = py;
     pty.resize(winsize)?;
+    *last_winsize = winsize;
     // Ask the window manager for the new pixel size; a tiling WM may ignore
     // it, in which case the next ConfigureNotify reconciles via `resize()`.
     connection.configure_window(
