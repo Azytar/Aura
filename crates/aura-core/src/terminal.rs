@@ -56,6 +56,7 @@ pub struct SelectionPoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Modes {
     pub application_cursor: bool,
+    pub application_keypad: bool,
     pub cursor_visible: bool,
     pub auto_wrap: bool,
     pub origin: bool,
@@ -70,6 +71,7 @@ impl Default for Modes {
     fn default() -> Self {
         Self {
             application_cursor: false,
+            application_keypad: false,
             cursor_visible: true,
             auto_wrap: true,
             origin: false,
@@ -127,6 +129,9 @@ pub struct Terminal {
     g1_dec_graphics: bool,
     use_g1: bool,
     last_printed: Option<(ActiveScreen, usize, usize)>,
+    preceding_char: Option<char>,
+    tabs: Vec<bool>,
+    insert_mode: bool,
     current_hyperlink: Option<u32>,
     hyperlinks: HashMap<u32, String>,
     next_hyperlink: u32,
@@ -157,6 +162,9 @@ impl Terminal {
             g1_dec_graphics: false,
             use_g1: false,
             last_printed: None,
+            preceding_char: None,
+            tabs: (0..width).map(|col| col != 0 && col % 8 == 0).collect(),
+            insert_mode: false,
             current_hyperlink: None,
             hyperlinks: HashMap::new(),
             next_hyperlink: 1,
@@ -505,6 +513,11 @@ impl Terminal {
 
     pub fn resize(&mut self, width: usize, height: usize) -> Result<(), GridError> {
         self.grid.resize(width, height)?;
+        let old_width = self.tabs.len();
+        self.tabs.resize(width, false);
+        for col in old_width..width {
+            self.tabs[col] = col != 0 && col % 8 == 0;
+        }
         if let Some((anchor, focus)) = self.selection {
             let clamp = |point: SelectionPoint| SelectionPoint {
                 row: point.row.min(height - 1),
@@ -543,6 +556,7 @@ impl Terminal {
                     ch
                 };
                 self.put_char(ch);
+                self.preceding_char = Some(ch);
             }
             ParserEvent::Control(control) => self.control(control),
             ParserEvent::Escape {
@@ -569,9 +583,7 @@ impl Terminal {
             }
             0x09 => {
                 self.pending_wrap = false;
-                let cursor = self.cursor();
-                let next_tab = (cursor.column / 8 + 1) * 8;
-                self.set_cursor(next_tab.min(self.active_grid().width() - 1), cursor.row);
+                self.tab(1, false);
             }
             0x0a..=0x0c => self.index(),
             0x0d => {
@@ -598,6 +610,8 @@ impl Terminal {
             return;
         }
         match final_byte {
+            b'=' => self.modes.application_keypad = true,
+            b'>' => self.modes.application_keypad = false,
             b'7' => self.saved_cursor = Some(self.save_cursor()),
             b'8' => {
                 if let Some(saved) = self.saved_cursor {
@@ -610,6 +624,10 @@ impl Terminal {
                 self.index();
             }
             b'M' => self.reverse_index(),
+            b'H' => {
+                let col = self.cursor().column;
+                self.tabs[col] = true;
+            }
             b'Z' => replies.extend_from_slice(b"\x1b[?1;2c"),
             b'c' => self.reset(),
             _ => {}
@@ -617,6 +635,25 @@ impl Terminal {
     }
 
     fn csi(&mut self, csi: crate::Csi, replies: &mut Vec<u8>) {
+        if csi.intermediate_len != 0 {
+            if csi.private.is_none()
+                && csi.final_byte == b'q'
+                && csi.intermediate_len == 1
+                && csi.intermediates[0] == b' '
+            {
+                self.set_cursor_style(csi.param(0, 0));
+            }
+            return;
+        }
+        if csi.private == Some(b'>') {
+            if csi.final_byte == b'c' && csi.param(0, 0) == 0 {
+                replies.extend_from_slice(b"\x1b[>0;1;0c");
+            }
+            return;
+        }
+        if csi.private.is_some() && csi.private != Some(b'?') {
+            return;
+        }
         if csi.private == Some(b'?') {
             match csi.final_byte {
                 b'h' => self.set_dec_modes(&csi, true),
@@ -666,6 +703,41 @@ impl Terminal {
                 };
                 self.position(col, target);
             }
+            b'h' | b'l' => {
+                for index in 0..csi.param_count as usize {
+                    if csi.param(index, 0) == 4 {
+                        self.insert_mode = csi.final_byte == b'h';
+                    }
+                }
+            }
+            b'I' => self.tab(param_count(&csi, 0), false),
+            b'Z' => self.tab(param_count(&csi, 0), true),
+            b'g' => match csi.param(0, 0) {
+                0 => {
+                    let col = self.cursor().column;
+                    self.tabs[col] = false;
+                }
+                3 => self.tabs.fill(false),
+                _ => {}
+            },
+            b'b' => {
+                if let Some(ch) = self.preceding_char {
+                    for _ in 0..param_count(&csi, 0) {
+                        self.put_char(ch);
+                    }
+                }
+            }
+            b'X' => {
+                let cursor = self.cursor();
+                self.erase_cells(
+                    cursor.row,
+                    cursor.column..cursor.column.saturating_add(param_count(&csi, 0)),
+                );
+            }
+            b'S' => self.scroll_up(self.top_margin, self.bottom_margin, param_count(&csi, 0)),
+            b'T' if csi.param_count <= 1 => {
+                self.scroll_down(self.top_margin, self.bottom_margin, param_count(&csi, 0))
+            }
             b'J' => self.erase_display(csi.param(0, 0)),
             b'K' => self.erase_line(csi.param(0, 0)),
             b'@' => {
@@ -674,6 +746,10 @@ impl Terminal {
                     cursor.row,
                     cursor.column,
                     param_count(&csi, 0),
+                );
+                self.erase_cells(
+                    cursor.row,
+                    cursor.column..cursor.column.saturating_add(param_count(&csi, 0)),
                 );
                 self.pending_wrap = false;
             }
@@ -684,6 +760,9 @@ impl Terminal {
                     cursor.column,
                     param_count(&csi, 0),
                 );
+                let width = self.active_grid().width();
+                let amount = param_count(&csi, 0).min(width - cursor.column);
+                self.erase_cells(cursor.row, width - amount..width);
                 self.pending_wrap = false;
             }
             b'L' => {
@@ -692,6 +771,8 @@ impl Terminal {
                     let bottom = self.bottom_margin;
                     self.active_grid_mut()
                         .insert_rows(cursor.row, bottom, param_count(&csi, 0));
+                    let amount = param_count(&csi, 0).min(bottom - cursor.row + 1);
+                    self.erase_rows(cursor.row..cursor.row + amount);
                 }
             }
             b'M' => {
@@ -700,6 +781,8 @@ impl Terminal {
                     let bottom = self.bottom_margin;
                     self.active_grid_mut()
                         .delete_rows(cursor.row, bottom, param_count(&csi, 0));
+                    let amount = param_count(&csi, 0).min(bottom - cursor.row + 1);
+                    self.erase_rows(bottom + 1 - amount..bottom + 1);
                 }
             }
             b'r' => self.set_scroll_region(&csi),
@@ -713,9 +796,6 @@ impl Terminal {
             b'c' if csi.param(0, 0) == 0 => replies.extend_from_slice(b"\x1b[?1;2c"),
             b'n' if csi.param(0, 0) == 5 => replies.extend_from_slice(b"\x1b[0n"),
             b'n' if csi.param(0, 0) == 6 => self.report_cursor(replies, false),
-            b'q' if csi.intermediate_len == 1 && csi.intermediates[0] == b' ' => {
-                self.set_cursor_style(csi.param(0, 0))
-            }
             _ => {}
         }
     }
@@ -831,6 +911,10 @@ impl Terminal {
         }
         self.pending_wrap = false;
         let cursor = self.cursor();
+        if self.insert_mode {
+            self.active_grid_mut()
+                .insert_cells(cursor.row, cursor.column, 2);
+        }
         let cell = Cell::new(
             ch as u32,
             self.rendition.fg,
@@ -872,6 +956,10 @@ impl Terminal {
         }
         self.pending_wrap = false;
         let cursor = self.cursor();
+        if self.insert_mode {
+            self.active_grid_mut()
+                .insert_cells(cursor.row, cursor.column, 1);
+        }
         let cell = Cell::new(
             ch as u32,
             self.rendition.fg,
@@ -914,7 +1002,7 @@ impl Terminal {
         let top = self.top_margin;
         if cursor.row == top {
             let bottom = self.bottom_margin;
-            self.active_grid_mut().scroll_down(top, bottom, 1);
+            self.scroll_down(top, bottom, 1);
         } else if cursor.row > 0 {
             self.set_cursor(cursor.column, cursor.row - 1);
         }
@@ -965,23 +1053,40 @@ impl Terminal {
         }
     }
 
+    fn erase_cells(&mut self, row: usize, columns: std::ops::Range<usize>) {
+        // Erase operations use the current colors, never the glyph's attributes.
+        let blank = Cell::new(
+            0,
+            self.rendition.fg,
+            self.rendition.bg,
+            CellFlags::default(),
+        );
+        self.active_grid_mut()
+            .erase_range_in_row(row, columns, blank);
+    }
+
+    fn erase_rows(&mut self, rows: std::ops::Range<usize>) {
+        let width = self.active_grid().width();
+        for row in rows {
+            self.erase_cells(row, 0..width);
+        }
+    }
+
     fn erase_display(&mut self, mode: u16) {
         let cursor = self.cursor();
         let width = self.active_grid().width();
         let height = self.active_grid().height();
         match mode {
             0 => {
-                self.active_grid_mut()
-                    .clear_range_in_row(cursor.row, cursor.column..width);
-                self.active_grid_mut()
-                    .clear_rect(cursor.row + 1..height, 0..width);
+                self.erase_cells(cursor.row, cursor.column..width);
+                self.erase_rows(cursor.row + 1..height);
             }
             1 => {
-                self.active_grid_mut().clear_rect(0..cursor.row, 0..width);
-                self.active_grid_mut()
-                    .clear_range_in_row(cursor.row, 0..cursor.column + 1);
+                self.erase_rows(0..cursor.row);
+                self.erase_cells(cursor.row, 0..cursor.column + 1);
             }
-            2 => self.active_grid_mut().clear_all(),
+            2 => self.erase_rows(0..height),
+            3 => self.active_grid_mut().clear_scrollback(),
             _ => {}
         }
     }
@@ -990,19 +1095,26 @@ impl Terminal {
         let cursor = self.cursor();
         let width = self.active_grid().width();
         match mode {
-            0 => {
-                self.active_grid_mut()
-                    .clear_range_in_row(cursor.row, cursor.column..width);
-            }
-            1 => {
-                self.active_grid_mut()
-                    .clear_range_in_row(cursor.row, 0..cursor.column + 1);
-            }
-            2 => {
-                self.active_grid_mut().clear_row(cursor.row);
-            }
+            0 => self.erase_cells(cursor.row, cursor.column..width),
+            1 => self.erase_cells(cursor.row, 0..cursor.column + 1),
+            2 => self.erase_cells(cursor.row, 0..width),
             _ => {}
         }
+    }
+
+    fn tab(&mut self, count: usize, backwards: bool) {
+        let cursor = self.cursor();
+        let mut col = cursor.column;
+        for _ in 0..count.min(self.tabs.len()) {
+            col = if backwards {
+                (0..col).rev().find(|&pos| self.tabs[pos]).unwrap_or(0)
+            } else {
+                (col + 1..self.tabs.len())
+                    .find(|&pos| self.tabs[pos])
+                    .unwrap_or(self.tabs.len() - 1)
+            };
+        }
+        self.set_cursor(col, cursor.row);
     }
 
     fn set_scroll_region(&mut self, csi: &crate::Csi) {
@@ -1095,7 +1207,7 @@ impl Terminal {
             }
             self.main_pending_wrap = self.pending_wrap;
             self.grid.select_screen(ActiveScreen::Alternate);
-            self.active_grid_mut().clear_all();
+            self.erase_rows(0..self.active_grid().height());
             self.home_cursor();
             self.pending_wrap = false;
         } else if self.is_alternate_screen() {
@@ -1294,6 +1406,11 @@ impl Terminal {
         self.g1_dec_graphics = false;
         self.use_g1 = false;
         self.last_printed = None;
+        self.preceding_char = None;
+        self.tabs = (0..self.active_grid().width())
+            .map(|col| col != 0 && col % 8 == 0)
+            .collect();
+        self.insert_mode = false;
         self.current_hyperlink = None;
         self.selection = None;
     }
@@ -1309,6 +1426,13 @@ impl Terminal {
         } else {
             self.active_grid_mut().scroll_up(top, bottom, count);
         }
+        let amount = count.min(bottom - top + 1);
+        self.erase_rows(bottom + 1 - amount..bottom + 1);
+    }
+
+    fn scroll_down(&mut self, top: usize, bottom: usize, count: usize) {
+        self.active_grid_mut().scroll_down(top, bottom, count);
+        self.erase_rows(top..top + count.min(bottom - top + 1));
     }
 
     fn update_mouse_tracking(&mut self) {
@@ -1371,6 +1495,121 @@ fn dec_graphic(ch: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mixed_tui_updates_resize_and_chunking_preserve_wide_cell_ownership() {
+        let mut whole = terminal(40, 12);
+        let mut split = terminal(40, 12);
+        let updates = [
+            "i界e\u{301}",
+            "\x1b[44m\x1b[2X",
+            "\x1b[3@",
+            "\x1b[2P",
+            "\x1b[2S",
+            "\x1b[T",
+            "\x1b[2;8r",
+            "\x1b[?6h\x1b[4;5H",
+            "\x1b[?6l\x1b[r",
+            "\x1b[?1049h",
+            "\x1b[?1049l",
+            "\x1b[4hAB界\x1b[4l",
+            "\x1b[2L",
+            "\x1b[M",
+            "\r\n\t",
+            "\x1b[2J",
+            "\x1b[3b",
+            "\x1b[3g\x1bH\x1b[2I\x1b[Z",
+            "\x1b]0;Ü title\x07",
+        ];
+        let mut seed = 0x7f4a_7c15u32;
+        for step in 0..2048 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let update = updates[seed as usize % updates.len()].as_bytes();
+            whole.process(update);
+            for byte in update {
+                split.process(&[*byte]);
+            }
+            if step % 31 == 0 {
+                let width = 2 + seed as usize % 60;
+                let height = 1 + (seed >> 8) as usize % 20;
+                whole.resize(width, height).unwrap();
+                split.resize(width, height).unwrap();
+            }
+            assert_eq!(whole.active_grid(), split.active_grid(), "step {step}");
+            assert_eq!(whole.cursor(), split.cursor());
+            for screen in [ActiveScreen::Main, ActiveScreen::Alternate] {
+                let grid = whole.grid.screen(screen);
+                for row in 0..grid.height() {
+                    for column in 0..grid.width() {
+                        let cell = grid.cell(row, column).unwrap();
+                        if cell.flags().contains(CellFlags::WIDE_LEADING) {
+                            assert!(
+                                column + 1 < grid.width()
+                                    && grid
+                                        .cell(row, column + 1)
+                                        .unwrap()
+                                        .flags()
+                                        .contains(CellFlags::WIDE_SPACER),
+                                "orphan lead at step {step}"
+                            );
+                        }
+                        if cell.flags().contains(CellFlags::WIDE_SPACER) {
+                            assert!(
+                                column > 0
+                                    && grid
+                                        .cell(row, column - 1)
+                                        .unwrap()
+                                        .flags()
+                                        .contains(CellFlags::WIDE_LEADING),
+                                "orphan spacer at step {step}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ncurses_erasure_and_insert_delete_keep_the_active_background() {
+        let mut t = terminal(8, 4);
+        feed(&mut t, b"\x1b[42m\x1b[2J\x1b[1;1Habcd\x1b[1;2H\x1b[2X");
+        assert_eq!(line(&t, 0), "a..d....");
+        for row in 0..4 {
+            for col in 0..8 {
+                assert_eq!(t.active_grid().cell(row, col).unwrap().bg, indexed_color(2));
+            }
+        }
+        feed(&mut t, b"\x1b[3;1Hxyz\x1b[3;2H\x1b[@\x1b[P\x1b[4;1H\n");
+        assert_eq!(t.active_grid().cell(3, 0).unwrap().bg, indexed_color(2));
+        feed(&mut t, b"\x1b[2;1H\x1b[L\x1b[M\x1b[1;1H\x1b[T");
+        assert_eq!(t.active_grid().cell(0, 7).unwrap().bg, indexed_color(2));
+    }
+
+    #[test]
+    fn ncurses_repeat_scroll_and_tabs_obey_terminal_geometry() {
+        let mut t = terminal(20, 4);
+        feed(&mut t, b"i\x1b[3b\x1b[2;1Hsecond\x1b[3;1Hthird\x1b[S");
+        assert!(line(&t, 0).starts_with("second"));
+        feed(&mut t, b"\x1b[T\x1b[1;1H\x1b[3g\x1b[5G\x1bH\r\tX");
+        assert_eq!(t.active_grid().cell(0, 4).unwrap().content, 'X' as u32);
+        feed(&mut t, b"\x1b[Z");
+        assert_eq!(t.cursor().column, 4);
+        feed(&mut t, b"\x1b[1;1H\x1b[4hZ\x1b[4l");
+        assert_eq!(t.active_grid().cell(0, 5).unwrap().content, 'X' as u32);
+        let mut repeated = terminal(8, 2);
+        feed(&mut repeated, b"i\x1b[3b");
+        assert_eq!(line(&repeated, 0), "iiii....");
+    }
+
+    #[test]
+    fn unsupported_csi_prefixes_do_not_change_rendition_or_cursor() {
+        let mut t = terminal(5, 2);
+        feed(&mut t, b"\x1b[31m\x1b[2$H\x1b[0$mX");
+        assert_eq!(t.active_grid().cell(0, 0).unwrap().fg, indexed_color(1));
+        assert_eq!(feed(&mut t, b"\x1b[>c"), b"\x1b[>0;1;0c");
+    }
     use super::*;
 
     fn terminal(width: usize, height: usize) -> Terminal {

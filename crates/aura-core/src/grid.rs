@@ -583,6 +583,45 @@ impl Grid {
         true
     }
 
+    /// Erases with terminal rendition, including both halves of any wide cell
+    /// intersecting the range. Sidecar text and links cannot survive erasure.
+    pub fn erase_range_in_row(
+        &mut self,
+        row: usize,
+        columns: Range<usize>,
+        mut blank: Cell,
+    ) -> bool {
+        if row >= self.height || columns.start >= self.width || columns.start >= columns.end {
+            return false;
+        }
+        let width = self.width;
+        let target = self.row_mut(row).expect("validated row");
+        let mut start = columns.start;
+        let mut end = columns.end.min(width);
+        if target.cells[start].is_wide_spacer() {
+            start = start.saturating_sub(1);
+        }
+        if target.cells[end - 1].is_wide_leading() {
+            end = (end + 1).min(width);
+        }
+        blank.content = 0;
+        blank.flags = 0;
+        target.cells[start..end].fill(blank);
+        target.graphemes[start..end].fill(None);
+        target.hyperlinks[start..end].fill(None);
+        if start == 0 && end == width {
+            target.wrapped = false;
+        }
+        target.dirty = true;
+        true
+    }
+
+    /// Discards saved rows and returns the viewport to the live screen.
+    pub fn clear_scrollback(&mut self) {
+        self.scrollback.clear();
+        self.set_viewport_offset(0);
+    }
+
     pub fn clear_rect(&mut self, rows: Range<usize>, columns: Range<usize>) -> bool {
         if rows.start >= self.height
             || rows.start >= rows.end
