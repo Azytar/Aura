@@ -23,7 +23,15 @@ BIN="${1:-target/release/aura}"
 export DISPLAY="${DISPLAY:-:0}"
 
 skip() { printf 'SKIP: %s\n' "$1"; exit 77; }
-fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
+fail() {
+    printf 'FAIL: %s\n' "$1"
+    # Leave the evidence behind so a failure can be diagnosed without a rerun.
+    [ -n "${WID:-}" ] && {
+        xwd -id "$WID" -silent >/tmp/aura-e2e-fail.xwd 2>/dev/null
+        cp /tmp/aura-e2e.log /tmp/aura-e2e-fail.log 2>/dev/null
+    }
+    exit 1
+}
 
 command -v xdotool >/dev/null || skip "xdotool is not installed"
 command -v xwd >/dev/null || skip "xwd is not installed"
@@ -99,20 +107,28 @@ wait_for_title "42" \
 printf '   interactive bash session: OK\n'
 
 # --- 3. shell output reaches the Vulkan framebuffer --------------------
+# Reading a window's backing store is inherently racy: a window manager
+# restack or an unmap/remap can momentarily clear it, and the app repaints on
+# the next Expose. Retry the capture instead of reading a single instant.
 send_line 'clear'
 sleep 0.5
 send_line 'printf "AURA_RENDERED_OUTPUT_%s\n" "$(id -un)"'
 sleep 1.5
+
 SHOT_XWD="/tmp/aura-e2e.xwd"
-SHOT_PNG="/tmp/aura-e2e.png"
-xwd -id "$WID" -silent >"$SHOT_XWD" 2>/dev/null || fail "could not capture the aura window"
-magick "$SHOT_XWD" "$SHOT_PNG" >/dev/null 2>&1 || fail "could not convert the capture"
-COLOURS="$(magick identify -format '%k' "$SHOT_PNG" 2>/dev/null)"
-PIXELS="$(magick identify -format '%wx%h' "$SHOT_PNG" 2>/dev/null)"
-[ -n "$PIXELS" ] || fail "capture has no geometry"
-case "$COLOURS" in
-    ''|*[!0-9]*) fail "could not count colours in $PIXELS" ;;
-esac
+COLOURS=""
+PIXELS=""
+for _ in $(seq 1 6); do
+    xwd -id "$WID" -silent >"$SHOT_XWD" 2>/dev/null || fail "could not capture the aura window"
+    PIXELS="$(magick identify -format '%wx%h' "$SHOT_XWD" 2>/dev/null)"
+    COLOURS="$(magick identify -format '%k' "$SHOT_XWD" 2>/dev/null)"
+    [ -n "$PIXELS" ] || fail "capture has no geometry"
+    case "$COLOURS" in
+        ''|*[!0-9]*) fail "could not count colours in $PIXELS" ;;
+    esac
+    [ "$COLOURS" -gt 4 ] 2>/dev/null && break
+    sleep 0.3
+done
 [ "$COLOURS" -gt 4 ] 2>/dev/null \
     || fail "framebuffer looks blank (geometry=$PIXELS colours=$COLOURS)"
 printf '   framebuffer %s with %s distinct colours: OK\n' "$PIXELS" "$COLOURS"
