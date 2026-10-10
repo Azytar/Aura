@@ -7,6 +7,7 @@ use std::mem::size_of;
 use std::ptr;
 
 use ash::{Device, Entry, Instance, vk};
+use aura_config::Palette;
 use aura_core::{Cell, CellFlags, DEFAULT_COLOR, INDEXED_COLOR_TAG, RGB_COLOR_TAG, Terminal};
 use aura_text::{Font, GlyphUpload};
 use bytemuck::{Pod, Zeroable};
@@ -48,6 +49,7 @@ struct PushGrid {
     selection_start: u32,
     selection_end: u32,
     cursor_style: u32,
+    selection_color: u32,
 }
 
 /// Maps a DECSCUSR cursor shape to the push-constant encoding.
@@ -194,6 +196,7 @@ pub struct Renderer {
     grid_size: Option<(usize, usize)>,
     offset_x: i32,
     offset_y: i32,
+    palette: Palette,
 }
 
 /// Vulkan renderer for deterministic image readback without a window system.
@@ -227,6 +230,7 @@ pub struct OffscreenRenderer {
     show_cursor: bool,
     offset_x: i32,
     offset_y: i32,
+    palette: Palette,
 }
 
 impl OffscreenRenderer {
@@ -342,12 +346,24 @@ impl OffscreenRenderer {
             show_cursor: false,
             offset_x: 0,
             offset_y: 0,
+            palette: Palette::DARK,
         })
     }
 
     /// Enables the terminal cursor in snapshots; snapshots hide it by default.
     pub const fn set_show_cursor(&mut self, show: bool) {
         self.show_cursor = show;
+    }
+
+    /// Installs a colour palette. Takes effect on the next frame; nothing is
+    /// re-rasterized because glyph masks do not depend on colour.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+    }
+
+    /// The palette in use, so callers can report or round-trip it.
+    pub const fn palette(&self) -> &Palette {
+        &self.palette
     }
 
     /// Sets the glyph offset (visual only, does not change cell geometry).
@@ -388,8 +404,8 @@ impl OffscreenRenderer {
                 if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
                     cells[row * cols + column] = GpuCell {
                         glyph: u32::MAX,
-                        fg: color(cell.fg, true),
-                        bg: color(cell.bg, false),
+                        fg: color(&self.palette, cell.fg, true),
+                        bg: color(&self.palette, cell.bg, false),
                         flags: cell.flags,
                     };
                     continue;
@@ -443,8 +459,8 @@ impl OffscreenRenderer {
                 glyphs[glyph as usize] = metadata;
                 cells[row * cols + column] = GpuCell {
                     glyph,
-                    fg: color(cell.fg, true),
-                    bg: color(cell.bg, false),
+                    fg: color(&self.palette, cell.fg, true),
+                    bg: color(&self.palette, cell.bg, false),
                     flags: cell.flags,
                 };
             }
@@ -533,6 +549,7 @@ impl OffscreenRenderer {
             u64::from(self.extent.width) * u64::from(self.extent.height) * 4,
             vk::BufferUsageFlags::TRANSFER_DST,
         )?;
+        let selection_color = pack_rgb(self.palette.selection);
         let push = PushGrid {
             cols: cols as u32,
             rows: rows as u32,
@@ -543,9 +560,16 @@ impl OffscreenRenderer {
             offset_y: self.offset_y,
             cursor: (terminal.cursor().row * cols + terminal.cursor().column) as u32,
             cursor_visible: u32::from(self.show_cursor && terminal.modes().cursor_visible),
-            selection_start: u32::MAX,
-            selection_end: u32::MAX,
+            // The offscreen target must mirror the swapchain path, otherwise
+            // selection behaviour would be untested rather than passed.
+            selection_start: terminal
+                .selection_cell_range()
+                .map_or(u32::MAX, |range| range.0),
+            selection_end: terminal
+                .selection_cell_range()
+                .map_or(u32::MAX, |range| range.1),
             cursor_style: push_cursor_style(terminal.modes().cursor_style),
+            selection_color,
         };
         record_frame(
             &self.device,
@@ -725,7 +749,19 @@ impl Renderer {
             grid_size: None,
             offset_x: 0,
             offset_y: 0,
+            palette: Palette::DARK,
         })
+    }
+
+    /// Installs a colour palette. Takes effect on the next frame; nothing is
+    /// re-rasterized because glyph masks do not depend on colour.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.palette = palette;
+    }
+
+    /// The palette in use, so callers can report or round-trip it.
+    pub const fn palette(&self) -> &Palette {
+        &self.palette
     }
 
     /// Uploads changed grid rows and presents one frame.
@@ -866,6 +902,7 @@ impl Renderer {
             };
             frame.glyphs_dirty = false;
         }
+        let selection_color = pack_rgb(self.palette.selection);
         let push = PushGrid {
             cols: width as u32,
             rows: height as u32,
@@ -887,6 +924,7 @@ impl Renderer {
                 .selection_cell_range()
                 .map_or(u32::MAX, |range| range.1),
             cursor_style: push_cursor_style(terminal.modes().cursor_style),
+            selection_color,
         };
         record_frame(
             &self.device,
@@ -1079,8 +1117,8 @@ impl Renderer {
         if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
             return Ok(GpuCell {
                 glyph: u32::MAX,
-                fg: color(cell.fg, true),
-                bg: color(cell.bg, false),
+                fg: color(&self.palette, cell.fg, true),
+                bg: color(&self.palette, cell.bg, false),
                 flags: cell.flags,
             });
         }
@@ -1132,8 +1170,8 @@ impl Renderer {
         self.gpu_glyphs[glyph as usize] = metadata;
         Ok(GpuCell {
             glyph,
-            fg: color(cell.fg, true),
-            bg: color(cell.bg, false),
+            fg: color(&self.palette, cell.fg, true),
+            bg: color(&self.palette, cell.bg, false),
             flags: cell.flags,
         })
     }
@@ -2393,9 +2431,19 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
     Ok(())
 }
 
-fn color(value: u32, foreground: bool) -> u32 {
+/// Resolves one `aura_core` colour word into the shader's packed channel
+/// order. Tag-less words are treated as a raw 16-slot index for backwards
+/// compatibility with the historical encoding.
+///
+/// The 232-256 xterm cube and greyscale ramp are computed, not tabled, so the
+/// palette only has to carry the theme-dependent entries.
+fn color(palette: &Palette, value: u32, foreground: bool) -> u32 {
     if value == DEFAULT_COLOR {
-        return if foreground { 0x00d8d8d8 } else { 0x00181818 };
+        return pack_rgb(if foreground {
+            palette.foreground
+        } else {
+            palette.background
+        });
     }
     if value & 0xff00_0000 == RGB_COLOR_TAG {
         return pack_rgb(value & 0x00ff_ffff);
@@ -2406,11 +2454,7 @@ fn color(value: u32, foreground: bool) -> u32 {
         value.min(15) as u8
     };
     let rgb = if index < 16 {
-        const PALETTE: [u32; 16] = [
-            0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
-            0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-        ];
-        PALETTE[index as usize]
+        palette.ansi[index as usize]
     } else if index < 232 {
         let n = index - 16;
         let cube = |v: u8| if v == 0 { 0 } else { 55 + 40 * v as u32 };
@@ -2462,7 +2506,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
         assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
-        assert_eq!(size_of::<PushGrid>(), 48);
+        assert_eq!(size_of::<PushGrid>(), 52);
         assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
         assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
@@ -2475,6 +2519,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(PushGrid, selection_start), 36);
         assert_eq!(std::mem::offset_of!(PushGrid, selection_end), 40);
         assert_eq!(std::mem::offset_of!(PushGrid, cursor_style), 44);
+        assert_eq!(std::mem::offset_of!(PushGrid, selection_color), 48);
     }
 
     #[test]
@@ -2503,10 +2548,16 @@ mod tests {
 
     #[test]
     fn ansi_color_words_convert_to_shader_channel_order() {
-        assert_eq!(color(RGB_COLOR_TAG | 0x123456, true), 0x563412);
-        assert_eq!(color(INDEXED_COLOR_TAG | 1, true), 0x0000cd);
-        assert_eq!(color(INDEXED_COLOR_TAG | 196, true), 0x0000ff);
-        assert_eq!(color(DEFAULT_COLOR, false), 0x00181818);
+        assert_eq!(
+            color(&Palette::DARK, RGB_COLOR_TAG | 0x123456, true),
+            0x563412
+        );
+        assert_eq!(color(&Palette::DARK, INDEXED_COLOR_TAG | 1, true), 0x0000cd);
+        assert_eq!(
+            color(&Palette::DARK, INDEXED_COLOR_TAG | 196, true),
+            0x0000ff
+        );
+        assert_eq!(color(&Palette::DARK, DEFAULT_COLOR, false), 0x181818);
     }
 
     fn test_params(extent: (u32, u32), images: u32) -> SurfaceParameters {

@@ -680,3 +680,46 @@ fn font_resize_keeps_combining_grapheme_in_one_cell() {
         "12 -> 24 -> 12 reproduces the original combining-glyph frame exactly"
     );
 }
+
+#[test]
+fn selection_uses_the_configured_palette_colour() {
+    // Regression guard: the selection colour used to be a hand-swizzled
+    // constant in the shader, so it rendered as brown rgb(144,96,64) instead of
+    // the intended slate blue, and the configured palette was ignored.
+    if !require_gpu() {
+        return;
+    }
+    let mut font = Font::load(None, 18.0).expect("load system monospace font");
+    let metrics = font.metrics();
+    let (width, height) = (metrics.width * 3, metrics.height);
+    let mut terminal = Terminal::new(3, 1).expect("create terminal grid");
+    terminal.process(b"   ");
+    terminal.set_selection(
+        aura_core::SelectionPoint { row: 0, column: 1 },
+        aura_core::SelectionPoint { row: 0, column: 1 },
+    );
+    let mut renderer = OffscreenRenderer::new(width, height).expect("create offscreen renderer");
+    renderer.set_palette(aura_config::Palette::DARK);
+    let pixels = renderer
+        .render(&mut terminal, &mut font)
+        .expect("draw terminal and read back pixels");
+    let pixel = |x: u32, y: u32| {
+        let index = ((y * width + x) * 4) as usize;
+        [
+            pixels[index],
+            pixels[index + 1],
+            pixels[index + 2],
+            pixels[index + 3],
+        ]
+    };
+    assert_eq!(
+        pixel(metrics.width, 0),
+        [0x40, 0x60, 0x90, 255],
+        "selection cell must use the palette selection colour rgb(64,96,144)"
+    );
+    assert_eq!(
+        pixel(0, 0),
+        [0x18, 0x18, 0x18, 255],
+        "unselected cells keep the plain background"
+    );
+}

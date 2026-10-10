@@ -67,6 +67,7 @@ name = "aura-render"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "aura-config",
  "aura-core",
  "aura-text",
  "bytemuck",

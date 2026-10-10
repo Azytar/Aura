@@ -170,6 +170,17 @@ impl Terminal {
         self.modes
     }
 
+    /// Replaces the whole mode set.
+    ///
+    /// Called once at startup to seed the configuration's cursor style and
+    /// blink preference. Anything the application later emits (DECSCUSR,
+    /// DECPrivateModeSet) overrides it by construction, because those arrive
+    /// after the seed. This is deliberately not a per-field setter: a half
+    /// applied mode set is a state the terminal would never produce itself.
+    pub const fn set_modes(&mut self, modes: Modes) {
+        self.modes = modes;
+    }
+
     pub fn title(&self) -> &str {
         &self.title
     }
@@ -283,6 +294,17 @@ impl Terminal {
 
     pub fn scrollback_len(&self) -> usize {
         self.grid.screen(ActiveScreen::Main).scrollback_len()
+    }
+
+    /// Rows retained above the visible screen on the main screen.
+    pub fn scrollback_limit(&self) -> usize {
+        self.grid.scrollback_limit()
+    }
+
+    /// Sets how much history survives above the visible screen. Applied only
+    /// to the main screen: the alternate screen never records scrollback.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.grid.set_scrollback_limit(limit);
     }
 
     pub fn viewport_offset(&self) -> usize {
@@ -1374,6 +1396,41 @@ mod tests {
 
     fn feed(terminal: &mut Terminal, input: &[u8]) -> Vec<u8> {
         terminal.process(input)
+    }
+
+    #[test]
+    fn scrollback_limit_follows_configuration_and_alternate_screen_is_unaffected() {
+        let mut terminal = terminal(4, 2);
+        terminal.set_scrollback_limit(2);
+        assert_eq!(terminal.scrollback_limit(), 2);
+        for _ in 0..6 {
+            feed(&mut terminal, b"line\r\n");
+        }
+        assert_eq!(terminal.scrollback_len(), 2);
+
+        // The alternate screen holds no history, so entering it changes
+        // nothing about how much the main screen keeps.
+        feed(&mut terminal, b"\x1b[?1049h");
+        assert!(terminal.is_alternate_screen());
+        feed(&mut terminal, b"alt\r\n");
+        assert_eq!(terminal.scrollback_len(), 2);
+        feed(&mut terminal, b"\x1b[?1049l");
+        assert!(!terminal.is_alternate_screen());
+        assert_eq!(terminal.scrollback_limit(), 2);
+    }
+
+    #[test]
+    fn configured_modes_are_seeded_then_application_wins() {
+        let mut terminal = terminal(6, 2);
+        terminal.set_modes(crate::Modes {
+            cursor_style: CursorStyle::Bar,
+            cursor_blink: false,
+            ..terminal.modes()
+        });
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Bar);
+        // DECSCUSR from the application overrides the seeded preference.
+        feed(&mut terminal, b"\x1b[4 q");
+        assert_eq!(terminal.modes().cursor_style, CursorStyle::Underline);
     }
 
     #[test]

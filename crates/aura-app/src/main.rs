@@ -99,12 +99,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (columns, rows) = (config.window.columns, config.window.lines);
     let mut terminal = Terminal::new(columns, rows)
         .map_err(|error| io::Error::other(format!("terminal grid: {error:?}")))?;
+    apply_configured_modes(&mut terminal, &config);
+    terminal.set_scrollback_limit(config.scrollback.lines);
     let mut pty = Pty::spawn_shell(PtySize::new(columns, rows)?)?;
     // XCB stays alive in this scope, so the raw pointer remains valid until Renderer is dropped.
     let raw_connection = connection.as_raw_xcb_connection().cast();
     let mut renderer = Renderer::new(raw_connection, window, pixel_width, pixel_height)
         .map_err(io::Error::other)?;
     renderer.set_glyph_offset(config.font.offset_x, config.font.offset_y);
+    renderer.set_palette(config.colors.palette());
     renderer
         .render(&mut terminal, &mut font, true)
         .map_err(io::Error::other)?;
@@ -413,6 +416,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             stats.add_pty_bytes(length as u64);
                             let replies = terminal.process(&buffer[..length]);
                             for request in terminal.take_clipboard_requests() {
+                                // A read request (`?`) is never honoured: the
+                                // terminal already refuses to emit one, so a
+                                // non-empty payload here is always a write.
+                                if !config.security.osc52.allows_write() {
+                                    continue;
+                                }
                                 let selection = match request.selection.as_slice() {
                                     b"c" => Some(clipboard.clipboard_atom),
                                     b"p" => Some(clipboard.primary_atom),
@@ -575,6 +584,24 @@ fn arguments() -> Result<LaunchOptions, Box<dyn std::error::Error>> {
         }
     }
     Ok(launch)
+}
+
+/// Seeds the terminal with the modes the configuration chooses, before any
+/// application has a chance to set its own. Applications that emit DECSCUSR
+/// or DECPrivateModeSet always win, because they arrive later.
+fn apply_configured_modes(terminal: &mut Terminal, config: &AppConfig) {
+    let modes = terminal.modes();
+    let style = match config.cursor.style {
+        aura_config::CursorShape::Block => aura_core::CursorStyle::Block,
+        aura_config::CursorShape::Underline => aura_core::CursorStyle::Underline,
+        aura_config::CursorShape::Bar => aura_core::CursorStyle::Bar,
+    };
+    let next = aura_core::Modes {
+        cursor_style: style,
+        cursor_blink: config.cursor.blink,
+        ..modes
+    };
+    terminal.set_modes(next);
 }
 
 /// Reports what AURA can see on this machine, without starting a window or a

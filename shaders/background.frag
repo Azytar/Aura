@@ -6,7 +6,7 @@ layout(set = 0, binding = 1, std430) readonly buffer Cells { Cell cells[]; };
 // `PushGrid` and of the vertex stages; every stage declares the whole block so
 // field offsets cannot drift between stages. `offset_x`/`offset_y` are unused
 // here but are part of the shared layout.
-layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; int offset_x; int offset_y; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; uint cursor_style; } grid;
+layout(push_constant) uniform Grid { uint cols; uint rows; float cell_width; float cell_height; float ascent; int offset_x; int offset_y; uint cursor; uint cursor_visible; uint selection_start; uint selection_end; uint cursor_style; uint selection_color; } grid;
 vec4 unpack_color(uint c) { return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), 255.0) / 255.0; }
 void main() {
     uvec2 p = uvec2(gl_FragCoord.xy);
@@ -18,7 +18,7 @@ void main() {
     if ((cell.flags & 64u) != 0u) { uint swap = fg; fg = bg; bg = swap; }
     uint index = row * grid.cols + col;
     if (grid.selection_start != 0xffffffffu && index >= grid.selection_start && index <= grid.selection_end) {
-        bg = 0x00406090u;
+        bg = grid.selection_color;
     }
     uint ch = uint(grid.cell_height);
     // Mirrors underline_rows/strikethrough_rows/cursor_span in the renderer:
