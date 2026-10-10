@@ -1461,6 +1461,16 @@ columns = 0
     }
 
     #[test]
+    fn shipped_example_config_parses() {
+        // The file users copy into place must never drift out of what the
+        // parser accepts. Values are not pinned: only successful loading is.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../example/config.toml");
+        let config = AppConfig::load_from_path(Some(&path)).unwrap();
+        assert_eq!(config.window.columns, DEFAULT_COLUMNS);
+        assert_eq!(config.window.lines, DEFAULT_LINES);
+    }
+
+    #[test]
     fn window_geometry_uses_complete_cells() {
         // Simulate the geometry calculation the app performs from config + metrics.
         let config = AppConfig::defaults();

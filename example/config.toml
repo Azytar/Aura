@@ -4,7 +4,8 @@
 # is fully functional. Every section is optional: a file that only sets the
 # colours, or only the window, loads with everything else at its default.
 #
-# Copy the parts you want into ~/.config/aura/config.toml.
+# Copy this file to ~/.config/aura/config.toml to use it as-is, or copy the
+# parts you want.
 
 # ---------------------------------------------------------------------------
 # Font selection
@@ -23,7 +24,7 @@
 # to the same 6.0-72.0 range); Ctrl+0 restores this configured size. The TOML
 # value itself never changes at runtime.
 [font]
-family = "monospace"
+family = "firacode-nerd"
 size = 14.0
 
 # Per-style face overrides. Both keys are optional; omit a section to use the
