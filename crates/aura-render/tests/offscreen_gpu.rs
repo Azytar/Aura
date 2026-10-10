@@ -185,7 +185,7 @@ fn color_emoji_samples_the_color_atlas() {
     let pixels = renderer
         .render(&mut terminal, &mut font)
         .expect("draw terminal and read back pixels");
-    let painted = pixels.chunks_exact(4).any(|rgba| {
+    let painted = pixels.as_chunks::<4>().0.iter().any(|rgba| {
         let spread = rgba[0].max(rgba[1]).max(rgba[2]) - rgba[0].min(rgba[1]).min(rgba[2]);
         spread > 40
     });
@@ -831,7 +831,9 @@ fn a_long_sessions_full_atlas_is_rebuilt_for_visible_glyphs() {
     let pixels = renderer.render(&mut terminal, &mut font).unwrap();
     assert!(
         pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[0] > 150 && p[1] > 150 && p[2] > 150),
         "i must recover after atlas exhaustion"
     );
@@ -843,7 +845,9 @@ fn a_long_sessions_full_atlas_is_rebuilt_for_visible_glyphs() {
         renderer
             .render(&mut terminal, &mut font)
             .unwrap()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|p| p[0] > 150)
     );
 }

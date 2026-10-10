@@ -104,10 +104,10 @@ fn main() {
         let mut font = Font::load(None, 14.0).expect("system monospace font is available");
         let mut glyph_count = 0u32;
         for ch in (b' '..=b'~').map(char::from) {
-            if let Ok((_, _, upload)) = font.glyph(ch, false, false) {
-                if upload.is_some() {
-                    glyph_count += 1;
-                }
+            if let Ok((_, _, upload)) = font.glyph(ch, false, false)
+                && upload.is_some()
+            {
+                glyph_count += 1;
             }
         }
         black_box(glyph_count);
