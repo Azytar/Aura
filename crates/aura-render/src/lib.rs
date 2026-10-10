@@ -7,15 +7,15 @@ use std::mem::size_of;
 use std::ptr;
 
 use ash::{Device, Entry, Instance, vk};
-use aura_config::Palette;
+use aura_config::{MAX_GRID_COLUMNS, MAX_GRID_ROWS, Palette};
 use aura_core::{Cell, CellFlags, DEFAULT_COLOR, INDEXED_COLOR_TAG, RGB_COLOR_TAG, Terminal};
 use aura_text::{Font, GlyphUpload};
 use bytemuck::{Pod, Zeroable};
 
 const FRAMES: usize = 2;
 const ATLAS_SIZE: u32 = 1024;
-const MAX_COLS: usize = 512;
-const MAX_ROWS: usize = 256;
+const MAX_COLS: usize = MAX_GRID_COLUMNS;
+const MAX_ROWS: usize = MAX_GRID_ROWS;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
