@@ -24,7 +24,9 @@ See `CHANGELOG.md` for the validated scope and known limitations,
   paths (`DejaVuSansMono`, `LiberationMono`, `NotoSansMono`). CJK, emoji,
   and symbol fallback faces load on demand from standard Noto paths when
   present.
-- Build tools: `cargo` (1.85+), `glslc` for shader compilation.
+- X11 with XKB; development libraries `libxkbcommon`, `libxkbcommon-x11`,
+  and `libxcb-xkb` are required to link the keyboard backend.
+- Build tools: `cargo` (1.88+), `glslc` for shader compilation.
 
 The terminal advertises `TERM=xterm-256color` with `COLORTERM=truecolor`. No
 custom terminfo entry is required: the implemented set (SGR truecolor, SGR
@@ -154,3 +156,14 @@ a `Ctrl+C` when a skew is detected.
   `crates/aura-core/fuzz` target runs as plain libFuzzer mutation runs.
 - OSC 8 hyperlinks are parsed and stored, and OSC 52 writes are honoured, but
   nothing opens a link on click.
+
+## Daily use audit
+
+See [the daily use audit](docs/DAILY_USE_AUDIT.md) for keyboard, ncurses,
+rendering and PTY fixes, regression coverage and remaining validation limits.
+The X11 regression suite changes the keyboard map; run it on a dedicated
+virtual display:
+
+```sh
+python3 tests/x11_daily_use.py target/release/aura
+```
