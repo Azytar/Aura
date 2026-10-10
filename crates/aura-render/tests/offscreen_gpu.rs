@@ -723,3 +723,88 @@ fn selection_uses_the_configured_palette_colour() {
         "unselected cells keep the plain background"
     );
 }
+
+#[test]
+fn narrow_glyph_pixels_and_backgrounds_survive_padding_spacing_and_residue() {
+    if !require_gpu() {
+        return;
+    }
+    let mut font = Font::load(None, 18.0).unwrap();
+    let metrics = font.metrics();
+    let (cw, ch) = (metrics.width + 2, metrics.height + 3);
+    let mut terminal = Terminal::new(3, 1).unwrap();
+    terminal.process(b"\x1b[?25l\x1b[41mi\x1b[42mi\x1b[44mi");
+    let mut first = OffscreenRenderer::new(cw * 3 + 6, ch + 10).unwrap();
+    first.set_padding(3, 5);
+    first.set_cell_spacing(2, 3);
+    let a = first.render(&mut terminal, &mut font).unwrap();
+    let mut resized = OffscreenRenderer::new(cw * 3 + 13, ch + 21).unwrap();
+    resized.set_padding(3, 5);
+    resized.set_cell_spacing(2, 3);
+    let b = resized.render(&mut terminal, &mut font).unwrap();
+    let pixel = |data: &[u8], width: u32, x: u32, y: u32| -> [u8; 4] {
+        let offset = ((y * width + x) * 4) as usize;
+        data[offset..offset + 4].try_into().unwrap()
+    };
+    assert_eq!(pixel(&b, cw * 3 + 13, 0, 0), [24, 24, 24, 255]);
+    assert_eq!(pixel(&b, cw * 3 + 13, cw * 3 + 12, 5), [24, 24, 24, 255]);
+    for y in 0..ch {
+        for x in 0..cw * 3 {
+            assert_eq!(
+                pixel(&a, cw * 3 + 6, x + 3, y + 5),
+                pixel(&b, cw * 3 + 13, x + 3, y + 5)
+            );
+        }
+    }
+    for (col, color) in [[205, 0, 0, 255], [0, 205, 0, 255], [0, 0, 238, 255]]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            pixel(&b, cw * 3 + 13, 3 + col as u32 * cw, 5 + ch - 1),
+            *color
+        );
+    }
+    assert!(
+        (0..ch).any(|y| (0..cw).any(|x| {
+            let rgba = pixel(&b, cw * 3 + 13, x + 3, y + 5);
+            rgba[1] > 100 && rgba[2] > 100
+        })),
+        "i has visible glyph pixels"
+    );
+}
+
+#[test]
+fn thin_cursors_preserve_the_glyph_outside_the_cursor_stripe() {
+    if !require_gpu() {
+        return;
+    }
+    let mut font = Font::load(None, 18.0).unwrap();
+    let m = font.metrics();
+    let mut terminal = Terminal::new(1, 1).unwrap();
+    terminal.process(b"i\r\x1b[?25l");
+    let mut renderer = OffscreenRenderer::new(m.width, m.height).unwrap();
+    renderer.set_show_cursor(true);
+    let hidden = renderer.render(&mut terminal, &mut font).unwrap();
+    let thick = (m.height >> 4).max(1) * 2;
+    for (sequence, bar) in [
+        (b"\x1b[?25h\x1b[3 q".as_slice(), false),
+        (b"\x1b[5 q".as_slice(), true),
+    ] {
+        terminal.process(sequence);
+        let visible = renderer.render(&mut terminal, &mut font).unwrap();
+        assert_ne!(hidden, visible, "cursor must paint a stripe");
+        for y in 0..m.height {
+            for x in 0..m.width {
+                if (bar && x >= thick) || (!bar && y < m.height - thick) {
+                    let offset = ((y * m.width + x) * 4) as usize;
+                    assert_eq!(
+                        hidden[offset..offset + 4],
+                        visible[offset..offset + 4],
+                        "thin cursor changed glyph at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+}

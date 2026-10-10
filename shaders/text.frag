@@ -5,10 +5,13 @@ layout(location = 0) in vec2 uv;
 layout(location = 1) flat in uint fg;
 layout(location = 2) flat in uint visible;
 layout(location = 3) flat in uint color_flag;
+layout(location = 4) flat in vec4 cell_bounds;
 layout(location = 0) out vec4 color;
 vec4 unpack_color(uint c) { return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), 255.0) / 255.0; }
 void main() {
-    if (visible == 0u) discard;
+    // Glyph overhang must not repaint a neighboring TUI cell or line.
+    vec2 p = gl_FragCoord.xy;
+    if (visible == 0u || any(lessThan(p, cell_bounds.xy)) || any(greaterThanEqual(p, cell_bounds.zw))) discard;
     if (color_flag != 0u) {
         vec4 texel = texture(color_atlas, uv);
         color = vec4(texel.rgb, texel.a);

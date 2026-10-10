@@ -50,6 +50,8 @@ struct PushGrid {
     selection_end: u32,
     cursor_style: u32,
     selection_color: u32,
+    padding_x: u32,
+    padding_y: u32,
 }
 
 /// Maps a DECSCUSR cursor shape to the push-constant encoding.
@@ -151,6 +153,7 @@ struct FrameDraw {
     push: PushGrid,
     instances: u32,
     extent: vk::Extent2D,
+    background_color: u32,
     final_layout: vk::ImageLayout,
     readback: Option<vk::Buffer>,
 }
@@ -197,6 +200,8 @@ pub struct Renderer {
     offset_x: i32,
     offset_y: i32,
     palette: Palette,
+    padding: [u32; 2],
+    spacing: [i32; 2],
 }
 
 /// Vulkan renderer for deterministic image readback without a window system.
@@ -231,6 +236,8 @@ pub struct OffscreenRenderer {
     offset_x: i32,
     offset_y: i32,
     palette: Palette,
+    padding: [u32; 2],
+    spacing: [i32; 2],
 }
 
 impl OffscreenRenderer {
@@ -347,6 +354,8 @@ impl OffscreenRenderer {
             offset_x: 0,
             offset_y: 0,
             palette: Palette::DARK,
+            padding: [0; 2],
+            spacing: [0; 2],
         })
     }
 
@@ -366,7 +375,17 @@ impl OffscreenRenderer {
         &self.palette
     }
 
-    /// Sets the glyph offset (visual only, does not change cell geometry).
+    /// Insets the cell grid without scaling glyph pixels or cell backgrounds.
+    pub const fn set_padding(&mut self, x: u32, y: u32) {
+        self.padding = [x, y];
+    }
+
+    /// Adjusts cell strides; font bearings and raster size stay unchanged.
+    pub const fn set_cell_spacing(&mut self, letters: i32, lines: i32) {
+        self.spacing = [letters, lines];
+    }
+
+    /// Sets the glyph offset without changing cell geometry.
     pub const fn set_glyph_offset(&mut self, x: i32, y: i32) {
         self.offset_x = x;
         self.offset_y = y;
@@ -383,15 +402,6 @@ impl OffscreenRenderer {
         let grid = terminal.active_grid();
         let (cols, rows) = (grid.width(), grid.height());
         let metrics = font.metrics();
-        let expected_width = (cols as u32)
-            .checked_mul(metrics.width)
-            .ok_or("offscreen grid width overflow")?;
-        let expected_height = (rows as u32)
-            .checked_mul(metrics.height)
-            .ok_or("offscreen grid height overflow")?;
-        if expected_width != self.extent.width || expected_height != self.extent.height {
-            return Err("offscreen target must exactly match terminal pixel dimensions".into());
-        }
         let count = cols
             .checked_mul(rows)
             .ok_or("terminal grid size overflow")?;
@@ -553,8 +563,8 @@ impl OffscreenRenderer {
         let push = PushGrid {
             cols: cols as u32,
             rows: rows as u32,
-            cell_width: metrics.width as f32,
-            cell_height: metrics.height as f32,
+            cell_width: metrics.width.saturating_add_signed(self.spacing[0]).max(1) as f32,
+            cell_height: metrics.height.saturating_add_signed(self.spacing[1]).max(1) as f32,
             ascent: metrics.ascent as f32,
             offset_x: self.offset_x,
             offset_y: self.offset_y,
@@ -570,6 +580,8 @@ impl OffscreenRenderer {
                 .map_or(u32::MAX, |range| range.1),
             cursor_style: push_cursor_style(terminal.modes().cursor_style),
             selection_color,
+            padding_x: self.padding[0],
+            padding_y: self.padding[1],
         };
         record_frame(
             &self.device,
@@ -583,6 +595,7 @@ impl OffscreenRenderer {
                 push,
                 instances: count as u32,
                 extent: self.extent,
+                background_color: pack_rgb(self.palette.background),
                 final_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 readback: Some(readback.handle),
             },
@@ -750,6 +763,8 @@ impl Renderer {
             offset_x: 0,
             offset_y: 0,
             palette: Palette::DARK,
+            padding: [0; 2],
+            spacing: [0; 2],
         })
     }
 
@@ -906,8 +921,16 @@ impl Renderer {
         let push = PushGrid {
             cols: width as u32,
             rows: height as u32,
-            cell_width: font.metrics().width as f32,
-            cell_height: font.metrics().height as f32,
+            cell_width: font
+                .metrics()
+                .width
+                .saturating_add_signed(self.spacing[0])
+                .max(1) as f32,
+            cell_height: font
+                .metrics()
+                .height
+                .saturating_add_signed(self.spacing[1])
+                .max(1) as f32,
             ascent: font.metrics().ascent as f32,
             offset_x: self.offset_x,
             offset_y: self.offset_y,
@@ -925,6 +948,8 @@ impl Renderer {
                 .map_or(u32::MAX, |range| range.1),
             cursor_style: push_cursor_style(terminal.modes().cursor_style),
             selection_color,
+            padding_x: self.padding[0],
+            padding_y: self.padding[1],
         };
         record_frame(
             &self.device,
@@ -938,6 +963,7 @@ impl Renderer {
                 push,
                 instances: count as u32,
                 extent: self.extent,
+                background_color: pack_rgb(self.palette.background),
                 final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                 readback: None,
             },
@@ -974,14 +1000,24 @@ impl Renderer {
         Ok(())
     }
 
-    /// Replaces swapchain images only after submitted work has released their views.
+    /// Requests a full upload without forgetting the Vulkan image layout.
     pub fn invalidate_atlas(&mut self) {
         self.uploaded_atlas = false;
         self.uploaded_color_atlas = false;
         self.pending_glyph_uploads.clear();
     }
 
-    /// Sets the glyph offset (visual only, does not change cell geometry).
+    /// Insets the cell grid without scaling glyph pixels or cell backgrounds.
+    pub const fn set_padding(&mut self, x: u32, y: u32) {
+        self.padding = [x, y];
+    }
+
+    /// Adjusts cell strides; font bearings and raster size stay unchanged.
+    pub const fn set_cell_spacing(&mut self, letters: i32, lines: i32) {
+        self.spacing = [letters, lines];
+    }
+
+    /// Sets the glyph offset without changing cell geometry.
     pub const fn set_glyph_offset(&mut self, x: i32, y: i32) {
         self.offset_x = x;
         self.offset_y = y;
@@ -1105,6 +1141,7 @@ impl Renderer {
         self.extent = swap.extent;
         Ok(true)
     }
+
 
     fn convert_cell(
         &mut self,
@@ -2295,6 +2332,7 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
         push,
         instances,
         extent,
+        background_color,
         final_layout,
         readback,
     } = draw;
@@ -2324,7 +2362,12 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
         .store_op(vk::AttachmentStoreOp::STORE)
         .clear_value(vk::ClearValue {
             color: vk::ClearColorValue {
-                float32: [0.09, 0.09, 0.09, 1.0],
+                float32: [
+                    (*background_color & 255) as f32 / 255.0,
+                    ((*background_color >> 8) & 255) as f32 / 255.0,
+                    ((*background_color >> 16) & 255) as f32 / 255.0,
+                    1.0,
+                ],
             },
         })];
     let rendering = vk::RenderingInfo::default()
@@ -2340,10 +2383,10 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
             frame.command,
             0,
             &[vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: extent.width as f32,
-                height: extent.height as f32,
+                x: push.padding_x as f32,
+                y: push.padding_y as f32,
+                width: push.cols as f32 * push.cell_width,
+                height: push.rows as f32 * push.cell_height,
                 min_depth: 0.0,
                 max_depth: 1.0,
             }],
@@ -2506,7 +2549,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
         assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
-        assert_eq!(size_of::<PushGrid>(), 52);
+        assert_eq!(size_of::<PushGrid>(), 60);
         assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
         assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
@@ -2520,6 +2563,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(PushGrid, selection_end), 40);
         assert_eq!(std::mem::offset_of!(PushGrid, cursor_style), 44);
         assert_eq!(std::mem::offset_of!(PushGrid, selection_color), 48);
+        assert_eq!(std::mem::offset_of!(PushGrid, padding_x), 52);
+        assert_eq!(std::mem::offset_of!(PushGrid, padding_y), 56);
     }
 
     #[test]
