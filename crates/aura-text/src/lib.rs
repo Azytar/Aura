@@ -13,6 +13,9 @@ use unicode_script::{Script, UnicodeScript};
 
 const DEFAULT_ATLAS_SIZE: u32 = 1024;
 const MAX_FALLBACKS: usize = 8;
+/// Cache pressure is recoverable: renderers rebuild from the visible grid.
+pub const CACHE_FULL: &str = "font cache capacity exhausted";
+const MAX_GLYPHS: usize = 65_536;
 
 /// Smallest runtime font size in typographic pixels. The floor keeps glyph
 /// rasters, cell geometry, and window pixel math safely above zero; every
@@ -328,6 +331,9 @@ impl Font {
         if let Some((index, info)) = self.glyphs.get(&key).copied() {
             return Ok((index, info, None));
         }
+        if self.glyphs.len() >= MAX_GLYPHS {
+            return Err(CACHE_FULL.into());
+        }
 
         let face_bytes: &[u8] = if face_id == 0 {
             &self.bytes
@@ -405,21 +411,10 @@ impl Font {
         }
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
-        // A full atlas degrades the glyph to an empty entry instead of
-        // failing the frame: atlas capacity stays bounded while the session
-        // keeps running.
-        let Some((x, y)) = self.allocate_in(padded_width, padded_height, color) else {
-            let info = GlyphInfo {
-                uv_min: [0.0; 2],
-                uv_max: [0.0; 2],
-                size: [0.0; 2],
-                bearing: [0.0; 2],
-                advance,
-                color,
-            };
-            self.glyphs.insert(key, (index, info));
-            return Ok((index, info, None));
-        };
+        // Never cache a failed allocation as an invisible glyph.
+        let (x, y) = self
+            .allocate_in(padded_width, padded_height, color)
+            .ok_or(CACHE_FULL)?;
         let x = x + 1;
         let y = y + 1;
         let row_bytes = width as usize * bytes_per_pixel;
@@ -531,6 +526,9 @@ impl Font {
         };
         if let Some((index, info)) = self.glyphs.get(&key).copied() {
             return Ok((index, info, None));
+        }
+        if self.glyphs.len() >= MAX_GLYPHS {
+            return Err(CACHE_FULL.into());
         }
 
         let face = rustybuzz::Face::from_slice(&self.bytes, self.face_index as u32)
@@ -651,20 +649,9 @@ impl Font {
         }
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
-        // A full atlas degrades the cluster to an empty entry instead of
-        // failing the frame; see `glyph` for the capacity policy.
-        let Some((atlas_x, atlas_y)) = self.allocate_in(padded_width, padded_height, false) else {
-            let info = GlyphInfo {
-                uv_min: [0.0; 2],
-                uv_max: [0.0; 2],
-                size: [0.0; 2],
-                bearing: [0.0; 2],
-                advance,
-                color: false,
-            };
-            self.glyphs.insert(key, (index, info));
-            return Ok((index, info, None));
-        };
+        let (atlas_x, atlas_y) = self
+            .allocate_in(padded_width, padded_height, false)
+            .ok_or(CACHE_FULL)?;
         let x = atlas_x + 1;
         let y = atlas_y + 1;
         for row in 0..height {
@@ -880,6 +867,22 @@ fn load_fallbacks(configured: &[PathBuf]) -> Vec<FaceData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_atlas_does_not_poison_glyph_or_cluster_cache() {
+        let mut font = Font::load(None, 18.0).unwrap();
+        font.shelf_y = font.atlas_size;
+        for text in ["i", "e\u{301}"] {
+            let before = font.glyphs.len();
+            assert_eq!(font.glyph_text(text, false, false).unwrap_err(), CACHE_FULL);
+            assert_eq!(font.glyphs.len(), before);
+        }
+        font.invalidate_atlas();
+        for text in ["i", "e\u{301}"] {
+            let (_, info, upload) = font.glyph_text(text, false, false).unwrap();
+            assert!(info.size[0] > 0.0 && upload.is_some());
+        }
+    }
 
     #[test]
     fn family_search_prefers_regular_across_directories() {

@@ -9,7 +9,7 @@ use std::ptr;
 use ash::{Device, Entry, Instance, vk};
 use aura_config::{MAX_GRID_COLUMNS, MAX_GRID_ROWS, Palette};
 use aura_core::{Cell, CellFlags, DEFAULT_COLOR, INDEXED_COLOR_TAG, RGB_COLOR_TAG, Terminal};
-use aura_text::{Font, GlyphUpload};
+use aura_text::{CACHE_FULL, Font, GlyphInfo, GlyphUpload};
 use bytemuck::{Pod, Zeroable};
 
 const FRAMES: usize = 2;
@@ -192,6 +192,8 @@ pub struct Renderer {
     frame_index: usize,
     gpu_cells: Vec<GpuCell>,
     gpu_glyphs: Vec<GpuGlyph>,
+    atlas_initialized: bool,
+    color_atlas_initialized: bool,
     uploaded_atlas: bool,
     uploaded_color_atlas: bool,
     pending_glyph_uploads: Vec<GlyphUpload>,
@@ -230,6 +232,8 @@ pub struct OffscreenRenderer {
     target_view: vk::ImageView,
     extent: vk::Extent2D,
     frames: Vec<Frame>,
+    atlas_initialized: bool,
+    color_atlas_initialized: bool,
     atlas_uploaded: bool,
     color_uploaded: bool,
     show_cursor: bool,
@@ -348,6 +352,8 @@ impl OffscreenRenderer {
             target_view,
             extent: vk::Extent2D { width, height },
             frames,
+            atlas_initialized: false,
+            color_atlas_initialized: false,
             atlas_uploaded: false,
             color_uploaded: false,
             show_cursor: false,
@@ -406,73 +412,97 @@ impl OffscreenRenderer {
             .checked_mul(rows)
             .ok_or("terminal grid size overflow")?;
         let mut cells = vec![GpuCell::zeroed(); count];
-        let mut glyphs = vec![GpuGlyph::zeroed()];
+        let mut glyphs = Vec::new();
         let mut uploads = Vec::new();
-        for row in 0..rows {
-            for column in 0..cols {
-                let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
-                if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
-                    cells[row * cols + column] = GpuCell {
-                        glyph: u32::MAX,
-                        fg: color(&self.palette, cell.fg, true),
-                        bg: color(&self.palette, cell.bg, false),
-                        flags: cell.flags,
-                    };
-                    continue;
-                }
-                let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
-                let (pre, post) = if Font::requires_contextual_shaping(ch) {
-                    terminal.viewport_shaping_context(row, column)
-                } else {
-                    (String::new(), String::new())
-                };
-                let bold = cell.flags().contains(CellFlags::BOLD);
-                let italic = cell.flags().contains(CellFlags::ITALIC);
-                let (glyph, info, upload) = match terminal.viewport_stored_grapheme(row, column) {
-                    Some(grapheme) if pre.is_empty() && post.is_empty() => {
-                        font.glyph_text(grapheme, bold, italic)?
-                    }
-                    Some(grapheme) => {
-                        font.glyph_text_with_context(grapheme, &pre, &post, bold, italic)?
-                    }
-                    None if !pre.is_empty() || !post.is_empty() => {
-                        font.glyph_text_with_context(&ch.to_string(), &pre, &post, bold, italic)?
-                    }
-                    None => font.glyph(ch, bold, italic)?,
-                };
-                if let Some(upload) = upload {
+        for replacement in [false, true] {
+            glyphs.clear();
+            glyphs.push(GpuGlyph::zeroed());
+            uploads.clear();
+            let result: Result<(), String> = (|| {
+                if let Some(upload) = font.glyph('\u{fffd}', false, false)?.2 {
                     uploads.push(upload);
                 }
-                let metadata = GpuGlyph {
-                    uv: [
-                        info.uv_min[0],
-                        info.uv_min[1],
-                        info.uv_max[0],
-                        info.uv_max[1],
-                    ],
-                    size_bearing: [info.size[0], info.size[1], info.bearing[0], info.bearing[1]],
-                    // The padding lane carries the color-atlas selector the
-                    // text shader reads; the std430 layout is unchanged.
-                    bearing_advance: [
-                        info.bearing[0],
-                        info.bearing[1],
-                        info.advance,
-                        u32::from(info.color) as f32,
-                    ],
-                };
-                // Grow the glyph table without truncating entries that earlier
-                // cells in this frame already recorded; `resize` would shrink it
-                // when a cache hit references a smaller index than the maximum.
-                if glyphs.len() <= glyph as usize {
-                    glyphs.resize(glyph as usize + 1, GpuGlyph::zeroed());
+                for row in 0..rows {
+                    for column in 0..cols {
+                        let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
+                        if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
+                            cells[row * cols + column] = GpuCell {
+                                glyph: u32::MAX,
+                                fg: color(&self.palette, cell.fg, true),
+                                bg: color(&self.palette, cell.bg, false),
+                                flags: cell.flags,
+                            };
+                            continue;
+                        }
+                        let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
+                        let (pre, post) = if Font::requires_contextual_shaping(ch) {
+                            terminal.viewport_shaping_context(row, column)
+                        } else {
+                            (String::new(), String::new())
+                        };
+                        let bold = cell.flags().contains(CellFlags::BOLD);
+                        let italic = cell.flags().contains(CellFlags::ITALIC);
+                        let (glyph, info, upload) = rasterize_cell(
+                            font,
+                            ch,
+                            terminal.viewport_stored_grapheme(row, column),
+                            &pre,
+                            &post,
+                            bold,
+                            italic,
+                            replacement,
+                        )?;
+                        if let Some(upload) = upload {
+                            uploads.push(upload);
+                        }
+                        let metadata = GpuGlyph {
+                            uv: [
+                                info.uv_min[0],
+                                info.uv_min[1],
+                                info.uv_max[0],
+                                info.uv_max[1],
+                            ],
+                            size_bearing: [
+                                info.size[0],
+                                info.size[1],
+                                info.bearing[0],
+                                info.bearing[1],
+                            ],
+                            // The padding lane carries the color-atlas selector the
+                            // text shader reads; the std430 layout is unchanged.
+                            bearing_advance: [
+                                info.bearing[0],
+                                info.bearing[1],
+                                info.advance,
+                                u32::from(info.color) as f32,
+                            ],
+                        };
+                        // Grow the glyph table without truncating entries that earlier
+                        // cells in this frame already recorded; `resize` would shrink it
+                        // when a cache hit references a smaller index than the maximum.
+                        if glyphs.len() <= glyph as usize {
+                            glyphs.resize(glyph as usize + 1, GpuGlyph::zeroed());
+                        }
+                        glyphs[glyph as usize] = metadata;
+                        cells[row * cols + column] = GpuCell {
+                            glyph,
+                            fg: color(&self.palette, cell.fg, true),
+                            bg: color(&self.palette, cell.bg, false),
+                            flags: cell.flags,
+                        };
+                    }
                 }
-                glyphs[glyph as usize] = metadata;
-                cells[row * cols + column] = GpuCell {
-                    glyph,
-                    fg: color(&self.palette, cell.fg, true),
-                    bg: color(&self.palette, cell.bg, false),
-                    flags: cell.flags,
-                };
+                Ok(())
+            })();
+            match result {
+                Err(error) if error == CACHE_FULL && !replacement => {
+                    font.invalidate_atlas();
+                    self.invalidate_atlas();
+                }
+                other => {
+                    other?;
+                    break;
+                }
             }
         }
 
@@ -502,7 +532,9 @@ impl OffscreenRenderer {
                 },
                 font.atlas_pixels(),
                 false,
+                self.atlas_initialized,
             )?;
+            self.atlas_initialized = true;
             upload_offscreen_atlas(
                 AtlasUploadContext {
                     instance: &self.instance,
@@ -514,7 +546,9 @@ impl OffscreenRenderer {
                 },
                 font.color_atlas_pixels(),
                 true,
+                self.color_atlas_initialized,
             )?;
+            self.color_atlas_initialized = true;
             self.atlas_uploaded = true;
             self.color_uploaded = true;
         } else if !uploads.is_empty() {
@@ -755,6 +789,8 @@ impl Renderer {
             frame_index: 0,
             gpu_cells: Vec::new(),
             gpu_glyphs: vec![GpuGlyph::zeroed()],
+            atlas_initialized: false,
+            color_atlas_initialized: false,
             uploaded_atlas: false,
             uploaded_color_atlas: false,
             pending_glyph_uploads: Vec::new(),
@@ -796,41 +832,7 @@ impl Renderer {
                 "terminal grid exceeds per-frame SSBO capacity ({MAX_COLS}x{MAX_ROWS})"
             ));
         }
-        let mut grid_rebuilt = false;
-        if self.grid_size != Some((width, height)) {
-            for frame in &mut self.frames {
-                frame.dirty_rows.fill(true);
-            }
-            self.grid_size = Some((width, height));
-            grid_rebuilt = true;
-        }
-        self.gpu_cells.resize(
-            count,
-            GpuCell {
-                glyph: u32::MAX,
-                fg: 0x00d8d8d8,
-                bg: 0x00181818,
-                flags: 0,
-            },
-        );
-        let dirty = rows_to_rebuild(height, terminal.take_dirty_rows(), grid_rebuilt);
-        for row in dirty {
-            for frame in &mut self.frames {
-                frame.dirty_rows[row] = true;
-            }
-            for column in 0..width {
-                let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
-                let grapheme = terminal.viewport_stored_grapheme(row, column);
-                let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
-                let (pre_context, post_context) = if Font::requires_contextual_shaping(ch) {
-                    terminal.viewport_shaping_context(row, column)
-                } else {
-                    (String::new(), String::new())
-                };
-                self.gpu_cells[row * width + column] =
-                    self.convert_cell(cell, grapheme, &pre_context, &post_context, font)?;
-            }
-        }
+        self.prepare_grid(terminal, font, width, height, count)?;
         let frame_index = self.frame_index;
         let fence = self.frames[frame_index].fence;
         let image_available = self.frames[frame_index].image_available;
@@ -858,14 +860,22 @@ impl Renderer {
             self.glyphs_dirty = false;
         }
         if !self.uploaded_atlas {
-            self.upload_atlas(self.atlas, false, Some(font.atlas_pixels()), &[], false)?;
+            self.upload_atlas(
+                self.atlas,
+                self.atlas_initialized,
+                Some(font.atlas_pixels()),
+                &[],
+                false,
+            )?;
+            self.atlas_initialized = true;
             self.upload_atlas(
                 self.color_atlas,
-                false,
+                self.color_atlas_initialized,
                 Some(font.color_atlas_pixels()),
                 &[],
                 true,
             )?;
+            self.color_atlas_initialized = true;
             self.uploaded_atlas = true;
             self.uploaded_color_atlas = true;
             self.pending_glyph_uploads.clear();
@@ -1142,6 +1152,73 @@ impl Renderer {
         Ok(true)
     }
 
+    fn prepare_grid(
+        &mut self,
+        terminal: &mut Terminal,
+        font: &mut Font,
+        width: usize,
+        height: usize,
+        count: usize,
+    ) -> Result<(), String> {
+        for replacement in [false, true] {
+            let result = (|| {
+                let mut grid_rebuilt = false;
+                if self.grid_size != Some((width, height)) {
+                    for frame in &mut self.frames {
+                        frame.dirty_rows.fill(true);
+                    }
+                    self.grid_size = Some((width, height));
+                    grid_rebuilt = true;
+                }
+                self.gpu_cells.resize(
+                    count,
+                    GpuCell {
+                        glyph: u32::MAX,
+                        fg: 0x00d8d8d8,
+                        bg: 0x00181818,
+                        flags: 0,
+                    },
+                );
+                if let Some(upload) = font.glyph('\u{fffd}', false, false)?.2 {
+                    self.pending_glyph_uploads.push(upload);
+                }
+                let dirty = rows_to_rebuild(height, terminal.take_dirty_rows(), grid_rebuilt);
+                for row in dirty {
+                    for frame in &mut self.frames {
+                        frame.dirty_rows[row] = true;
+                    }
+                    for column in 0..width {
+                        let cell = terminal.viewport_cell(row, column).unwrap_or(Cell::EMPTY);
+                        let grapheme = terminal.viewport_stored_grapheme(row, column);
+                        let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
+                        let (pre_context, post_context) = if Font::requires_contextual_shaping(ch) {
+                            terminal.viewport_shaping_context(row, column)
+                        } else {
+                            (String::new(), String::new())
+                        };
+                        self.gpu_cells[row * width + column] = self.convert_cell(
+                            cell,
+                            grapheme,
+                            &pre_context,
+                            &post_context,
+                            font,
+                            replacement,
+                        )?;
+                    }
+                }
+                Ok(())
+            })();
+            match result {
+                Err(error) if error == CACHE_FULL && !replacement => {
+                    // Rebuild all visible rows: old cells reference the discarded atlas.
+                    font.invalidate_atlas();
+                    self.invalidate_font();
+                }
+                other => return other,
+            }
+        }
+        unreachable!("the second attempt always returns")
+    }
 
     fn convert_cell(
         &mut self,
@@ -1150,6 +1227,7 @@ impl Renderer {
         pre_context: &str,
         post_context: &str,
         font: &mut Font,
+        replacement: bool,
     ) -> Result<GpuCell, String> {
         if cell.content == 0 || cell.flags().contains(CellFlags::WIDE_SPACER) {
             return Ok(GpuCell {
@@ -1162,18 +1240,16 @@ impl Renderer {
         let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
         let bold = cell.flags().contains(CellFlags::BOLD);
         let italic = cell.flags().contains(CellFlags::ITALIC);
-        let (glyph, info, upload) = if let Some(grapheme) = grapheme {
-            if pre_context.is_empty() && post_context.is_empty() {
-                font.glyph_text(grapheme, bold, italic)?
-            } else {
-                font.glyph_text_with_context(grapheme, pre_context, post_context, bold, italic)?
-            }
-        } else if !pre_context.is_empty() || !post_context.is_empty() {
-            let text = ch.to_string();
-            font.glyph_text_with_context(&text, pre_context, post_context, bold, italic)?
-        } else {
-            font.glyph(ch, bold, italic)?
-        };
+        let (glyph, info, upload) = rasterize_cell(
+            font,
+            ch,
+            grapheme,
+            pre_context,
+            post_context,
+            bold,
+            italic,
+            replacement,
+        )?;
         if let Some(upload) = upload {
             self.pending_glyph_uploads.push(upload);
         }
@@ -1505,10 +1581,37 @@ fn create_offscreen_target(
     Ok((image, memory, view))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn rasterize_cell(
+    font: &mut Font,
+    ch: char,
+    grapheme: Option<&str>,
+    pre: &str,
+    post: &str,
+    bold: bool,
+    italic: bool,
+    replacement: bool,
+) -> Result<(u32, GlyphInfo, Option<GlyphUpload>), String> {
+    let result = match grapheme {
+        Some(text) => font.glyph_text_with_context(text, pre, post, bold, italic),
+        None if !pre.is_empty() || !post.is_empty() => {
+            font.glyph_text_with_context(&ch.to_string(), pre, post, bold, italic)
+        }
+        None => font.glyph(ch, bold, italic),
+    };
+    match result {
+        // An oversized visible working set gets a visible replacement, never
+        // a permanently cached blank. The replacement was reserved beforehand.
+        Err(error) if replacement && error == CACHE_FULL => font.glyph('\u{fffd}', false, false),
+        other => other,
+    }
+}
+
 fn upload_offscreen_atlas(
     context: AtlasUploadContext<'_>,
     pixels: &[u8],
     color: bool,
+    initialized: bool,
 ) -> Result<(), String> {
     let bytes_per_pixel = if color { 4 } else { 1 };
     let expected = (ATLAS_SIZE * ATLAS_SIZE) as usize * bytes_per_pixel;
@@ -1523,7 +1626,7 @@ fn upload_offscreen_atlas(
         pixels: pixels.to_vec(),
         color,
     };
-    upload_atlas_regions(context, &[upload], false)
+    upload_atlas_regions(context, &[upload], initialized)
 }
 
 fn upload_atlas_regions(

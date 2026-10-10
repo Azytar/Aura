@@ -808,3 +808,42 @@ fn thin_cursors_preserve_the_glyph_outside_the_cursor_stripe() {
         }
     }
 }
+
+#[test]
+fn a_long_sessions_full_atlas_is_rebuilt_for_visible_glyphs() {
+    if !require_gpu() {
+        return;
+    }
+    let mut font = Font::load(None, 72.0).unwrap();
+    let mut exhausted = false;
+    for scalar in 0x2500..=0x2bff {
+        if let Err(error) = font.glyph(char::from_u32(scalar).unwrap(), false, false) {
+            assert_eq!(error, aura_text::CACHE_FULL);
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(exhausted, "fixture must fill the atlas before drawing i");
+    let m = font.metrics();
+    let mut terminal = Terminal::new(1, 1).unwrap();
+    terminal.process(b"i\x1b[?25l");
+    let mut renderer = OffscreenRenderer::new(m.width, m.height).unwrap();
+    let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+    assert!(
+        pixels
+            .chunks_exact(4)
+            .any(|p| p[0] > 150 && p[1] > 150 && p[2] > 150),
+        "i must recover after atlas exhaustion"
+    );
+    let (_, info, _) = font.glyph('i', false, false).unwrap();
+    assert!(info.size[0] > 0.0 && info.size[1] > 0.0);
+    font.set_size(71.0).unwrap();
+    renderer.invalidate_atlas();
+    assert!(
+        renderer
+            .render(&mut terminal, &mut font)
+            .unwrap()
+            .chunks_exact(4)
+            .any(|p| p[0] > 150)
+    );
+}
