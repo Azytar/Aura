@@ -138,6 +138,13 @@ impl Pty {
         // already the PTY slave because Command configured its stdio handles.
         unsafe {
             command.pre_exec(move || {
+                // The GUI routes termination through signalfd. Interactive
+                // jobs need normal signal delivery, including Ctrl+C.
+                let mut mask = std::mem::zeroed();
+                libc::sigemptyset(&mut mask);
+                if libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut()) == -1 {
+                    return Err(io::Error::last_os_error());
+                }
                 if libc::setsid() == -1 {
                     return Err(io::Error::last_os_error());
                 }

@@ -1,4 +1,6 @@
+mod input;
 mod keyboard;
+mod signals;
 
 use keyboard::{FontSizeAction, Keyboard, font_size_action};
 use std::io;
@@ -39,6 +41,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let termination = signals::Termination::new()?;
     let config = AppConfig::load();
     let mut font_sizes = RuntimeFontSize::new(config.font.size);
     let mut font = Font::load_with_family(&config.font.family, font_sizes.current())
@@ -160,6 +163,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         libc::EPOLLIN as u32 | libc::EPOLLHUP as u32,
     )?;
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
+    epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
+    let mut input = input::Input::default();
+    let mut watching_write = false;
     let mut keyboard = Keyboard::new(&connection)?;
     let mut running = true;
     let mut invalidated = false;
@@ -306,7 +312,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(bytes) =
                                     keyboard.bytes(sym, modifiers, terminal.modes())
                                 {
-                                    write_all_pty(&mut pty, &bytes)?;
+                                    input.push(&bytes);
                                     cursor_blink_on = true;
                                     invalidated = true;
                                 }
@@ -362,7 +368,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     font.metrics(),
                                     [config.window.padding_x, config.window.padding_y],
                                 ) {
-                                    write_all_pty(&mut pty, &bytes)?;
+                                    input.push(&bytes);
                                 }
                             }
                             Event::ButtonRelease(button) => {
@@ -383,7 +389,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     font.metrics(),
                                     [config.window.padding_x, config.window.padding_y],
                                 ) {
-                                    write_all_pty(&mut pty, &bytes)?;
+                                    input.push(&bytes);
                                 }
                             }
                             Event::MotionNotify(motion) => {
@@ -402,7 +408,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             font.metrics(),
                                             [config.window.padding_x, config.window.padding_y],
                                         ) {
-                                            write_all_pty(&mut pty, &bytes)?;
+                                            input.push(&bytes);
                                         }
                                     }
                                 } else if let Some(anchor) = selection_anchor {
@@ -427,7 +433,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     clipboard.receive_paste(&connection, window, notify.property)?
                                 {
                                     let paste = terminal.encode_paste(&bytes);
-                                    write_all_pty(&mut pty, &paste)?;
+                                    input.push(&paste);
                                     invalidated = true;
                                 }
                             }
@@ -436,7 +442,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 2 => {
-                    loop {
+                    for _ in 0..16 {
                         match pty.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(length) => {
@@ -467,7 +473,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                                 if !replies.is_empty() {
-                                    write_all_pty(&mut pty, &replies)?;
+                                    input.push(&replies);
                                 }
                                 invalidated = true;
                             }
@@ -492,7 +498,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         invalidated = true;
                     }
                 }
+                4 => running = false,
                 _ => {}
+            }
+        }
+        if running {
+            input.flush(|bytes| pty.write(bytes))?;
+            if watching_write != input.pending() {
+                watching_write = input.pending();
+                let mut interest = libc::epoll_event {
+                    events: (libc::EPOLLIN
+                        | libc::EPOLLHUP
+                        | if watching_write { libc::EPOLLOUT } else { 0 })
+                        as u32,
+                    u64: 2,
+                };
+                // SAFETY: epoll and pty_fd remain owned and interest is initialized.
+                if unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_MOD, pty_fd, &mut interest) }
+                    == -1
+                {
+                    return Err(io::Error::last_os_error().into());
+                }
             }
         }
         if terminal.title() != previous_title {
@@ -817,23 +843,6 @@ fn probe_vulkan() -> Result<Vec<VulkanDevice>, String> {
         });
     }
     Ok(devices)
-}
-
-fn write_all_pty(pty: &mut Pty, mut bytes: &[u8]) -> io::Result<()> {
-    while !bytes.is_empty() {
-        match pty.write(bytes) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "PTY accepted no input",
-                ));
-            }
-            Ok(count) => bytes = &bytes[count..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
 }
 
 fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
