@@ -93,9 +93,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         AtomEnum::ATOM,
         &[delete_window],
     )?;
-    connection.map_window(window)?;
-    connection.flush()?;
 
+    // The window is mapped only once everything behind it exists. Mapping
+    // earlier makes the window visible while the PTY and renderer are still
+    // being built, and any keystroke that arrives in that gap is dropped
+    // because there is no child to send it to.
     let (columns, rows) = (config.window.columns, config.window.lines);
     let mut terminal = Terminal::new(columns, rows)
         .map_err(|error| io::Error::other(format!("terminal grid: {error:?}")))?;
@@ -111,6 +113,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     renderer
         .render(&mut terminal, &mut font, true)
         .map_err(io::Error::other)?;
+    connection.map_window(window)?;
+    connection.flush()?;
 
     let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epoll == -1 {
