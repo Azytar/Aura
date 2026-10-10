@@ -11,8 +11,9 @@ renderer are implemented and tested, including offscreen GPU readback
 assertions that run as part of `cargo test` on machines with a usable Vulkan
 device.
 
-See `CHANGELOG.md` for the validated scope and known limitations, and
-`docs/ARCHITECTURE.md` for how the crates fit together.
+See `CHANGELOG.md` for the validated scope and known limitations,
+`docs/ARCHITECTURE.md` for how the crates fit together, and
+`docs/PERFORMANCE.md` for measured numbers.
 
 ## Requirements
 
@@ -108,11 +109,40 @@ install -Dm644 aura.desktop /usr/share/applications/aura.desktop
   translation, clipboard.
 - `shaders/`: GLSL 460 sources compiled by `crates/aura-render/build.rs`.
 
+## Testing
+
+```sh
+cargo test            # 148 tests, including GPU readback assertions
+./tests/e2e_shell_smoke.sh target/release/aura
+```
+
+`cargo test` runs the GPU readback suite as part of the normal run. It prints a
+skip reason on a machine without a usable Vulkan device rather than being
+`#[ignore]`d, because a skipped assertion is how the push-constant layout bug
+in `docs/CHANGELOG` went unnoticed.
+
+`tests/e2e_shell_smoke.sh` drives the real binary on a live X display and
+checks the milestone end to end: typed keys reach `/bin/bash`, output comes back
+through the parser into the Vulkan framebuffer, and closing the window leaves
+no orphaned child. It exits 77 and explains itself when there is no display.
+
 ## Known limitations
 
+- **X11 only.** The window backend is X11; there is no Wayland frontend yet.
+  `aura doctor` reports which displays are visible.
+- **No IME.** Composing text through an input method is not implemented, so
+  CJK input relies on the input method's own commit path reaching the X
+  keyboard events.
+- **No configurable key bindings.** The shortcuts are fixed in
+  `crates/aura-app/src/main.rs`; `[keyboard]` does not exist yet.
+- **No input-to-present latency instrumentation.** Only aggregate frame timing
+  is reported on stderr.
+- **No subpixel antialiasing**, and underline and strikethrough render as solid
+  bars. Hyperlink text has no distinct style.
+- **No fontconfig discovery.** Fonts are found by scanning standard
+  directories, so a font outside them needs an explicit path.
+- Font configuration is startup-only; live reload is not implemented.
 - No coverage-guided fuzzing: only stable toolchains are available, so the
   `crates/aura-core/fuzz` target runs as plain libFuzzer mutation runs.
-- Underline and strikethrough render as solid bars; hyperlink text has no
-  distinct style yet.
-- Font configuration is startup-only; live reload and DPI-aware scaling are
-  not implemented.
+- OSC 8 hyperlinks are parsed and stored, and OSC 52 writes are honoured, but
+  nothing opens a link on click.
