@@ -12,7 +12,7 @@ use swash::{
 use unicode_script::{Script, UnicodeScript};
 
 const DEFAULT_ATLAS_SIZE: u32 = 1024;
-const MAX_FALLBACKS: usize = 3;
+const MAX_FALLBACKS: usize = 8;
 
 /// Smallest runtime font size in typographic pixels. The floor keeps glyph
 /// rasters, cell geometry, and window pixel math safely above zero; every
@@ -39,10 +39,19 @@ pub fn clamp_font_size(size: f32) -> f32 {
 /// Well-known fallback faces tried in order when the primary face lacks a
 /// glyph: CJK coverage, color emoji, and extra symbols. Each entry is a file
 /// path plus the face index inside that file (collections hold several).
-const FALLBACK_CANDIDATES: &[(&str, usize)] = &[
-    ("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", 0),
-    ("/usr/share/fonts/noto/NotoColorEmoji.ttf", 0),
-    ("/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", 0),
+const FALLBACK_CANDIDATES: &[&[&str]] = &[
+    &[
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    ],
+    &[
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+    ],
+    &[
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    ],
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +131,7 @@ pub struct Font {
     face_index: usize,
     fallbacks: Vec<FaceData>,
     fallbacks_loaded: bool,
+    fallback_paths: Vec<PathBuf>,
     size: f32,
     metrics: CellMetrics,
     atlas_size: u32,
@@ -182,6 +192,7 @@ impl Font {
             face_index: 0,
             fallbacks: Vec::new(),
             fallbacks_loaded: false,
+            fallback_paths: Vec::new(),
             size,
             metrics,
             atlas_size: DEFAULT_ATLAS_SIZE,
@@ -265,6 +276,18 @@ impl Font {
                 format!("no font found for family '{family}'; pass a path or install the font")
             })?;
         Self::load(Some(&path), size)
+    }
+
+    /// Configured families precede system fallbacks, with a fixed face budget.
+    pub fn set_fallback_families(&mut self, families: &[String]) {
+        self.fallback_paths = families
+            .iter()
+            .take(MAX_FALLBACKS)
+            .filter_map(|family| Self::resolve_family_path(family))
+            .collect();
+        self.fallbacks.clear();
+        self.fallbacks_loaded = false;
+        self.invalidate_atlas();
     }
 
     pub const fn metrics(&self) -> CellMetrics {
@@ -450,7 +473,7 @@ impl Font {
             return (0, face.charmap().map(ch));
         }
         if !self.fallbacks_loaded {
-            self.fallbacks = load_fallbacks();
+            self.fallbacks = load_fallbacks(&self.fallback_paths);
             self.fallbacks_loaded = true;
         }
         for (position, fallback) in self.fallbacks.iter().enumerate() {
@@ -709,24 +732,56 @@ impl Font {
 
 /// Recursively searches `dir` for font files whose stem matches `family`.
 fn search_font_dir(dir: &Path, family: &str) -> Option<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return None;
-    };
+    let entries = fs::read_dir(dir).ok()?;
+    let mut best: Option<PathBuf> = None;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(found) = search_font_dir(&path, family) {
-                return Some(found);
-            }
-        } else if let Some(ext) = path.extension() {
-            if matches!(ext.to_str(), Some("ttf") | Some("ttc") | Some("otf"))
-                && family_matches_path(family, &path)
-            {
-                return Some(path);
-            }
+        // Avoid following directory symlinks into cycles or outside the font root.
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let candidate = if kind.is_dir() {
+            search_font_dir(&path, family)
+        } else if matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("ttf" | "ttc" | "otf")
+        ) && family_matches_path(family, &path)
+        {
+            Some(path)
+        } else {
+            None
+        };
+        if let Some(candidate) = candidate
+            && best
+                .as_ref()
+                .is_none_or(|old| font_path_rank(&candidate, family) < font_path_rank(old, family))
+        {
+            best = Some(candidate);
         }
     }
-    None
+    best
+}
+
+fn font_path_rank(path: &Path, family: &str) -> (u8, PathBuf) {
+    let stem = normalize_name(
+        &path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase(),
+    );
+    let family = normalize_name(&family.to_lowercase());
+    let rank = if stem == family || stem == format!("{family}regular") {
+        0
+    } else if ["bold", "italic", "oblique", "light", "thin", "condensed"]
+        .iter()
+        .any(|style| stem.contains(style))
+    {
+        2
+    } else {
+        1
+    };
+    (rank, path.to_owned())
 }
 
 /// Heuristic: true when the family name appears in the filename stem.
@@ -798,21 +853,25 @@ fn compute_metrics(bytes: &[u8], index: usize, size: f32) -> Option<CellMetrics>
 
 /// Loads existing fallback faces from well-known system paths, in priority
 /// order and bounded by `MAX_FALLBACKS`.
-fn load_fallbacks() -> Vec<FaceData> {
+fn load_fallbacks(configured: &[PathBuf]) -> Vec<FaceData> {
     let mut faces = Vec::new();
-    for (path, index) in FALLBACK_CANDIDATES {
+    let system = FALLBACK_CANDIDATES
+        .iter()
+        .filter_map(|paths| paths.iter().map(PathBuf::from).find(|path| path.is_file()));
+    let mut seen = Vec::new();
+    for candidate in configured.iter().cloned().chain(system) {
         if faces.len() >= MAX_FALLBACKS {
             break;
         }
-        let candidate = PathBuf::from(path);
+        if seen.contains(&candidate) {
+            continue;
+        }
+        seen.push(candidate.clone());
         let Ok(bytes) = fs::read(&candidate) else {
             continue;
         };
-        if FontRef::from_index(&bytes, *index).is_some() {
-            faces.push(FaceData {
-                bytes,
-                index: *index,
-            });
+        if FontRef::from_index(&bytes, 0).is_some() {
+            faces.push(FaceData { bytes, index: 0 });
         }
     }
     faces
@@ -821,6 +880,40 @@ fn load_fallbacks() -> Vec<FaceData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn family_search_prefers_regular_across_directories() {
+        let root = std::env::temp_dir().join(format!("aura-font-search-{}", std::process::id()));
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("z")).unwrap();
+        for name in [
+            "a/ExampleMono-Bold.ttf",
+            "a/ExampleMono-Italic.ttf",
+            "z/ExampleMono-Regular.ttf",
+        ] {
+            fs::write(root.join(name), []).unwrap();
+        }
+        assert_eq!(
+            search_font_dir(&root, "Example Mono"),
+            Some(root.join("z/ExampleMono-Regular.ttf"))
+        );
+        assert_eq!(
+            search_font_dir(&root, "Example Mono Bold"),
+            Some(root.join("a/ExampleMono-Bold.ttf"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_fallbacks_are_lazy_bounded_and_take_priority() {
+        let path = default_font_path().unwrap();
+        let mut font = Font::load(None, 14.0).unwrap();
+        font.set_fallback_families(&[path.to_string_lossy().into_owned()]);
+        assert_eq!(font.fallback_count(), 0);
+        font.resolve_face('中');
+        assert!(font.fallback_count() <= MAX_FALLBACKS);
+        assert_eq!(font.fallbacks[0].bytes, fs::read(path).unwrap());
+    }
 
     #[test]
     fn system_font_metrics_and_glyph_cache_are_stable() {
