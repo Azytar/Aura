@@ -512,6 +512,12 @@ impl Terminal {
     }
 
     pub fn resize(&mut self, width: usize, height: usize) -> Result<(), GridError> {
+        // Same-size resizes (font zoom) must leave scroll margins, pending
+        // wrap, tabs, and selection alone; only a geometry change invalidates
+        // them. Grid::resize already no-ops on identical dimensions.
+        if self.grid.active().width() == width && self.grid.active().height() == height {
+            return Ok(());
+        }
         self.grid.resize(width, height)?;
         let old_width = self.tabs.len();
         self.tabs.resize(width, false);
@@ -1966,7 +1972,7 @@ mod tests {
     fn font_size_resize_preserves_state_without_clearing() {
         // Simulates the font-zoom path: same columns×rows, pixel geometry
         // changes underneath. Content, modes, cursor, alternate screen,
-        // and scrollback must all survive.
+        // scroll region, pending wrap, and scrollback must all survive.
         let mut terminal = terminal(10, 3);
         feed(&mut terminal, b"hello\x1b[1mB\x1b[0m\r\nworld");
         feed(&mut terminal, b"\x1b[?1049hALT");
@@ -1977,11 +1983,18 @@ mod tests {
         let modes_before = terminal.modes();
         // Wide + combining state must survive a same-size resize.
         feed(&mut terminal, "界e\u{301}".as_bytes());
+        // A scroll region plus a pending wrap: filling the last row to the
+        // margin arms the wrap without moving the cursor.
+        feed(&mut terminal, b"\x1b[1;2r\x1b[3;1H0123456789");
+        assert_eq!(terminal.scroll_region(), (0, 1));
+        assert!(terminal.pending_wrap);
         let cursor_before = terminal.cursor();
         terminal.resize(10, 3).unwrap();
         assert_eq!(terminal.cursor(), cursor_before);
         assert_eq!(terminal.modes(), modes_before);
         assert_eq!(terminal.scrollback_len(), scrollback_before);
+        assert_eq!(terminal.scroll_region(), (0, 1));
+        assert!(terminal.pending_wrap);
         assert!(!terminal.is_alternate_screen());
         // Grid still honors wide-leading/spacer pairing after resize.
         let row = terminal.active_grid().row_at(cursor_before.row).unwrap();
