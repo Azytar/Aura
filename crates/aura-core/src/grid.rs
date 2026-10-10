@@ -788,6 +788,12 @@ impl Grid {
 
     /// Resizes without reflow: preserve the top-left intersection and discard the rest.
     pub fn resize(&mut self, new_width: usize, new_height: usize) -> Result<(), GridError> {
+        // Same-size resizes (font zoom) must not reflow: rebuilding logical
+        // lines here would reorder scrollback and move the cursor even though
+        // no cell changed size. The caller still repaints via dirty state.
+        if new_width == self.width && new_height == self.height {
+            return Ok(());
+        }
         if new_width == 0 {
             return Err(GridError::ZeroWidth);
         }
