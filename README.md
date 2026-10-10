@@ -126,6 +126,14 @@ checks the milestone end to end: typed keys reach `/bin/bash`, output comes back
 through the parser into the Vulkan framebuffer, and closing the window leaves
 no orphaned child. It exits 77 and explains itself when there is no display.
 
+Its input path is `xdotool type`, which synthesizes characters by rebinding
+scratch keycodes and restoring them afterwards. That restore can deliver
+`MappingNotify` ahead of the synthetic `KeyPress` events, so occasionally the
+character bash receives is not the one intended. AURA's `MappingNotify`
+handling was checked separately against a real layout switch (`setxkbmap`
+`us`<->`de`, five consecutive sends, all correct), and the script re-sends with
+a `Ctrl+C` when a skew is detected.
+
 ## Known limitations
 
 - **X11 only.** The window backend is X11; there is no Wayland frontend yet.
