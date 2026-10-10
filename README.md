@@ -53,7 +53,7 @@ aura doctor
 
 Configuration is optional. When `~/.config/aura/config.toml` is absent, the
 documented defaults are used and the terminal is fully functional. An example
-configuration is provided in `examples/aura.toml`.
+configuration is provided in `example/config.toml`.
 
 ## Configuration
 
@@ -73,7 +73,7 @@ loads with everything else at its defaults. Supported keys:
 - `scrollback.lines` (0 disables history, up to 1000000)
 - `security.osc52` (`write-only` or `disabled`) and `security.max_paste_bytes`
 
-`examples/aura.toml` documents every key with its default. AURA never answers
+`example/config.toml` documents every key with its default. AURA never answers
 an OSC 52 *read* request, so the clipboard cannot be extracted by something
 running inside the terminal.
 
