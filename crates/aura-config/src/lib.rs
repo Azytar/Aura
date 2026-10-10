@@ -1434,7 +1434,8 @@ columns = 0
 
     #[test]
     fn missing_config_uses_defaults() {
-        let config = AppConfig::load_from_path(Some(Path::new("/nonexistent/aterm.toml"))).unwrap();
+        let config =
+            AppConfig::load_from_path(Some(Path::new("/nonexistent/config.toml"))).unwrap();
         assert_eq!(config.font.family, DEFAULT_FONT_FAMILY);
         assert_eq!(config.font.size, DEFAULT_FONT_SIZE);
     }
