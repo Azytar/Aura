@@ -161,6 +161,10 @@ impl FontGeometry {
     }
 }
 
+/// Shared grid budget for window sizing and the renderer's fixed SSBOs.
+pub const MAX_GRID_COLUMNS: usize = 512;
+pub const MAX_GRID_ROWS: usize = 256;
+
 /// Derives how many complete cells fit in an inner (padding-free) window area.
 /// Shared by startup sizing and `ConfigureNotify` handling so both agree.
 pub fn grid_dimensions(
@@ -171,7 +175,7 @@ pub fn grid_dimensions(
 ) -> (usize, usize) {
     let columns = (inner_width / cell_width.max(1)).max(1) as usize;
     let rows = (inner_height / cell_height.max(1)).max(1) as usize;
-    (columns, rows)
+    (columns.min(MAX_GRID_COLUMNS), rows.min(MAX_GRID_ROWS))
 }
 
 /// Default font family name when no config is present.
@@ -541,24 +545,26 @@ impl WindowConfig {
 
         let columns = match window.get("columns").and_then(|v| v.as_integer()) {
             Some(value) => {
-                let v = value as usize;
-                if v >= 1 {
-                    v
-                } else {
-                    return Err(ConfigError::invalid_value("window.columns", "must be >= 1"));
+                if !(1..=MAX_GRID_COLUMNS as i64).contains(&value) {
+                    return Err(ConfigError::invalid_value(
+                        "window.columns",
+                        format!("must be between 1 and {MAX_GRID_COLUMNS}"),
+                    ));
                 }
+                value as usize
             }
             None => DEFAULT_COLUMNS,
         };
 
         let lines = match window.get("lines").and_then(|v| v.as_integer()) {
             Some(value) => {
-                let v = value as usize;
-                if v >= 1 {
-                    v
-                } else {
-                    return Err(ConfigError::invalid_value("window.lines", "must be >= 1"));
+                if !(1..=MAX_GRID_ROWS as i64).contains(&value) {
+                    return Err(ConfigError::invalid_value(
+                        "window.lines",
+                        format!("must be between 1 and {MAX_GRID_ROWS}"),
+                    ));
                 }
+                value as usize
             }
             None => DEFAULT_LINES,
         };
@@ -1085,6 +1091,20 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_windows_and_invalid_config_respect_the_gpu_grid_budget() {
+        assert_eq!(
+            grid_dimensions(u32::MAX, u32::MAX, 1, 1),
+            (MAX_GRID_COLUMNS, MAX_GRID_ROWS)
+        );
+        for key in ["columns", "lines"] {
+            for value in [-1, 0, 65536] {
+                let table = toml::from_str(&format!("[window]\n{key} = {value}\n")).unwrap();
+                assert!(WindowConfig::parse_table(&table).is_err(), "{key}={value}");
+            }
+        }
+    }
 
     #[test]
     fn every_section_is_optional() {
