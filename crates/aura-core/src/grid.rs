@@ -477,13 +477,13 @@ impl Grid {
             target.hyperlinks[column] = None;
             target.dirty = true;
         }
-        if let Some(partner) = partner {
-            if target.cells[partner] != Cell::EMPTY {
-                target.cells[partner] = Cell::EMPTY;
-                target.graphemes[partner] = None;
-                target.hyperlinks[partner] = None;
-                target.dirty = true;
-            }
+        if let Some(partner) = partner
+            && target.cells[partner] != Cell::EMPTY
+        {
+            target.cells[partner] = Cell::EMPTY;
+            target.graphemes[partner] = None;
+            target.hyperlinks[partner] = None;
+            target.dirty = true;
         }
     }
 
