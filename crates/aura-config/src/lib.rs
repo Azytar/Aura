@@ -205,6 +205,157 @@ pub const DEFAULT_LINES: usize = 32;
 /// Default padding in typographic pixels.
 pub const DEFAULT_PADDING: u32 = 0;
 
+/// Default number of scrollback rows retained above the visible screen.
+pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+/// Largest scrollback the configuration may request. The grid stores one
+/// `Row` (cells plus grapheme and hyperlink sidecars) per line, so this is a
+/// memory guard rather than a policy choice: at the default 120 columns a row
+/// holds roughly 7 KiB of cells, putting the ceiling near a gigabyte.
+pub const MAX_SCROLLBACK_LINES: usize = 1_000_000;
+
+/// Largest paste, in bytes, that AURA forwards to the child process. A bounded
+/// paste keeps one mis-click from writing an unbounded blob into a shell that
+/// may then act on it.
+pub const DEFAULT_MAX_PASTE_BYTES: usize = 64 * 1024;
+
+/* ------------------------------------------------------------------ colours */
+
+/// Named starting points for the palette. `Custom` takes every colour from the
+/// configuration file and falls back to the dark palette for anything left
+/// unspecified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeKind {
+    #[default]
+    Dark,
+    Light,
+    Custom,
+}
+
+impl ThemeKind {
+    /// Parses a theme name. Case-insensitive so `dark`, `Dark`, and `DARK`
+    /// all work; unknown names are rejected rather than silently defaulted.
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dark" => Ok(Self::Dark),
+            "light" => Ok(Self::Light),
+            "custom" => Ok(Self::Custom),
+            _ => Err(ConfigError::invalid_value(
+                "colors.theme",
+                format!("must be one of dark, light, custom (got {value:?})"),
+            )),
+        }
+    }
+}
+
+/// Terminal colours as plain `0xRRGGBB` values.
+///
+/// This type holds data only and knows nothing about the GPU, the ANSI
+/// encoding, or `aura_core`, so the renderer keeps full freedom over its own
+/// texture encoding. Mapping `aura_core`'s colour words onto these entries is
+/// the renderer's job, where the tag constants already live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// Default foreground, and the colour of a block cursor.
+    pub foreground: u32,
+    /// Default background.
+    pub background: u32,
+    /// Selection highlight.
+    pub selection: u32,
+    /// The 16 ANSI colours: 0-7 normal, 8-15 bright.
+    pub ansi: [u32; 16],
+}
+
+impl Palette {
+    /// The default dark palette: a neutral, slightly cool grey scale with the
+    /// conventional xterm hues. The greys are kept low-contrast on purpose so
+    /// long sessions do not vibrate.
+    pub const DARK: Self = Self {
+        foreground: 0xd8d8d8,
+        background: 0x181818,
+        selection: 0x406090,
+        ansi: [
+            0x000000, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5,
+            0x7f7f7f, 0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+        ],
+    };
+
+    /// The same hues lifted for a paper background.
+    pub const LIGHT: Self = Self {
+        foreground: 0x1a1a1a,
+        background: 0xfafafa,
+        selection: 0xadd6ff,
+        ansi: [
+            0x1a1a1a, 0xb00020, 0x006000, 0x8a6d00, 0x0033cc, 0x8b1a8b, 0x007070, 0xbfbfbf,
+            0x595959, 0xd40000, 0x008000, 0xb58900, 0x1a53ff, 0xb0189b, 0x009999, 0x000000,
+        ],
+    };
+
+    /// Starting palette for a theme. `Custom` starts from dark so that a
+    /// partial override still has a complete set of colours to fall back on.
+    pub const fn for_theme(theme: ThemeKind) -> Self {
+        match theme {
+            ThemeKind::Dark | ThemeKind::Custom => Self::DARK,
+            ThemeKind::Light => Self::LIGHT,
+        }
+    }
+
+    pub const fn with_foreground(mut self, value: u32) -> Self {
+        self.foreground = value;
+        self
+    }
+
+    pub const fn with_background(mut self, value: u32) -> Self {
+        self.background = value;
+        self
+    }
+
+    pub const fn with_selection(mut self, value: u32) -> Self {
+        self.selection = value;
+        self
+    }
+
+    pub const fn with_ansi(mut self, ansi: [u32; 16]) -> Self {
+        self.ansi = ansi;
+        self
+    }
+}
+
+/// Parses one `0xRRGGBB` colour. Accepts `#rrggbb`, `rrggbb`, `0xrrggbb`,
+/// and a bare integer, so configuration can stay readable without forcing a
+/// single notation.
+pub fn parse_color(value: &toml::Value, key: &'static str) -> Result<u32, ConfigError> {
+    let parse_hex = |text: &str| -> Result<u32, ConfigError> {
+        let hex = text
+            .trim()
+            .trim_start_matches('#')
+            .trim_start_matches("0x")
+            .trim_start_matches("0X");
+        let digits = match hex.len() {
+            6 => hex.to_owned(),
+            // CSS-style shorthand: #abc expands to #aabbcc.
+            3 => hex
+                .bytes()
+                .flat_map(|byte| [byte, byte])
+                .map(|byte| byte as char)
+                .collect(),
+            _ => {
+                return Err(ConfigError::invalid_value(
+                    key,
+                    format!("must be 6 hex digits such as \"#1e1e1e\" (got {text:?})"),
+                ));
+            }
+        };
+        u32::from_str_radix(&digits, 16)
+            .map_err(|_| ConfigError::invalid_value(key, format!("invalid hex colour {text:?}")))
+    };
+    match value {
+        toml::Value::String(text) => parse_hex(text),
+        toml::Value::Integer(number) if (0..=0xff_ffff).contains(number) => Ok(*number as u32),
+        _ => Err(ConfigError::invalid_type(key, "hex colour string")),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FontStyleConfig {
     /// Font family name, or `None` to inherit from the primary `[font]` section.
@@ -255,17 +406,19 @@ pub struct FontConfig {
 
 impl FontConfig {
     fn parse_table(table: &toml::Table) -> Result<Self, ConfigError> {
+        // The section itself is optional: a configuration that only sets
+        // colours or scrollback must still load with a usable font.
         let font = table
             .get("font")
-            .ok_or_else(|| ConfigError::missing("font"))?
-            .as_table()
-            .ok_or_else(|| ConfigError::invalid_type("font", "table"))?;
+            .and_then(|value| value.as_table())
+            .cloned()
+            .unwrap_or_else(toml::Table::new);
 
         let mut family = font
             .get("family")
             .and_then(|v| v.as_str())
             .map(str::to_string)
-            .ok_or_else(|| ConfigError::missing("font.family"))?;
+            .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string());
 
         // Trim and validate non-empty family.
         family = family.trim().to_string();
@@ -288,14 +441,14 @@ impl FontConfig {
             ));
         }
 
-        let offset_x = parse_offset(font, "offset_x", DEFAULT_OFFSET_X)?;
-        let offset_y = parse_offset(font, "offset_y", DEFAULT_OFFSET_Y)?;
-        let line_spacing = parse_spacing(font, "line_spacing", DEFAULT_LINE_SPACING)?;
-        let letter_spacing = parse_spacing(font, "letter_spacing", DEFAULT_LETTER_SPACING)?;
+        let offset_x = parse_offset(&font, "offset_x", DEFAULT_OFFSET_X)?;
+        let offset_y = parse_offset(&font, "offset_y", DEFAULT_OFFSET_Y)?;
+        let line_spacing = parse_spacing(&font, "line_spacing", DEFAULT_LINE_SPACING)?;
+        let letter_spacing = parse_spacing(&font, "letter_spacing", DEFAULT_LETTER_SPACING)?;
 
-        let bold = FontStyleConfig::parse_section(font, "bold");
-        let italic = FontStyleConfig::parse_section(font, "italic");
-        let bold_italic = FontStyleConfig::parse_section(font, "bold_italic");
+        let bold = FontStyleConfig::parse_section(&font, "bold");
+        let italic = FontStyleConfig::parse_section(&font, "italic");
+        let bold_italic = FontStyleConfig::parse_section(&font, "bold_italic");
 
         let fallback_families = font
             .get("fallback")
@@ -440,9 +593,304 @@ impl WindowConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ColorsConfig {
+    /// Which palette the section starts from.
+    pub theme: ThemeKind,
+    /// Explicit colours overriding the theme.
+    pub foreground: Option<u32>,
+    pub background: Option<u32>,
+    pub cursor: Option<u32>,
+    pub selection: Option<u32>,
+    /// Optional full override of the 16 ANSI colours.
+    pub ansi: Option<[u32; 16]>,
+}
+
+impl ColorsConfig {
+    fn parse_table(table: &toml::Table) -> Result<Self, ConfigError> {
+        let colors = table
+            .get("colors")
+            .and_then(|value| value.as_table())
+            .cloned()
+            .unwrap_or_else(toml::Table::new);
+
+        let theme = match colors.get("theme") {
+            Some(value) => ThemeKind::parse(
+                value
+                    .as_str()
+                    .ok_or_else(|| ConfigError::invalid_type("colors.theme", "string"))?,
+            )?,
+            None => ThemeKind::default(),
+        };
+
+        let optional_color = |key: &'static str| -> Result<Option<u32>, ConfigError> {
+            colors
+                .get(key)
+                .map(|value| parse_color(value, key))
+                .transpose()
+        };
+
+        let ansi = match colors.get("palette") {
+            Some(value) => {
+                let entries = value
+                    .as_array()
+                    .ok_or_else(|| ConfigError::invalid_type("colors.palette", "array"))?;
+                if entries.len() != 16 {
+                    return Err(ConfigError::invalid_value(
+                        "colors.palette",
+                        "must list exactly 16 colours (0-7 normal, 8-15 bright)",
+                    ));
+                }
+                let mut parsed = [0_u32; 16];
+                for (slot, entry) in entries.iter().enumerate() {
+                    parsed[slot] = parse_color(entry, "colors.palette")?;
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
+
+        Ok(Self {
+            theme,
+            foreground: optional_color("foreground")?,
+            background: optional_color("background")?,
+            cursor: optional_color("cursor")?,
+            selection: optional_color("selection")?,
+            ansi,
+        })
+    }
+
+    /// The palette this section resolves to: the theme's colours with every
+    /// explicit override applied on top.
+    pub fn palette(&self) -> Palette {
+        let mut palette = Palette::for_theme(self.theme);
+        if let Some(value) = self.foreground {
+            palette = palette.with_foreground(value);
+        }
+        if let Some(value) = self.background {
+            palette = palette.with_background(value);
+        }
+        if let Some(value) = self.selection {
+            palette = palette.with_selection(value);
+        }
+        if let Some(value) = self.ansi {
+            palette = palette.with_ansi(value);
+        }
+        palette
+    }
+
+    /// The cursor colour: an explicit override, else the foreground.
+    pub fn cursor_color(&self) -> u32 {
+        self.cursor.unwrap_or_else(|| self.palette().foreground)
+    }
+}
+
+/// DECSCUSR shape, which applications write with `CSI Ps SP q`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Underline,
+    Bar,
+}
+
+impl CursorShape {
+    /// Parses a cursor shape name; unknown names are rejected.
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "block" => Ok(Self::Block),
+            "underline" => Ok(Self::Underline),
+            "bar" => Ok(Self::Bar),
+            _ => Err(ConfigError::invalid_value(
+                "cursor.style",
+                format!("must be one of block, underline, bar (got {value:?})"),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorConfig {
+    /// Shape used until an application selects its own.
+    pub style: CursorShape,
+    /// Whether the cursor blinks when the application does not say otherwise.
+    pub blink: bool,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            style: CursorShape::default(),
+            blink: true,
+        }
+    }
+}
+
+impl CursorConfig {
+    fn parse_table(table: &toml::Table) -> Result<Self, ConfigError> {
+        let cursor = table
+            .get("cursor")
+            .and_then(|value| value.as_table())
+            .cloned()
+            .unwrap_or_else(toml::Table::new);
+
+        let style = match cursor.get("style") {
+            Some(value) => CursorShape::parse(
+                value
+                    .as_str()
+                    .ok_or_else(|| ConfigError::invalid_type("cursor.style", "string"))?,
+            )?,
+            None => CursorShape::default(),
+        };
+        let blink = cursor.get("blink").and_then(|value| value.as_bool());
+
+        Ok(Self {
+            style,
+            blink: blink.unwrap_or(true),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollbackConfig {
+    /// Rows kept above the visible screen.
+    pub lines: usize,
+}
+
+impl Default for ScrollbackConfig {
+    fn default() -> Self {
+        Self {
+            lines: DEFAULT_SCROLLBACK_LINES,
+        }
+    }
+}
+
+impl ScrollbackConfig {
+    fn parse_table(table: &toml::Table) -> Result<Self, ConfigError> {
+        let scrollback = table
+            .get("scrollback")
+            .and_then(|value| value.as_table())
+            .cloned()
+            .unwrap_or_else(toml::Table::new);
+
+        let lines = match scrollback.get("lines").and_then(|value| value.as_integer()) {
+            Some(value) if value >= 0 => {
+                let lines = value as usize;
+                if lines > MAX_SCROLLBACK_LINES {
+                    return Err(ConfigError::invalid_value(
+                        "scrollback.lines",
+                        format!("must be <= {MAX_SCROLLBACK_LINES}"),
+                    ));
+                }
+                lines
+            }
+            Some(_) => {
+                return Err(ConfigError::invalid_value(
+                    "scrollback.lines",
+                    "must be >= 0",
+                ));
+            }
+            None => DEFAULT_SCROLLBACK_LINES,
+        };
+
+        Ok(Self { lines })
+    }
+}
+
+/// What AURA does with OSC 52 clipboard requests from the child.
+///
+/// Reads are always refused: a terminal that answers `?` hands host clipboard
+/// contents to whatever is running inside it, which is exactly the escalation
+/// a malicious command wants. Writes stay under operator control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Osc52Policy {
+    /// Execute writes and refuse reads. This is the default.
+    #[default]
+    WriteOnly,
+    /// Ignore OSC 52 entirely; use only local copy/paste.
+    Disabled,
+}
+
+impl Osc52Policy {
+    pub fn parse(value: &str) -> Result<Self, ConfigError> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "write-only" | "write_only" | "writeonly" => Ok(Self::WriteOnly),
+            "disabled" | "off" => Ok(Self::Disabled),
+            _ => Err(ConfigError::invalid_value(
+                "security.osc52",
+                format!("must be write-only or disabled (got {value:?})"),
+            )),
+        }
+    }
+
+    /// Whether an OSC 52 write request should be executed.
+    pub const fn allows_write(self) -> bool {
+        matches!(self, Self::WriteOnly)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecurityConfig {
+    /// Policy for OSC 52 clipboard requests. Reads are never allowed.
+    pub osc52: Osc52Policy,
+    /// Largest paste, in bytes, forwarded to the child.
+    pub max_paste_bytes: usize,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            osc52: Osc52Policy::default(),
+            max_paste_bytes: DEFAULT_MAX_PASTE_BYTES,
+        }
+    }
+}
+
+impl SecurityConfig {
+    fn parse_table(table: &toml::Table) -> Result<Self, ConfigError> {
+        let security = table
+            .get("security")
+            .and_then(|value| value.as_table())
+            .cloned()
+            .unwrap_or_else(toml::Table::new);
+
+        let osc52 = match security.get("osc52") {
+            Some(value) => Osc52Policy::parse(
+                value
+                    .as_str()
+                    .ok_or_else(|| ConfigError::invalid_type("security.osc52", "string"))?,
+            )?,
+            None => Osc52Policy::default(),
+        };
+
+        let max_paste_bytes = match security
+            .get("max_paste_bytes")
+            .and_then(|value| value.as_integer())
+        {
+            Some(value) if value > 0 => value as usize,
+            Some(_) => {
+                return Err(ConfigError::invalid_value(
+                    "security.max_paste_bytes",
+                    "must be > 0",
+                ));
+            }
+            None => DEFAULT_MAX_PASTE_BYTES,
+        };
+
+        Ok(Self {
+            osc52,
+            max_paste_bytes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
     pub font: FontConfig,
     pub window: WindowConfig,
+    pub colors: ColorsConfig,
+    pub cursor: CursorConfig,
+    pub scrollback: ScrollbackConfig,
+    pub security: SecurityConfig,
 }
 
 impl AppConfig {
@@ -467,6 +915,17 @@ impl AppConfig {
                 padding_x: DEFAULT_PADDING,
                 padding_y: DEFAULT_PADDING,
             },
+            colors: ColorsConfig {
+                theme: ThemeKind::default(),
+                foreground: None,
+                background: None,
+                cursor: None,
+                selection: None,
+                ansi: None,
+            },
+            cursor: CursorConfig::default(),
+            scrollback: ScrollbackConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 
@@ -496,7 +955,43 @@ impl AppConfig {
         let font = FontConfig::parse_table(&parsed)?;
         let window = WindowConfig::parse_table(&parsed)?;
 
-        Ok(Self { font, window })
+        // Every other section is optional: a configuration that only sets the
+        // font, or only the colours, must load with the rest at their
+        // defaults. A missing or empty file is equally valid and yields all
+        // defaults.
+        let colors = ColorsConfig::parse_table(&parsed)?;
+        let cursor = CursorConfig::parse_table(&parsed)?;
+        let scrollback = ScrollbackConfig::parse_table(&parsed)?;
+        let security = SecurityConfig::parse_table(&parsed)?;
+
+        Ok(Self {
+            font,
+            window,
+            colors,
+            cursor,
+            scrollback,
+            security,
+        })
+    }
+
+    /// Builds a configuration from an already parsed TOML table. Kept separate
+    /// from [`Self::load_from_path`] so parsing can be exercised without
+    /// touching the filesystem.
+    pub fn load_from_text(table: &toml::Table) -> Result<Self, ConfigError> {
+        let font = FontConfig::parse_table(table)?;
+        let window = WindowConfig::parse_table(table)?;
+        let colors = ColorsConfig::parse_table(table)?;
+        let cursor = CursorConfig::parse_table(table)?;
+        let scrollback = ScrollbackConfig::parse_table(table)?;
+        let security = SecurityConfig::parse_table(table)?;
+        Ok(Self {
+            font,
+            window,
+            colors,
+            cursor,
+            scrollback,
+            security,
+        })
     }
 
     /// Returns the standard config path `~/.config/aura/config.toml`.
@@ -592,6 +1087,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_section_is_optional() {
+        // A configuration that only mentions the window must load, with the
+        // font and the new sections falling back to their defaults.
+        let table = toml::from_str("[window]\ncolumns = 90\n").unwrap();
+        let config = AppConfig::load_from_text(&table).unwrap();
+        assert_eq!(config.window.columns, 90);
+        assert_eq!(config.font.family, DEFAULT_FONT_FAMILY);
+        assert_eq!(config.colors.palette(), Palette::DARK);
+        assert_eq!(config.cursor, CursorConfig::default());
+        assert_eq!(config.scrollback.lines, DEFAULT_SCROLLBACK_LINES);
+        assert_eq!(config.security, SecurityConfig::default());
+    }
+
+    #[test]
+    fn theme_and_overrides_resolve_into_a_complete_palette() {
+        // `r##` because the TOML body itself contains `"#...` colour literals.
+        let table = toml::from_str(
+            r##"
+[colors]
+theme = "light"
+foreground = "#101010"
+selection = "0x123456"
+palette = ["#000000", "#010101", "#020202", "#030303", "#040404", "#050505", "#060606", "#070707",
+           "#080808", "#090909", "#0a0a0a", "#0b0b0b", "#0c0c0c", "#0d0d0d", "#0e0e0e", "#0f0f0f"]
+"##,
+        )
+        .unwrap();
+        let colors = ColorsConfig::parse_table(&table).unwrap();
+        let palette = colors.palette();
+        assert_eq!(palette.foreground, 0x101010);
+        // The theme supplies background and selection unless overridden.
+        assert_eq!(palette.background, Palette::LIGHT.background);
+        assert_eq!(palette.selection, 0x123456);
+        assert_eq!(palette.ansi[1], 0x010101);
+        assert_eq!(palette.ansi[15], 0x0f0f0f);
+    }
+
+    #[test]
+    fn cursor_colour_defaults_to_the_foreground() {
+        let table = toml::from_str("[colors]\ntheme = \"dark\"\n").unwrap();
+        let colors = ColorsConfig::parse_table(&table).unwrap();
+        assert_eq!(colors.cursor_color(), colors.palette().foreground);
+
+        let table = toml::from_str("[colors]\ncursor = \"#ff0000\"\n").unwrap();
+        let colors = ColorsConfig::parse_table(&table).unwrap();
+        assert_eq!(colors.cursor_color(), 0xff0000);
+    }
+
+    #[test]
+    fn cursor_and_scrollback_bounds_are_enforced() {
+        let table = toml::from_str("[cursor]\nstyle = \"bar\"\nblink = false\n").unwrap();
+        let cursor = CursorConfig::parse_table(&table).unwrap();
+        assert_eq!(cursor.style, CursorShape::Bar);
+        assert!(!cursor.blink);
+
+        assert!(toml::from_str::<toml::Table>("[cursor]\nstyle = \"blob\"\n").is_ok());
+        let table = toml::from_str("[cursor]\nstyle = \"blob\"\n").unwrap();
+        assert!(CursorConfig::parse_table(&table).is_err());
+
+        let table = toml::from_str("[scrollback]\nlines = 500\n").unwrap();
+        assert_eq!(ScrollbackConfig::parse_table(&table).unwrap().lines, 500);
+
+        for bad in ["-1", &MAX_SCROLLBACK_LINES.saturating_add(1).to_string()] {
+            let table = toml::from_str(&format!("[scrollback]\nlines = {bad}\n")).unwrap();
+            let error = ScrollbackConfig::parse_table(&table).unwrap_err();
+            assert!(matches!(error, ConfigError::InvalidValue { .. }), "{error}");
+        }
+    }
+
+    #[test]
+    fn security_defaults_refuse_everything_unsafe() {
+        let table = toml::from_str("").unwrap();
+        let security = SecurityConfig::parse_table(&table).unwrap();
+        // Writes are on so local copy/paste keeps working; reads are never
+        // allowed by any policy.
+        assert!(security.osc52.allows_write());
+        assert!(!Osc52Policy::Disabled.allows_write());
+        assert_eq!(security.max_paste_bytes, DEFAULT_MAX_PASTE_BYTES);
+
+        let table =
+            toml::from_str("[security]\nosc52 = \"disabled\"\nmax_paste_bytes = 8\n").unwrap();
+        let security = SecurityConfig::parse_table(&table).unwrap();
+        assert!(!security.osc52.allows_write());
+        assert_eq!(security.max_paste_bytes, 8);
+
+        let table = toml::from_str("[security]\nosc52 = \"read-only\"\n").unwrap();
+        assert!(SecurityConfig::parse_table(&table).is_err());
+    }
+
+    #[test]
+    fn colour_parsing_accepts_the_common_notations_and_rejects_junk() {
+        let value = |text: &str| toml::Value::String(text.to_owned());
+        assert_eq!(parse_color(&value("#1e1e1e"), "k").unwrap(), 0x1e1e1e);
+        assert_eq!(parse_color(&value("1e1e1e"), "k").unwrap(), 0x1e1e1e);
+        assert_eq!(parse_color(&value("0x1E1E1E"), "k").unwrap(), 0x1e1e1e);
+        assert_eq!(
+            parse_color(&toml::Value::Integer(0x1e1e1e), "k").unwrap(),
+            0x1e1e1e
+        );
+        for bad in ["", "#", "#1234567", "#gggggg", "#12"] {
+            assert!(
+                parse_color(&value(bad), "k").is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn theme_names_are_case_insensitive_and_validated() {
+        assert_eq!(ThemeKind::parse("DARK").unwrap(), ThemeKind::Dark);
+        assert_eq!(ThemeKind::parse(" Light ").unwrap(), ThemeKind::Light);
+        assert!(ThemeKind::parse("solarized").is_err());
+    }
+
+    #[test]
     fn defaults_are_valid() {
         let config = AppConfig::defaults();
         assert_eq!(config.font.family, DEFAULT_FONT_FAMILY);
@@ -610,9 +1220,7 @@ family = "Iosevka"
 size = 18.0
 "#;
         let parsed: toml::Table = toml::from_str(toml_str).unwrap();
-        let font = FontConfig::parse_table(&parsed).unwrap();
-        let window = WindowConfig::parse_table(&parsed).unwrap();
-        let config = AppConfig { font, window };
+        let config = AppConfig::load_from_text(&parsed).unwrap();
         assert_eq!(config.font.family, "Iosevka");
         assert_eq!(config.font.size, 18.0);
         assert_eq!(config.window.columns, DEFAULT_COLUMNS);
@@ -650,9 +1258,7 @@ padding_x = 0
 padding_y = 0
 "#;
         let parsed: toml::Table = toml::from_str(toml_str).unwrap();
-        let font = FontConfig::parse_table(&parsed).unwrap();
-        let window = WindowConfig::parse_table(&parsed).unwrap();
-        let config = AppConfig { font, window };
+        let config = AppConfig::load_from_text(&parsed).unwrap();
 
         assert_eq!(config.font.family, "Iosevka");
         assert_eq!(config.font.size, 14.0);
@@ -806,14 +1412,13 @@ size = 0.0
     }
 
     #[test]
-    fn missing_family_rejected() {
-        let toml_str = r#"
-[font]
-size = 14.0
-"#;
-        let parsed: toml::Table = toml::from_str(toml_str).unwrap();
-        let err = FontConfig::parse_table(&parsed).unwrap_err();
-        assert!(matches!(err, ConfigError::Missing(_)));
+    fn missing_family_falls_back_to_the_default_family() {
+        // Every font field is optional: a configuration that sets only the
+        // window must not fail to load because it says nothing about fonts.
+        let parsed: toml::Table = toml::from_str("[font]\nsize = 14.0\n").unwrap();
+        let font = FontConfig::parse_table(&parsed).unwrap();
+        assert_eq!(font.family, DEFAULT_FONT_FAMILY);
+        assert_eq!(font.size, 14.0);
     }
 
     #[test]
@@ -931,13 +1536,15 @@ style = "Bold Italic"
     }
 
     #[test]
-    fn malformed_config_section_reports_missing_font() {
-        let toml_str = r#"
-[window]
-columns = 80
-"#;
-        let parsed: toml::Table = toml::from_str(toml_str).unwrap();
-        let err = FontConfig::parse_table(&parsed).unwrap_err();
-        assert!(matches!(err, ConfigError::Missing("font")));
+    fn a_configuration_without_a_font_section_loads_with_defaults() {
+        // Regression guard: `[font]` used to be mandatory, so a configuration
+        // that only set colours or the window failed to parse and silently
+        // dropped every other setting.
+        let parsed: toml::Table = toml::from_str("[window]\ncolumns = 80\n").unwrap();
+        let font = FontConfig::parse_table(&parsed).unwrap();
+        assert_eq!(font.family, DEFAULT_FONT_FAMILY);
+        assert_eq!(font.size, DEFAULT_FONT_SIZE);
+        assert!(font.bold.is_none());
+        assert!(font.fallback_families.is_empty());
     }
 }

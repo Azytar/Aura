@@ -54,13 +54,25 @@ configuration is provided in `examples/aura.toml`.
 
 ## Configuration
 
-The TOML file is read once at startup; it is never hot-reloaded. Supported
-keys:
+The TOML file is read once at startup; it is never hot-reloaded. Every
+section is optional, so a file that only sets the colours, or only the window,
+loads with everything else at its defaults. Supported keys:
 
 - `font.family`, `font.size` (startup size, 6-72 px)
 - `font.bold`, `font.italic`, `font.bold_italic` (optional per-style faces)
 - `font.fallback.families` (ordered fallback family names)
+- `font.offset_x`, `font.offset_y`, `font.line_spacing`, `font.letter_spacing`
 - `window.columns`, `window.lines`, `window.padding_x`, `window.padding_y`
+- `colors.theme` (`dark`, `light`, or `custom`) with optional
+  `foreground`, `background`, `cursor`, `selection`, and a 16-entry `palette`.
+  Colours accept `#rrggbb`, `rrggbb`, `0xrrggbb`, `#rgb`, or an integer.
+- `cursor.style` (`block`, `underline`, `bar`) and `cursor.blink`
+- `scrollback.lines` (0 disables history, up to 1000000)
+- `security.osc52` (`write-only` or `disabled`) and `security.max_paste_bytes`
+
+`examples/aura.toml` documents every key with its default. AURA never answers
+an OSC 52 *read* request, so the clipboard cannot be extracted by something
+running inside the terminal.
 
 `font.size` is the configured startup size. `Ctrl+Plus` / `Ctrl+Minus`
 change the size during the session (fresh rasterization, rebuilt atlas,

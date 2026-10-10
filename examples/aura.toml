@@ -1,64 +1,118 @@
-# aterm configuration: font selection, sizing, and terminal geometry.
+# AURA Terminal configuration.
 #
-# This file is optional. When missing, aterm falls back to the documented
-# defaults below. Only override the fields you need.
+# This file is optional. When it is absent, AURA uses exactly these defaults and
+# is fully functional. Every section is optional: a file that only sets the
+# colours, or only the window, loads with everything else at its default.
+#
+# Copy the parts you want into ~/.config/aura/config.toml.
 
 # ---------------------------------------------------------------------------
 # Font selection
 # ---------------------------------------------------------------------------
 # `family` accepts either a font family name or an explicit filesystem path.
-# When a name is given, aterm searches `/usr/share/fonts` and
-# `/usr/local/share/fonts` for a file whose internal family name or filename
-# stem matches (case-insensitive). An absolute or relative path is used
-# directly, which is the recommended way to select a specific font file.
+# When a name is given, AURA searches /usr/share/fonts and
+# /usr/local/share/fonts for a file whose internal family name or filename stem
+# matches (case-insensitive). A path is used directly, which is the reliable
+# way to select a specific font file.
 #
-# `size` is the startup rasterization size in typographic pixels. Each
-# distinct size produces its own metrics, glyph atlas, and rasterization.
-# Values must be between 6.0 and 72.0.
+# `size` is the startup rasterization size in typographic pixels, between 6.0
+# and 72.0. Each distinct size produces its own metrics, atlas, and
+# rasterization.
 #
-# Runtime zoom: Ctrl+Plus / Ctrl+Minus change the live size by 1.0 px
-# (clamped to the same 6.0-72.0 range); Ctrl+0 restores this configured
-# startup size. The TOML file itself is startup configuration only and is
-# never hot-reloaded.
-
+# Runtime zoom: Ctrl+Plus / Ctrl+Minus change the live size by 1.0 px (clamped
+# to the same 6.0-72.0 range); Ctrl+0 restores this configured size. The TOML
+# value itself never changes at runtime.
 [font]
 family = "monospace"
 size = 14.0
 
-# Optional per-style face overrides. When omitted, the primary family is used
-# and the rasterizer applies synthetic bold/italic transformations.
-
+# Per-style face overrides. Both keys are optional; omit a section to use the
+# primary face for that style.
 # [font.bold]
 # family = "Iosevka"
 # style = "Bold"
-
+#
 # [font.italic]
 # family = "Iosevka"
 # style = "Italic"
-
+#
 # [font.bold_italic]
 # family = "Iosevka"
 # style = "Bold Italic"
 
-# Optional fallback family names, tried in order when the primary face lacks
-# a glyph. Only families installed on the system are loaded.
-#
+# Faces tried, in order, when the primary face has no glyph for a character.
 # [font.fallback]
-# families = [
-#     "Noto Sans CJK",
-#     "Noto Color Emoji",
-# ]
+# families = ["Noto Sans CJK", "Noto Color Emoji", "Noto Sans Symbols 2"]
+
+# Visual-only glyph nudges. These do not change cell geometry.
+# offset_x = 0
+# offset_y = 0
+
+# Extra space between lines and cells, in pixels. Both change cell geometry.
+# line_spacing = 0
+# letter_spacing = 0
 
 # ---------------------------------------------------------------------------
-# Terminal geometry
+# Window
 # ---------------------------------------------------------------------------
-# `columns` and `lines` are the initial terminal grid size in cells.
-# `padding_x` and `padding_y` add extra pixels around the grid inside the
-# window. Padding does not change the number of cells; it only affects the
-# outer window dimensions.
-
+# Startup size in whole cells, plus padding on each side in pixels. The window
+# manager can only ever resize to a whole number of cells.
 [window]
 columns = 120
 lines = 32
 padding_x = 0
 padding_y = 0
+
+# ---------------------------------------------------------------------------
+# Colours
+# ---------------------------------------------------------------------------
+# `theme` picks a complete starting palette: "dark" (default), "light", or
+# "custom". With "custom" every colour below defaults to the dark palette until
+# you set it, so a partial override still yields a usable set.
+#
+# Colours accept "#rrggbb", "rrggbb", "0xrrggbb", "#rgb" shorthand, or a plain
+# integer.
+#
+# `palette` replaces all 16 ANSI colours: entries 0-7 are normal and 8-15 are
+# bright. It must list exactly 16 values.
+[colors]
+theme = "dark"
+# foreground = "#d8d8d8"
+# background = "#181818"
+# cursor = "#d8d8d8"        # defaults to the foreground
+# selection = "#406090"
+# palette = [
+#   "#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
+#   "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
+# ]
+
+# ---------------------------------------------------------------------------
+# Cursor
+# ---------------------------------------------------------------------------
+# Initial shape and blink state. Applications that emit DECSCUSR
+# (`CSI Ps SP q`) override this from then on.
+[cursor]
+style = "block"      # block | underline | bar
+blink = true
+
+# ---------------------------------------------------------------------------
+# Scrollback
+# ---------------------------------------------------------------------------
+# Rows retained above the visible screen. 0 disables history. The upper bound
+# is 1000000, which is a memory guard rather than a recommended value: each row
+# holds a full line of cells plus its grapheme and hyperlink sidecars.
+[scrollback]
+lines = 10000
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+# OSC 52 clipboard policy. AURA never answers an OSC 52 *read* request: a
+# terminal that does hands host clipboard contents to whatever is running
+# inside it. "write-only" (default) lets a child request that the terminal set
+# the clipboard; "disabled" ignores OSC 52 entirely.
+#
+# `max_paste_bytes` bounds a single paste before it is forwarded to the child.
+[security]
+osc52 = "write-only"    # write-only | disabled
+max_paste_bytes = 65536

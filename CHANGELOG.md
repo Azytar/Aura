@@ -47,6 +47,39 @@ per commit.
   skip reason when no Vulkan device is reachable, so `cargo test` really runs
   those assertions on capable hosts instead of silently hiding them.
 
+### Added
+
+- Colour theming: `colors.theme` selects a complete `dark` or `light`
+  palette, or `custom` to build one from overrides. `foreground`,
+  `background`, `cursor`, `selection`, and a 16-entry ANSI `palette` are
+  accepted; colours may be `#rrggbb`, `rrggbb`, `0xrrggbb`, `#rgb`, or an
+  integer. The palette is passed to the renderer instead of being hardcoded,
+  so a theme takes effect without re-rasterizing anything.
+- `cursor.style` and `cursor.blink` seed the terminal's cursor before any
+  application overrides them with DECSCUSR.
+- `scrollback.lines` configures how much history is retained, trimming any
+  existing history immediately when the limit drops.
+- `security.osc52` chooses between honouring OSC 52 writes (`write-only`,
+  the default) and ignoring OSC 52 entirely (`disabled`); plus
+  `security.max_paste_bytes`, which bounds a single paste before it is
+  forwarded to the child.
+- Every configuration section is now optional. `[font]` used to be
+  mandatory, so a configuration that only set colours or the window failed
+  to parse and silently lost all of its other settings.
+- `Terminal::set_modes` and `Terminal::set_scrollback_limit` on the core, so
+  configuration can seed terminal state without reaching into private fields.
+
+### Fixed
+
+- The selection highlight rendered brown instead of blue. `0x00406090` was
+  written into the shader as if it were already in the shader's packed BGR
+  channel order, so it came out as rgb(144,96,64). The selection colour now
+  travels with the palette as a push constant and is packed on the CPU, like
+  every other colour.
+- The offscreen renderer ignored the terminal's selection entirely (it
+  always passed `u32::MAX`), so the swapchain path's selection behaviour was
+  never exercised by tests. The offscreen target now mirrors it.
+
 ### Changed
 
 - Configuration moved from `~/.config/aterm/aterm.toml` to

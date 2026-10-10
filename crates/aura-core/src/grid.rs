@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
-const DEFAULT_SCROLLBACK_ROWS: usize = 10_000;
+/// Rows kept above the visible screen when nothing else is requested.
+pub const DEFAULT_SCROLLBACK_ROWS: usize = 10_000;
 type ReflowCell = (Cell, Option<String>, Option<u32>);
 
 /// Bit flags describing terminal-cell presentation and wide-cell structure.
@@ -156,6 +157,7 @@ pub struct Grid {
     base_row: usize,
     cursor: Cursor,
     scrollback: VecDeque<Row>,
+    scrollback_limit: usize,
     viewport_offset: usize,
 }
 
@@ -176,6 +178,7 @@ impl Grid {
             base_row: 0,
             cursor: Cursor::default(),
             scrollback: VecDeque::new(),
+            scrollback_limit: DEFAULT_SCROLLBACK_ROWS,
             viewport_offset: 0,
         };
         grid.mark_all_dirty();
@@ -268,6 +271,23 @@ impl Grid {
         self.scrollback.len()
     }
 
+    /// Rows retained above the visible screen.
+    pub const fn scrollback_limit(&self) -> usize {
+        self.scrollback_limit
+    }
+
+    /// Changes how much history is retained, trimming immediately if the new
+    /// limit is smaller than what is already stored. A zero limit disables
+    /// scrollback entirely, which is what memory-constrained setups want.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.scrollback_limit = limit;
+        while self.scrollback.len() > limit {
+            self.scrollback.pop_front();
+            self.viewport_offset = self.viewport_offset.saturating_sub(1);
+        }
+        self.set_viewport_offset(self.viewport_offset);
+    }
+
     /// Moves the viewport into history without changing the live cursor or screen.
     pub fn set_viewport_offset(&mut self, offset: usize) {
         let clamped = offset.min(self.scrollback.len());
@@ -286,7 +306,7 @@ impl Grid {
         for row in 0..amount {
             self.scrollback
                 .push_back(self.row(row).expect("visible row").clone());
-            if self.scrollback.len() > DEFAULT_SCROLLBACK_ROWS {
+            if self.scrollback.len() > self.scrollback_limit {
                 self.scrollback.pop_front();
                 self.viewport_offset = self.viewport_offset.saturating_sub(1);
             }
@@ -852,7 +872,7 @@ impl Grid {
         let desired_start = reflowed.len().saturating_sub(new_height);
         let start = new_cursor.map_or(desired_start, |(row, _)| desired_start.min(row));
         let mut scrollback: VecDeque<Row> = reflowed.drain(..start).collect();
-        while scrollback.len() > DEFAULT_SCROLLBACK_ROWS {
+        while scrollback.len() > self.scrollback_limit {
             scrollback.pop_front();
         }
         let cursor_row = new_cursor.map_or(0, |(row, _)| row.saturating_sub(start));
@@ -1027,6 +1047,17 @@ impl TerminalGrid {
         self.main.resize(width, height)?;
         self.alternate.resize(width, height)
     }
+
+    /// Sets the scrollback limit on the main screen. The alternate screen
+    /// never records history, so it is left untouched.
+    pub fn set_scrollback_limit(&mut self, limit: usize) {
+        self.main.set_scrollback_limit(limit);
+    }
+
+    /// Rows retained above the visible screen on the main screen.
+    pub fn scrollback_limit(&self) -> usize {
+        self.main.scrollback_limit()
+    }
 }
 
 #[cfg(test)]
@@ -1062,6 +1093,46 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn scrollback_limit_is_configurable_and_trims_immediately() {
+        let mut grid = grid(4, 2);
+        assert_eq!(grid.scrollback_limit(), DEFAULT_SCROLLBACK_ROWS);
+        for _ in 0..8 {
+            grid.scroll_up_recording(1);
+        }
+        assert_eq!(grid.scrollback_len(), 8);
+        // A smaller limit trims what is already stored, not just future rows.
+        grid.set_scrollback_limit(3);
+        assert_eq!(grid.scrollback_len(), 3);
+        assert_eq!(grid.scrollback_limit(), 3);
+        grid.set_viewport_offset(usize::MAX);
+        assert_eq!(grid.viewport_offset(), 3);
+        // Zero disables history entirely.
+        grid.set_scrollback_limit(0);
+        assert_eq!(grid.scrollback_len(), 0);
+        assert_eq!(grid.viewport_offset(), 0);
+        for _ in 0..5 {
+            grid.scroll_up_recording(1);
+        }
+        assert_eq!(grid.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn resize_respects_the_configured_scrollback_limit() {
+        let mut grid = grid(3, 2);
+        grid.set_scrollback_limit(2);
+        for _ in 0..6 {
+            grid.scroll_up_recording(1);
+        }
+        grid.resize(4, 3).unwrap();
+        assert!(
+            grid.scrollback_len() <= 2,
+            "resize kept {} rows",
+            grid.scrollback_len()
+        );
+        assert!(grid.viewport_offset() <= grid.scrollback_len());
     }
 
     #[test]
