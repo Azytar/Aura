@@ -1,5 +1,8 @@
+mod keyboard;
+
+use keyboard::{FontSizeAction, Keyboard, font_size_action};
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use as_raw_xcb_connection::AsRawXcbConnection;
 use ash::vk;
@@ -121,6 +124,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if epoll == -1 {
         return Err(io::Error::last_os_error().into());
     }
+    // SAFETY: epoll_create1 returned a new descriptor owned by this scope.
+    let epoll_owner = unsafe { OwnedFd::from_raw_fd(epoll) };
     let timer = unsafe {
         libc::timerfd_create(
             libc::CLOCK_MONOTONIC,
@@ -128,9 +133,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     };
     if timer == -1 {
-        unsafe { libc::close(epoll) };
         return Err(io::Error::last_os_error().into());
     }
+    // SAFETY: timerfd_create returned a new descriptor owned by this scope.
+    let _timer_owner = unsafe { OwnedFd::from_raw_fd(timer) };
     let interval = libc::itimerspec {
         it_interval: libc::timespec {
             tv_sec: 0,
@@ -154,7 +160,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         libc::EPOLLIN as u32 | libc::EPOLLHUP as u32,
     )?;
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
-    let (mut keysyms, mut keysyms_per_keycode) = keyboard_mapping(&connection)?;
+    let mut keyboard = Keyboard::new(&connection)?;
     let mut running = true;
     let mut invalidated = false;
     let mut cursor_blink_on = true;
@@ -166,8 +172,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut stats = RenderStats::new();
 
     while running {
-        let event_count =
-            unsafe { libc::epoll_wait(epoll, events.as_mut_ptr(), events.len() as i32, -1) };
+        // XKB/property replies can read X events into XCB while emptying the
+        // socket. Drain that queue before sleeping on its file descriptor.
+        let mut queued_event = connection.poll_for_event()?;
+        let event_count = if queued_event.is_some() {
+            events[0] = libc::epoll_event {
+                events: libc::EPOLLIN as u32,
+                u64: 1,
+            };
+            1
+        } else {
+            // SAFETY: events holds exactly the advertised writable entries.
+            unsafe {
+                libc::epoll_wait(
+                    epoll_owner.as_raw_fd(),
+                    events.as_mut_ptr(),
+                    events.len() as i32,
+                    -1,
+                )
+            }
+        };
         if event_count == -1 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
@@ -178,7 +202,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         for ready in events.iter().take(event_count as usize) {
             match ready.u64 {
                 1 => {
-                    while let Some(event) = connection.poll_for_event()? {
+                    while let Some(event) = match queued_event.take() {
+                        Some(event) => Some(event),
+                        None => connection.poll_for_event()?,
+                    } {
                         match event {
                             Event::ClientMessage(message)
                                 if message.data.as_data32()[0] == delete_window =>
@@ -188,15 +215,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Event::DestroyNotify(_) => running = false,
                             // The server sends this when the keymap changes;
                             // without a refetch every key would mistranslate.
-                            Event::MappingNotify(_) => {
-                                (keysyms, keysyms_per_keycode) = keyboard_mapping(&connection)?;
+                            Event::MappingNotify(_)
+                            | Event::XkbMapNotify(_)
+                            | Event::XkbNewKeyboardNotify(_) => {
+                                keyboard.reload(&connection)?;
                             }
                             Event::ConfigureNotify(configure) => {
                                 resize(
                                     &mut terminal,
                                     &mut pty,
                                     &mut renderer,
-                                    (font.metrics().width, font.metrics().height),
+                                    (
+                                        font.metrics().width,
+                                        font.metrics().height,
+                                    ),
                                     (config.window.padding_x, config.window.padding_y),
                                     configure,
                                 )?;
@@ -204,14 +236,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::Expose(_) => invalidated = true,
                             Event::KeyPress(key) => {
-                                // Runtime font zoom consumes Ctrl+Plus/Minus/0
-                                // here so the bytes never reach the PTY child.
-                                if let Some(action) = font_size_action(
-                                    &key,
-                                    &keysyms,
-                                    keysyms_per_keycode,
-                                    connection.setup().min_keycode,
-                                ) {
+                                let (sym, modifiers) = keyboard.key(&key);
+                                if let Some(action) = font_size_action(sym, modifiers) {
                                     let changed = match action {
                                         FontSizeAction::Grow => font_sizes.grow(),
                                         FontSizeAction::Shrink => font_sizes.shrink(),
@@ -233,15 +259,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     continue;
                                 }
-                                let sym = key_sym(
-                                    &key,
-                                    &keysyms,
-                                    keysyms_per_keycode,
-                                    connection.setup().min_keycode,
-                                );
-                                if key.state.contains(KeyButMask::CONTROL)
-                                    && key.state.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, Some(0x63 | 0x43))
+                                if modifiers.contains(KeyButMask::CONTROL)
+                                    && modifiers.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, 0x63 | 0x43)
                                 {
                                     if let Some(text) = terminal.selection_text() {
                                         clipboard.set_text(
@@ -253,18 +273,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     continue;
                                 }
-                                if key.state.contains(KeyButMask::CONTROL)
-                                    && key.state.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, Some(0x76 | 0x56))
+                                if modifiers.contains(KeyButMask::CONTROL)
+                                    && modifiers.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, 0x76 | 0x56)
                                 {
                                     clipboard.request_paste(&connection, window)?;
                                     continue;
                                 }
-                                if key.state.contains(KeyButMask::CONTROL)
-                                    && key.state.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, Some(0xff50 | 0xff57))
+                                if modifiers.contains(KeyButMask::CONTROL)
+                                    && modifiers.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, 0xff50 | 0xff57)
                                 {
-                                    if sym == Some(0xff50) {
+                                    if sym == 0xff50 {
                                         terminal.scrollback_top();
                                     } else {
                                         terminal.jump_to_bottom();
@@ -272,10 +292,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     invalidated = true;
                                     continue;
                                 }
-                                if key.state.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, Some(0xff55 | 0xff56))
+                                if modifiers.contains(KeyButMask::SHIFT)
+                                    && matches!(sym, 0xff55 | 0xff56)
                                 {
-                                    if sym == Some(0xff55) {
+                                    if sym == 0xff55 {
                                         terminal.page_up();
                                     } else {
                                         terminal.page_down();
@@ -283,13 +303,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     invalidated = true;
                                     continue;
                                 }
-                                if let Some(bytes) = translate_key(
-                                    &key,
-                                    keysyms.as_slice(),
-                                    keysyms_per_keycode,
-                                    connection.setup().min_keycode,
-                                    terminal.modes().application_cursor,
-                                ) {
+                                if let Some(bytes) =
+                                    keyboard.bytes(sym, modifiers, terminal.modes())
+                                {
                                     write_all_pty(&mut pty, &bytes)?;
                                     cursor_blink_on = true;
                                     invalidated = true;
@@ -313,6 +329,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         button.event_y,
                                         font.metrics(),
                                         &terminal,
+                                        [config.window.padding_x, config.window.padding_y],
                                     );
                                     let count = last_click
                                         .filter(|(time, detail, old, _)| {
@@ -343,6 +360,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         motion: false,
                                     },
                                     font.metrics(),
+                                    [config.window.padding_x, config.window.padding_y],
                                 ) {
                                     write_all_pty(&mut pty, &bytes)?;
                                 }
@@ -363,6 +381,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         motion: false,
                                     },
                                     font.metrics(),
+                                    [config.window.padding_x, config.window.padding_y],
                                 ) {
                                     write_all_pty(&mut pty, &bytes)?;
                                 }
@@ -381,6 +400,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 motion: true,
                                             },
                                             font.metrics(),
+                                            [config.window.padding_x, config.window.padding_y],
                                         ) {
                                             write_all_pty(&mut pty, &bytes)?;
                                         }
@@ -391,6 +411,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         motion.event_y,
                                         font.metrics(),
                                         &terminal,
+                                        [config.window.padding_x, config.window.padding_y],
                                     );
                                     terminal.set_selection(anchor, point);
                                     invalidated = true;
@@ -405,8 +426,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(bytes) =
                                     clipboard.receive_paste(&connection, window, notify.property)?
                                 {
-                                    let input = terminal.encode_paste(&bytes);
-                                    write_all_pty(&mut pty, &input)?;
+                                    let paste = terminal.encode_paste(&bytes);
+                                    write_all_pty(&mut pty, &paste)?;
                                     invalidated = true;
                                 }
                             }
@@ -414,40 +435,48 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                2 => loop {
-                    match pty.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(length) => {
-                            stats.add_pty_bytes(length as u64);
-                            let replies = terminal.process(&buffer[..length]);
-                            for request in terminal.take_clipboard_requests() {
-                                // A read request (`?`) is never honoured: the
-                                // terminal already refuses to emit one, so a
-                                // non-empty payload here is always a write.
-                                if !config.security.osc52.allows_write() {
-                                    continue;
+                2 => {
+                    loop {
+                        match pty.read(&mut buffer) {
+                            Ok(0) => break,
+                            Ok(length) => {
+                                stats.add_pty_bytes(length as u64);
+                                let replies = terminal.process(&buffer[..length]);
+                                for request in terminal.take_clipboard_requests() {
+                                    // A read request (`?`) is never honoured: the
+                                    // terminal already refuses to emit one, so a
+                                    // non-empty payload here is always a write.
+                                    if !config.security.osc52.allows_write() {
+                                        continue;
+                                    }
+                                    let selection = match request.selection.as_slice() {
+                                        b"c" => Some(clipboard.clipboard_atom),
+                                        b"p" => Some(clipboard.primary_atom),
+                                        _ => None,
+                                    };
+                                    if let Some(selection) = selection
+                                        && let Some(text) =
+                                            decode_clipboard_payload(&request.base64)
+                                    {
+                                        clipboard.set_text(
+                                            &connection,
+                                            window,
+                                            selection,
+                                            &text,
+                                        )?;
+                                    }
                                 }
-                                let selection = match request.selection.as_slice() {
-                                    b"c" => Some(clipboard.clipboard_atom),
-                                    b"p" => Some(clipboard.primary_atom),
-                                    _ => None,
-                                };
-                                if let Some(selection) = selection
-                                    && let Some(text) = decode_clipboard_payload(&request.base64)
-                                {
-                                    clipboard.set_text(&connection, window, selection, &text)?;
+                                if !replies.is_empty() {
+                                    write_all_pty(&mut pty, &replies)?;
                                 }
+                                invalidated = true;
                             }
-                            if !replies.is_empty() {
-                                write_all_pty(&mut pty, &replies)?;
-                            }
-                            invalidated = true;
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                            Err(error) => return Err(error.into()),
                         }
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-                        Err(error) => return Err(error.into()),
                     }
-                },
+                }
                 3 => {
                     let mut expirations = 0u64;
                     let _ = unsafe {
@@ -484,10 +513,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             running = false;
         }
     }
-    unsafe {
-        libc::close(timer);
-        libc::close(epoll);
-    }
+    pty.close()?;
     Ok(())
 }
 
@@ -534,21 +560,6 @@ impl RenderStats {
         }
         *self = Self::new();
     }
-}
-
-/// Fetches the full server keymap: symbols per keycode plus the stride.
-/// Called once at startup and again on every mapping notification so layout
-/// switches never leave key translation behind.
-fn keyboard_mapping(
-    connection: &XCBConnection,
-) -> Result<(Vec<u32>, usize), Box<dyn std::error::Error>> {
-    let mapping = connection
-        .get_keyboard_mapping(
-            connection.setup().min_keycode,
-            connection.setup().max_keycode - connection.setup().min_keycode + 1,
-        )?
-        .reply()?;
-    Ok((mapping.keysyms, usize::from(mapping.keysyms_per_keycode)))
 }
 
 /// Parsed launch options; `None` means a flag like `--help` already ran.
@@ -806,6 +817,23 @@ fn probe_vulkan() -> Result<Vec<VulkanDevice>, String> {
         });
     }
     Ok(devices)
+}
+
+fn write_all_pty(pty: &mut Pty, mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        match pty.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "PTY accepted no input",
+                ));
+            }
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
@@ -1191,174 +1219,6 @@ fn resize_font(
     Ok(())
 }
 
-fn write_all_pty(pty: &mut Pty, mut bytes: &[u8]) -> io::Result<()> {
-    while !bytes.is_empty() {
-        match pty.write(bytes) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "PTY accepted no input",
-                ));
-            }
-            Ok(count) => bytes = &bytes[count..],
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-fn translate_key(
-    event: &x11rb::protocol::xproto::KeyPressEvent,
-    symbols: &[u32],
-    per_key: usize,
-    min_keycode: u8,
-    application_cursor: bool,
-) -> Option<Vec<u8>> {
-    let sym = key_sym(event, symbols, per_key, min_keycode)?;
-    let ctrl = event.state.contains(KeyButMask::CONTROL);
-    let alt = event.state.contains(KeyButMask::MOD1);
-    let mut bytes = match sym {
-        0xff08 => vec![0x7f],
-        0xff09 | 0xfe20 => vec![b'\t'],
-        0xff0d => vec![b'\r'],
-        0xff1b => vec![0x1b],
-        0xff50 => {
-            if application_cursor {
-                b"\x1bOH".to_vec()
-            } else {
-                b"\x1b[H".to_vec()
-            }
-        }
-        0xff51 => cursor_key(b'D', application_cursor),
-        0xff52 => cursor_key(b'A', application_cursor),
-        0xff53 => cursor_key(b'C', application_cursor),
-        0xff54 => cursor_key(b'B', application_cursor),
-        0xff57 => {
-            if application_cursor {
-                b"\x1bOF".to_vec()
-            } else {
-                b"\x1b[F".to_vec()
-            }
-        }
-        0xff63 => b"\x1b[2~".to_vec(),
-        0xffff => b"\x1b[3~".to_vec(),
-        0xff55 => b"\x1b[5~".to_vec(),
-        0xff56 => b"\x1b[6~".to_vec(),
-        0xffbe..=0xffc9 => function_key(sym)?,
-        ascii if (0x20..=0x7e).contains(&ascii) => vec![ascii as u8],
-        latin if (0xa0..=0xff).contains(&latin) => char::from_u32(latin)?.to_string().into_bytes(),
-        unicode if (0x0100_0000..=0x0110_ffff).contains(&unicode) => {
-            char::from_u32(unicode & 0x00ff_ffff)?
-                .to_string()
-                .into_bytes()
-        }
-        _ => return None,
-    };
-    if ctrl && bytes.len() == 1 {
-        let byte = bytes[0].to_ascii_uppercase();
-        if (b'@'..=b'_').contains(&byte) {
-            bytes[0] = byte & 0x1f;
-        }
-        if bytes[0] == b' ' {
-            bytes[0] = 0;
-        }
-    }
-    if alt {
-        bytes.insert(0, 0x1b);
-    }
-    Some(bytes)
-}
-
-fn key_sym(
-    event: &x11rb::protocol::xproto::KeyPressEvent,
-    symbols: &[u32],
-    per_key: usize,
-    min_keycode: u8,
-) -> Option<u32> {
-    let offset = usize::from(event.detail.checked_sub(min_keycode)?) * per_key;
-    let keysyms = symbols.get(offset..offset + per_key)?;
-    let shifted = event.state.contains(KeyButMask::SHIFT) && keysyms.len() > 1;
-    keysyms.get(usize::from(shifted)).copied()
-}
-
-/// Runtime font-size intent derived from a key press. Pure logic over the
-/// translated keymap so tests never need X11.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FontSizeAction {
-    Grow,
-    Shrink,
-    Reset,
-}
-
-/// Matches `Ctrl+Plus/Minus/0` from the translated keymap without hardcoding
-/// physical keycodes, so Dvorak, QWERTY, and other layouts all work.
-/// Consumes both shifted and unshifted levels (`+` is normally `Shift+=`)
-/// plus keypad keys; requires Ctrl without Alt so `Alt` combos still reach
-/// the application. Returns `None` for every other key.
-fn font_size_action(
-    event: &x11rb::protocol::xproto::KeyPressEvent,
-    symbols: &[u32],
-    per_key: usize,
-    min_keycode: u8,
-) -> Option<FontSizeAction> {
-    if !event.state.contains(KeyButMask::CONTROL) || event.state.contains(KeyButMask::MOD1) {
-        return None;
-    }
-    let offset = usize::from(event.detail.checked_sub(min_keycode)?) * per_key;
-    let keysyms = symbols.get(offset..offset + per_key)?;
-    // Level 0 is the unshifted keysym, level 1 the shifted one. Either may
-    // carry the zoom key (`+` lives on level 1 of `=` on US layouts), and
-    // later levels hold layout-specific variants we also accept.
-    let mut grow = false;
-    let mut shrink = false;
-    let mut reset = false;
-    for &sym in keysyms.iter().take(per_key.max(2).min(keysyms.len())) {
-        match sym {
-            // `+`, `=` (Shift+= produces `+`), keypad add / equal.
-            0x2b | 0x3d | 0xffaa | 0xffbd => grow = true,
-            // `-`, `_` (Shift+-), keypad subtract.
-            0x2d | 0x5f | 0xffad => shrink = true,
-            // `0`, keypad 0/insert.
-            0x30 | 0xffb0 | 0xff9e => reset = true,
-            _ => {}
-        }
-    }
-    if grow {
-        Some(FontSizeAction::Grow)
-    } else if shrink {
-        Some(FontSizeAction::Shrink)
-    } else if reset {
-        Some(FontSizeAction::Reset)
-    } else {
-        None
-    }
-}
-
-fn cursor_key(final_byte: u8, application_cursor: bool) -> Vec<u8> {
-    if application_cursor {
-        vec![0x1b, b'O', final_byte]
-    } else {
-        vec![0x1b, b'[', final_byte]
-    }
-}
-
-fn function_key(keysym: u32) -> Option<Vec<u8>> {
-    let number = keysym - 0xffbe + 1;
-    Some(match number {
-        1..=4 => vec![0x1b, b'O', b'P' + number as u8 - 1],
-        5 => b"\x1b[15~".to_vec(),
-        6 => b"\x1b[17~".to_vec(),
-        7 => b"\x1b[18~".to_vec(),
-        8 => b"\x1b[19~".to_vec(),
-        9 => b"\x1b[20~".to_vec(),
-        10 => b"\x1b[21~".to_vec(),
-        11 => b"\x1b[23~".to_vec(),
-        12 => b"\x1b[24~".to_vec(),
-        _ => return None,
-    })
-}
-
 fn held_button(state: KeyButMask) -> Option<u8> {
     if state.contains(KeyButMask::BUTTON1) {
         Some(1)
@@ -1385,6 +1245,7 @@ fn mouse_report(
     modes: aura_core::Modes,
     event: MouseEvent,
     metrics: CellMetrics,
+    padding: [u32; 2],
 ) -> Option<Vec<u8>> {
     let MouseEvent {
         button,
@@ -1405,7 +1266,7 @@ fn mouse_report(
         5 => 65,
         _ => return None,
     };
-    if released {
+    if released && !modes.mouse_sgr {
         code = 3;
     } else if motion {
         code += 32;
@@ -1419,8 +1280,9 @@ fn mouse_report(
     if state.contains(KeyButMask::CONTROL) {
         code += 16;
     }
-    let x = (u32::try_from(pixel_x.max(0)).ok()? / metrics.width.max(1) + 1).min(9999);
-    let y = (u32::try_from(pixel_y.max(0)).ok()? / metrics.height.max(1) + 1).min(9999);
+    let (column, row) = cell_position(pixel_x, pixel_y, metrics, padding);
+    let x = (column + 1).min(9999);
+    let y = (row + 1).min(9999);
     if modes.mouse_sgr {
         Some(
             format!(
@@ -1444,144 +1306,34 @@ fn mouse_report(
     }
 }
 
-fn selection_point(x: i16, y: i16, metrics: CellMetrics, terminal: &Terminal) -> SelectionPoint {
+
+fn cell_position(x: i16, y: i16, metrics: CellMetrics, padding: [u32; 2]) -> (usize, usize) {
+    // X11 coordinates are window-relative; the grid starts inside the padding.
+    let x = (i64::from(x) - i64::from(padding[0])).max(0) as u64;
+    let y = (i64::from(y) - i64::from(padding[1])).max(0) as u64;
+    (
+        (x / u64::from(metrics.width.max(1))) as usize,
+        (y / u64::from(metrics.height.max(1))) as usize,
+    )
+}
+
+fn selection_point(
+    x: i16,
+    y: i16,
+    metrics: CellMetrics,
+    terminal: &Terminal,
+    padding: [u32; 2],
+) -> SelectionPoint {
+    let (column, row) = cell_position(x, y, metrics, padding);
     SelectionPoint {
-        row: ((u32::try_from(y.max(0)).unwrap_or(0) / metrics.height.max(1)) as usize)
-            .min(terminal.active_grid().height() - 1),
-        column: ((u32::try_from(x.max(0)).unwrap_or(0) / metrics.width.max(1)) as usize)
-            .min(terminal.active_grid().width() - 1),
+        row: row.min(terminal.active_grid().height() - 1),
+        column: column.min(terminal.active_grid().width() - 1),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use x11rb::protocol::xproto::KeyPressEvent;
-
-    #[test]
-    fn ordinary_and_control_keys_are_translated() {
-        let mut symbols = vec![0; 16];
-        symbols[0] = b'a' as u32;
-        symbols[1] = b'A' as u32;
-        let event = KeyPressEvent {
-            detail: 8,
-            state: KeyButMask::default(),
-            ..KeyPressEvent::default()
-        };
-        assert_eq!(
-            translate_key(&event, &symbols, 2, 8, false).as_deref(),
-            Some(&b"a"[..])
-        );
-        let control = KeyPressEvent {
-            state: KeyButMask::CONTROL,
-            ..event
-        };
-        assert_eq!(
-            translate_key(&control, &symbols, 2, 8, false).as_deref(),
-            Some(&[1][..])
-        );
-    }
-
-    #[test]
-    fn font_zoom_shortcuts_match_keysyms_not_keycodes() {
-        // US layout: `=`/`+` share keycode 35 (levels 0/1), `-`/`_` keycode 48.
-        let key = |detail: u8, state: KeyButMask| KeyPressEvent {
-            detail,
-            state,
-            ..KeyPressEvent::default()
-        };
-        // Symbols indexed by (keycode - min_keycode) * per_key.
-        let mut symbols = vec![0u32; 96 * 2];
-        let put = |symbols: &mut Vec<u32>, detail: u8, l0: u32, l1: u32| {
-            let base = (u32::from(detail) - 8) as usize * 2;
-            symbols[base] = l0;
-            symbols[base + 1] = l1;
-        };
-        put(&mut symbols, 35, 0x3d, 0x2b); // equal / plus
-        put(&mut symbols, 48, 0x2d, 0x5f); // minus / underscore
-        put(&mut symbols, 19, 0x30, 0x29); // 0 / parenright
-        put(&mut symbols, 38, b'a' as u32, b'A' as u32);
-
-        // Ctrl+- / Ctrl++ (via Shift+=) / Ctrl+= / Ctrl+0 all match.
-        assert_eq!(
-            font_size_action(&key(48, KeyButMask::CONTROL), &symbols, 2, 8),
-            Some(FontSizeAction::Shrink)
-        );
-        assert_eq!(
-            font_size_action(
-                &key(35, KeyButMask::CONTROL | KeyButMask::SHIFT),
-                &symbols,
-                2,
-                8
-            ),
-            Some(FontSizeAction::Grow)
-        );
-        assert_eq!(
-            font_size_action(&key(35, KeyButMask::CONTROL), &symbols, 2, 8),
-            Some(FontSizeAction::Grow)
-        );
-        assert_eq!(
-            font_size_action(&key(19, KeyButMask::CONTROL), &symbols, 2, 8),
-            Some(FontSizeAction::Reset)
-        );
-        // Keypad variants.
-        put(&mut symbols, 86, 0xffaa, 0);
-        put(&mut symbols, 82, 0xffad, 0);
-        put(&mut symbols, 90, 0xffb0, 0);
-        assert_eq!(
-            font_size_action(&key(86, KeyButMask::CONTROL), &symbols, 2, 8),
-            Some(FontSizeAction::Grow)
-        );
-        assert_eq!(
-            font_size_action(&key(82, KeyButMask::CONTROL), &symbols, 2, 8),
-            Some(FontSizeAction::Shrink)
-        );
-        assert_eq!(
-            font_size_action(&key(90, KeyButMask::CONTROL), &symbols, 2, 8),
-            Some(FontSizeAction::Reset)
-        );
-        // Without Ctrl nothing matches; with Alt the app keeps the combo.
-        assert_eq!(
-            font_size_action(&key(48, KeyButMask::default()), &symbols, 2, 8),
-            None
-        );
-        assert_eq!(
-            font_size_action(
-                &key(48, KeyButMask::CONTROL | KeyButMask::MOD1),
-                &symbols,
-                2,
-                8
-            ),
-            None
-        );
-        // Ordinary Ctrl combos (Ctrl+A) are not zoom: they reach the PTY.
-        assert_eq!(
-            font_size_action(&key(38, KeyButMask::CONTROL), &symbols, 2, 8),
-            None
-        );
-        assert_eq!(
-            translate_key(&key(38, KeyButMask::CONTROL), &symbols, 2, 8, false).as_deref(),
-            Some(&[1][..])
-        );
-    }
-
-    #[test]
-    fn cursor_and_alt_prefix_follow_modes() {
-        let symbols = [0xff51, 0];
-        let event = KeyPressEvent {
-            detail: 8,
-            state: KeyButMask::MOD1,
-            ..KeyPressEvent::default()
-        };
-        assert_eq!(
-            translate_key(&event, &symbols, 2, 8, false).as_deref(),
-            Some(&b"\x1b\x1b[D"[..])
-        );
-        assert_eq!(
-            translate_key(&event, &symbols, 2, 8, true).as_deref(),
-            Some(&b"\x1b\x1bOD"[..])
-        );
-    }
 
     #[test]
     fn mouse_reports_follow_tracking_and_sgr_modes() {
@@ -1601,11 +1353,11 @@ mod tests {
             released: false,
             motion: false,
         };
-        assert!(mouse_report(modes, press, metrics).is_none());
+        assert!(mouse_report(modes, press, metrics, [0; 2]).is_none());
         modes.mouse_tracking = MouseTracking::Drag;
         modes.mouse_sgr = true;
         assert_eq!(
-            mouse_report(modes, press, metrics).as_deref(),
+            mouse_report(modes, press, metrics, [0; 2]).as_deref(),
             Some(&b"\x1b[<0;3;3M"[..])
         );
         assert_eq!(
@@ -1615,7 +1367,8 @@ mod tests {
                     motion: true,
                     ..press
                 },
-                metrics
+                metrics,
+                [0; 2],
             )
             .as_deref(),
             Some(&b"\x1b[<32;3;3M"[..])
@@ -1627,10 +1380,11 @@ mod tests {
                     released: true,
                     ..press
                 },
-                metrics
+                metrics,
+                [0; 2],
             )
             .as_deref(),
-            Some(&b"\x1b[<3;3;3m"[..])
+            Some(&b"\x1b[<0;3;3m"[..])
         );
     }
 
