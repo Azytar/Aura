@@ -116,6 +116,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut renderer = Renderer::new(raw_connection, window, pixel_width, pixel_height)
         .map_err(io::Error::other)?;
     renderer.set_glyph_offset(config.font.offset_x, config.font.offset_y);
+    renderer.set_padding(config.window.padding_x, config.window.padding_y);
+    renderer.set_cell_spacing(config.font.letter_spacing, config.font.line_spacing);
     renderer.set_palette(config.colors.palette());
     renderer
         .render(&mut terminal, &mut font, true)
@@ -232,8 +234,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     &mut pty,
                                     &mut renderer,
                                     (
-                                        font.metrics().width,
-                                        font.metrics().height,
+                                        configured_metrics(&font, &config).width,
+                                        configured_metrics(&font, &config).height,
                                     ),
                                     (config.window.padding_x, config.window.padding_y),
                                     configure,
@@ -333,7 +335,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     let point = selection_point(
                                         button.event_x,
                                         button.event_y,
-                                        font.metrics(),
+                                        configured_metrics(&font, &config),
                                         &terminal,
                                         [config.window.padding_x, config.window.padding_y],
                                     );
@@ -365,7 +367,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         released: false,
                                         motion: false,
                                     },
-                                    font.metrics(),
+                                    configured_metrics(&font, &config),
                                     [config.window.padding_x, config.window.padding_y],
                                 ) {
                                     input.push(&bytes);
@@ -386,7 +388,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         released: true,
                                         motion: false,
                                     },
-                                    font.metrics(),
+                                    configured_metrics(&font, &config),
                                     [config.window.padding_x, config.window.padding_y],
                                 ) {
                                     input.push(&bytes);
@@ -405,7 +407,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 released: false,
                                                 motion: true,
                                             },
-                                            font.metrics(),
+                                            configured_metrics(&font, &config),
                                             [config.window.padding_x, config.window.padding_y],
                                         ) {
                                             input.push(&bytes);
@@ -415,7 +417,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     let point = selection_point(
                                         motion.event_x,
                                         motion.event_y,
-                                        font.metrics(),
+                                        configured_metrics(&font, &config),
                                         &terminal,
                                         [config.window.padding_x, config.window.padding_y],
                                     );
@@ -1315,6 +1317,18 @@ fn mouse_report(
     }
 }
 
+fn configured_metrics(font: &Font, config: &AppConfig) -> CellMetrics {
+    let mut metrics = font.metrics();
+    metrics.width = metrics
+        .width
+        .saturating_add_signed(config.font.letter_spacing)
+        .max(1);
+    metrics.height = metrics
+        .height
+        .saturating_add_signed(config.font.line_spacing)
+        .max(1);
+    metrics
+}
 
 fn cell_position(x: i16, y: i16, metrics: CellMetrics, padding: [u32; 2]) -> (usize, usize) {
     // X11 coordinates are window-relative; the grid starts inside the padding.
