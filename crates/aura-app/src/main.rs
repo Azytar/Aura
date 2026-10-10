@@ -40,6 +40,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut font_sizes = RuntimeFontSize::new(config.font.size);
     let mut font = Font::load_with_family(&config.font.family, font_sizes.current())
         .map_err(io::Error::other)?;
+    font.set_fallback_families(&config.font.fallback_families);
     let geometry = FontGeometry::new(
         font.metrics().width,
         font.metrics().height,
