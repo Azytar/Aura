@@ -62,6 +62,7 @@ pub struct Parser {
     csi_bytes: usize,
     string: Vec<u8>,
     string_overflow: bool,
+    string_utf8_remaining: u8,
     utf8: [u8; 4],
     utf8_len: u8,
     utf8_expected: u8,
@@ -78,6 +79,7 @@ impl Default for Parser {
             csi_bytes: 0,
             string: Vec::with_capacity(128),
             string_overflow: false,
+            string_utf8_remaining: 0,
             utf8: [0; 4],
             utf8_len: 0,
             utf8_expected: 0,
@@ -387,10 +389,24 @@ impl Parser {
     fn begin_string(&mut self, state: State) {
         self.string.clear();
         self.string_overflow = false;
+        self.string_utf8_remaining = 0;
         self.state = state;
     }
 
     fn push_string(&mut self, byte: u8) {
+        // An ST byte inside UTF-8 (for example Ü = C3 9C) is payload, not
+        // a terminator. This lexical state must survive split PTY reads.
+        self.string_utf8_remaining =
+            if self.string_utf8_remaining != 0 && (0x80..=0xbf).contains(&byte) {
+                self.string_utf8_remaining - 1
+            } else {
+                match byte {
+                    0xc2..=0xdf => 1,
+                    0xe0..=0xef => 2,
+                    0xf0..=0xf4 => 3,
+                    _ => 0,
+                }
+            };
         if self.string.len() < STRING_MAX_BYTES {
             self.string.push(byte);
         } else {
@@ -400,7 +416,8 @@ impl Parser {
 
     fn advance_osc(&mut self, byte: u8) -> Option<Event> {
         match byte {
-            0x07 | 0x9c => self.finish_osc(),
+            0x07 => self.finish_osc(),
+            0x9c if self.string_utf8_remaining == 0 => self.finish_osc(),
             0x1b => {
                 self.state = State::OscEscape;
                 None
@@ -435,7 +452,7 @@ impl Parser {
 
     fn advance_dcs(&mut self, byte: u8) -> Option<Event> {
         match byte {
-            0x9c => {
+            0x9c if self.string_utf8_remaining == 0 => {
                 self.state = State::Ground;
                 None
             }
@@ -471,11 +488,36 @@ impl Parser {
         self.csi_bytes = 0;
         self.string.clear();
         self.string_overflow = false;
+        self.string_utf8_remaining = 0;
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utf8_continuations_in_control_strings_are_not_c1_terminators() {
+        let input = "\x1b]0;ÜМ title\x1b\\X".as_bytes();
+        let expected = vec![
+            Event::Osc("0;ÜМ title".as_bytes().to_vec()),
+            Event::Print('X'),
+        ];
+        assert_eq!(parse(input), expected);
+        for split in 0..=input.len() {
+            let mut parser = Parser::new();
+            let mut events = Vec::new();
+            parser.feed(&input[..split], |event| events.push(event));
+            parser.feed(&input[split..], |event| events.push(event));
+            assert_eq!(events, expected, "split at {split}");
+        }
+        assert_eq!(
+            parse("\x1bPÜМ hidden\x1b\\X".as_bytes()),
+            vec![Event::Print('X')]
+        );
+        assert_eq!(
+            parse(b"\x1b]0;c1\x9cX"),
+            vec![Event::Osc(b"0;c1".to_vec()), Event::Print('X')]
+        );
+    }
     use super::*;
 
     fn parse(input: &[u8]) -> Vec<Event> {
