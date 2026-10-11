@@ -74,6 +74,12 @@ family = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 size = 13
 letter_spacing = 2
 line_spacing = 3
+[font.bold]
+style = "Bold"
+[font.italic]
+style = "Italic"
+[font.bold_italic]
+style = "Bold Italic"
 [window]
 columns = 40
 lines = 12
@@ -100,6 +106,11 @@ with open(os.environ["AURA_TEST_KEYS"], "wb", buffering=0) as output:
         elif stage == 1 and received.endswith(b"test-secret\\r"):
             os.write(1, b"\\r\\n:: Synchronizing package databases...\\r\\n\\x1b[44mcore 12%\\r\\x1b[2Kcore 100%\\x1b[0m\\x1b]0;AURA_PROGRESS_\\xc3\\x9c\\a")
             stage = 2
+        elif stage == 2 and received.endswith(b"graphics\\r"):
+            patterns = "\\r\\n".join("".join(chr(0x2800 + row * 32 + column) for column in range(32)) for row in range(8))
+            image = patterns + "\\r\\n" + "─" * 32 + "\\r\\n" + "█" * 32
+            os.write(1, b"\\x1b[0m\\x1b[2J\\x1b[H" + image.encode() + b"\\x1b]0;AURA_GRAPHICS\\a")
+            stage = 3
 ''')
         helper.chmod(0o755)
         environment = dict(os.environ, SHELL=str(helper), XDG_CONFIG_HOME=str(root), AURA_TEST_KEYS=str(keys))
@@ -161,6 +172,27 @@ with open(os.environ["AURA_TEST_KEYS"], "wb", buffering=0) as output:
             wait_for(lambda: run("xdotool", "getwindowname", window).strip() == "AURA_PROGRESS_Ü".encode(), "UTF-8 progress title was truncated")
             assert app.poll() is None
             print("PASS: sudo/pacman protocol fixture, uppercase S, no-echo input, CR progress and UTF-8 OSC")
+            run("xdotool", "type", "--delay", "35", "graphics")
+            run("xdotool", "key", "Return")
+            expected += b"graphics\r"
+            wait_for(lambda: keys.read_bytes() == expected and run("xdotool", "getwindowname", window).strip() == b"AURA_GRAPHICS", "graphics fixture did not render")
+            time.sleep(0.2)
+            graphics = capture(window, root / "graphics.xwd")
+            dots = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2), (0, 3), (1, 3)]
+            for pattern in range(256):
+                for bit, (x, y) in enumerate(dots):
+                    px = 3 + (pattern % 32) * cell_w + (2 * x + 1) * cell_w // 4
+                    py = 5 + (pattern // 32) * cell_h + (2 * y + 1) * cell_h // 8
+                    assert (pixel(graphics, px, py)[0] > 44) == bool(pattern & (1 << bit)), f"Braille pattern {pattern:#x}, bit {bit} changed"
+            for y in range(cell_h):
+                for x in range(32 * cell_w):
+                    assert pixel(graphics, 3 + x, 5 + 8 * cell_h + y) == pixel(graphics, 3, 5 + 8 * cell_h + y), "box drawing has a seam"
+                    assert pixel(graphics, 3 + x, 5 + 9 * cell_h + y) == (216, 216, 216), "full blocks leave spacing gaps"
+            run("xdotool", "windowsize", window, str(graphics[0] + 7), str(graphics[1] + 11))
+            time.sleep(0.25)
+            resized = capture(window, root / "graphics-resized.xwd")
+            assert crop(graphics, 3, 5, 32 * cell_w, 10 * cell_h) == crop(resized, 3, 5, 32 * cell_w, 10 * cell_h)
+            print("PASS: all 256 Braille patterns, continuous borders/full blocks and fractional resize through the native swapchain")
             child_ids = run("pgrep", "-P", str(app.pid)).split()
             app.terminate()
             assert app.wait(timeout=8) == 0

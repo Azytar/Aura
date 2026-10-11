@@ -83,9 +83,9 @@ commits; artifacts must not be shared between distinct copies of one package.
   The automated scenarios substantiate the listed fixes, not every desktop.
 - The keyboard backend provides XKB and Compose. Full input-method integration
   (XIM/IBus) and native Wayland remain outside this backend.
-- Configured bold/italic face families remain unused by the existing synthetic
-  style pipeline. Multi-scalar fallback shaping still uses the primary face;
-  complex color emoji/ZWJ fallback needs a separate shaping/compositing change.
+- The drawing follow-up resolved configured style faces, whole-grapheme fallback,
+  complex color emoji and font-dependent Braille/block/box geometry. See
+  [Cell graphics and font routing](CELL_GRAPHICS.md) for causes and verification.
 - The atlas remains bounded. A visible set larger than its capacity uses
   replacement glyphs; pending PTY input beyond 1 MiB is rejected atomically
   with a diagnostic. These are explicit resource limits, not silent cache
