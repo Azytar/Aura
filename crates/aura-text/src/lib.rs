@@ -11,6 +11,8 @@ use swash::{
 };
 use unicode_script::{Script, UnicodeScript};
 
+mod faces;
+
 const DEFAULT_ATLAS_SIZE: u32 = 1024;
 const MAX_FALLBACKS: usize = 8;
 /// Cache pressure is recoverable: renderers rebuild from the visible grid.
@@ -92,7 +94,7 @@ pub struct GlyphUpload {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct GlyphKey {
-    /// 0 selects the primary face, 1..=MAX_FALLBACKS a fallback face.
+    /// 0 selects the primary face, 1..=8 fallbacks, 9..=11 style faces.
     face: u8,
     /// Raw bits of the font size in typographic pixels. Stored as bits so the
     /// key remains `Eq`/`Hash` across the full `f32` space after validation.
@@ -112,12 +114,13 @@ enum GlyphIdentity {
     },
 }
 
-struct PositionedMask {
+struct PositionedRaster {
     x: i32,
     y: i32,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    color: bool,
 }
 
 struct FaceData {
@@ -125,13 +128,15 @@ struct FaceData {
     index: usize,
 }
 
-/// Owns one primary font face plus fallback faces and rasterizes each glyph
+/// Owns one primary face, three optional styles and bounded fallbacks, rasterizing each glyph
 /// key at most once. Cell metrics always come from the primary face; terminal
 /// semantics never depend on which face drew a glyph. Fallback faces load on
 /// the first primary miss so plain sessions never pay their cost.
 pub struct Font {
     bytes: Vec<u8>,
     face_index: usize,
+    primary_path: PathBuf,
+    styles: [Option<FaceData>; 3],
     fallbacks: Vec<FaceData>,
     fallbacks_loaded: bool,
     fallback_paths: Vec<PathBuf>,
@@ -193,6 +198,8 @@ impl Font {
         Ok(Self {
             bytes,
             face_index: 0,
+            styles: faces::load_styles(&path),
+            primary_path: path,
             fallbacks: Vec::new(),
             fallbacks_loaded: false,
             fallback_paths: Vec::new(),
@@ -293,6 +300,40 @@ impl Font {
         self.invalidate_atlas();
     }
 
+    /// Replaces one style face without changing cell metrics. Missing or
+    /// invalid explicit faces return an error; available styles are discovered
+    /// beside the primary font, with synthetic styling as the last resort.
+    pub fn set_style_face(
+        &mut self,
+        bold: bool,
+        italic: bool,
+        family: Option<&str>,
+        style: Option<&str>,
+    ) -> Result<(), String> {
+        let slot = usize::from(bold) + usize::from(italic) * 2;
+        if slot == 0 {
+            return Err("style face requires bold or italic".into());
+        }
+        let style = style.unwrap_or(["Bold", "Italic", "Bold Italic"][slot - 1]);
+        let family = family.unwrap_or("monospace");
+        let path = if family == "monospace" {
+            faces::sibling_style_path(&self.primary_path, style)
+        } else {
+            faces::style_path(family, style)
+        };
+        let family = if family == "monospace" {
+            faces::family_stem(&self.primary_path)
+        } else {
+            family.to_owned()
+        };
+        let path = path
+            .or_else(|| faces::style_path(&family, style))
+            .ok_or_else(|| format!("cannot find font family '{family}' style '{style}'"))?;
+        self.styles[slot - 1] = Some(faces::load(&path)?);
+        self.invalidate_atlas();
+        Ok(())
+    }
+
     pub const fn metrics(&self) -> CellMetrics {
         self.metrics
     }
@@ -313,14 +354,19 @@ impl Font {
 
     /// Returns a stable atlas index and uploads only on the first lookup.
     /// Glyphs missing from the primary face fall back to the loaded fallback
-    /// faces; glyphs missing everywhere resolve to an empty entry.
+    /// faces; characters missing everywhere use the primary .notdef glyph.
     pub fn glyph(
         &mut self,
         ch: char,
         bold: bool,
         italic: bool,
     ) -> Result<(u32, GlyphInfo, Option<GlyphUpload>), String> {
-        let (face_id, glyph_id) = self.resolve_face(ch);
+        let mut text = [0; 4];
+        let face_id = self.resolve_text_face(ch.encode_utf8(&mut text), bold, italic);
+        let face = self.face(face_id).ok_or("invalid loaded font")?;
+        let glyph_id = face.charmap().map(ch);
+        let synthetic_bold = bold && face.attributes().weight().0 < 600;
+        let synthetic_italic = italic && face.attributes().style() == swash::Style::Normal;
         let key = GlyphKey {
             face: face_id,
             size_bits: self.size.to_bits(),
@@ -335,15 +381,16 @@ impl Font {
             return Err(CACHE_FULL.into());
         }
 
-        let face_bytes: &[u8] = if face_id == 0 {
-            &self.bytes
-        } else {
-            &self.fallbacks[face_id as usize - 1].bytes
-        };
-        let loaded_index = if face_id == 0 {
-            self.face_index
-        } else {
-            self.fallbacks[face_id as usize - 1].index
+        let (face_bytes, loaded_index) = match face_id {
+            0 => (&self.bytes[..], self.face_index),
+            1..=8 => {
+                let face = &self.fallbacks[face_id as usize - 1];
+                (&face.bytes[..], face.index)
+            }
+            _ => {
+                let face = self.styles[face_id as usize - 9].as_ref().unwrap();
+                (&face.bytes[..], face.index)
+            }
         };
         let face = FontRef::from_index(face_bytes, loaded_index).ok_or("invalid loaded font")?;
         let mut scaler = self
@@ -353,6 +400,7 @@ impl Font {
             .hint(true)
             .build();
         let sources = [
+            Source::ColorOutline(0),
             Source::Outline,
             Source::Bitmap(swash::scale::StrikeWith::BestFit),
             Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
@@ -360,8 +408,8 @@ impl Font {
         let mut image = swash::scale::image::Image::new();
         let mut renderer = Render::new(&sources);
         renderer.format(Format::Alpha);
-        renderer.embolden(if bold { 0.45 } else { 0.0 });
-        if italic {
+        renderer.embolden(if synthetic_bold { 0.45 } else { 0.0 });
+        if synthetic_italic {
             renderer.transform(Some(Transform::skew(
                 Angle::from_degrees(-12.0),
                 Angle::ZERO,
@@ -409,6 +457,7 @@ impl Font {
         if (!color && image.content != Content::Mask) || image.data.len() != raster_bytes {
             return Err("font rasterizer returned an unsupported glyph format".into());
         }
+        straighten_color_outline(&mut image);
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
         // Never cache a failed allocation as an invisible glyph.
@@ -458,31 +507,68 @@ impl Font {
         ))
     }
 
-    /// Selects the first face whose charmap contains `ch`: the primary face,
-    /// then fallbacks in load order. Fallback files load on the first primary
-    /// miss. Returns face 0 with id 0 when no face provides the character.
-    fn resolve_face(&mut self, ch: char) -> (u8, u16) {
-        if let Some(face) = FontRef::from_index(&self.bytes, self.face_index)
-            && face.charmap().map(ch) != 0
-        {
-            return (0, face.charmap().map(ch));
+    fn face(&self, id: u8) -> Option<FontRef<'_>> {
+        let face = match id {
+            0 => return FontRef::from_index(&self.bytes, self.face_index),
+            1..=8 => self.fallbacks.get(id as usize - 1)?,
+            _ => self.styles.get(id as usize - 9)?.as_ref()?,
+        };
+        FontRef::from_index(&face.bytes, face.index)
+    }
+
+    // Select one face for the whole cluster. Mixing faces before shaping
+    // breaks joining, combining marks, and emoji ligatures.
+    fn resolve_text_face(&mut self, text: &str, bold: bool, italic: bool) -> u8 {
+        let style = u8::from(bold) + u8::from(italic) * 2;
+        let mut primary = 0;
+        for slot in [style, u8::from(bold), u8::from(italic) * 2] {
+            if slot != 0
+                && self
+                    .face(8 + slot)
+                    .is_some_and(|face| faces::covers(face, text))
+            {
+                primary = 8 + slot;
+                break;
+            }
+        }
+        let primary_covers = self
+            .face(primary)
+            .is_some_and(|face| faces::covers(face, text));
+        let emoji_presentation = text.contains('\u{fe0f}') || text.contains('\u{200d}');
+        if primary_covers && !emoji_presentation {
+            return primary;
         }
         if !self.fallbacks_loaded {
             self.fallbacks = load_fallbacks(&self.fallback_paths);
             self.fallbacks_loaded = true;
         }
+        let mut first = None;
         for (position, fallback) in self.fallbacks.iter().enumerate() {
-            if position >= MAX_FALLBACKS {
-                break;
-            }
-            if let Some(face) = FontRef::from_index(&fallback.bytes, fallback.index) {
-                let glyph_id = face.charmap().map(ch);
-                if glyph_id != 0 {
-                    return (position as u8 + 1, glyph_id);
+            if let Some(face) = FontRef::from_index(&fallback.bytes, fallback.index)
+                && faces::covers(face, text)
+            {
+                let id = position as u8 + 1;
+                first.get_or_insert(id);
+                if emoji_presentation && faces::has_color(face) {
+                    return id;
                 }
             }
         }
-        (0, 0)
+        if primary_covers {
+            primary
+        } else if let Some(id) = first {
+            id
+        } else {
+            // No complete face: preserve the base character rather than
+            // dropping the entire cluster. Unsupported marks remain .notdef.
+            let base = text.chars().next().unwrap_or('\u{fffd}');
+            (0..=self.fallbacks.len() as u8)
+                .find(|&id| {
+                    self.face(id)
+                        .is_some_and(|face| face.charmap().map(base) != 0)
+                })
+                .unwrap_or(0)
+        }
     }
 
     /// Shapes and rasterizes one bounded grapheme as a single atlas entry.
@@ -513,8 +599,12 @@ impl Font {
         if text.chars().count() == 1 && pre_context.is_empty() && post_context.is_empty() {
             return self.glyph(text.chars().next().expect("nonempty text"), bold, italic);
         }
+        let face_id = self.resolve_text_face(text, bold, italic);
+        let font_face = self.face(face_id).ok_or("invalid loaded font")?;
+        let synthetic_bold = bold && font_face.attributes().weight().0 < 600;
+        let synthetic_italic = italic && font_face.attributes().style() == swash::Style::Normal;
         let key = GlyphKey {
-            face: 0,
+            face: face_id,
             size_bits: self.size.to_bits(),
             identity: GlyphIdentity::Text {
                 grapheme: text.to_owned(),
@@ -531,7 +621,18 @@ impl Font {
             return Err(CACHE_FULL.into());
         }
 
-        let face = rustybuzz::Face::from_slice(&self.bytes, self.face_index as u32)
+        let (face_bytes, loaded_index) = match face_id {
+            0 => (&self.bytes[..], self.face_index),
+            1..=8 => {
+                let face = &self.fallbacks[face_id as usize - 1];
+                (&face.bytes[..], face.index)
+            }
+            _ => {
+                let face = self.styles[face_id as usize - 9].as_ref().unwrap();
+                (&face.bytes[..], face.index)
+            }
+        };
+        let face = rustybuzz::Face::from_slice(face_bytes, loaded_index as u32)
             .ok_or("invalid loaded font for shaping")?;
         let scale = self.size / face.units_per_em() as f32;
         let mut buffer = rustybuzz::UnicodeBuffer::new();
@@ -542,8 +643,11 @@ impl Font {
         let shaped = rustybuzz::shape(&face, &[], buffer);
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
+        if infos.len() > 256 {
+            return Err("shaped grapheme exceeds the 256-glyph limit".into());
+        }
         let font_face =
-            FontRef::from_index(&self.bytes, self.face_index).ok_or("invalid loaded font")?;
+            FontRef::from_index(face_bytes, loaded_index).ok_or("invalid loaded font")?;
         let mut scaler = self
             .context
             .builder(font_face)
@@ -551,6 +655,7 @@ impl Font {
             .hint(true)
             .build();
         let sources = [
+            Source::ColorOutline(0),
             Source::Outline,
             Source::Bitmap(swash::scale::StrikeWith::BestFit),
             Source::ColorBitmap(swash::scale::StrikeWith::BestFit),
@@ -558,32 +663,40 @@ impl Font {
         let mut image = swash::scale::image::Image::new();
         let mut renderer = Render::new(&sources);
         renderer.format(Format::Alpha);
-        renderer.embolden(if bold { 0.45 } else { 0.0 });
-        if italic {
+        renderer.embolden(if synthetic_bold { 0.45 } else { 0.0 });
+        if synthetic_italic {
             renderer.transform(Some(Transform::skew(
                 Angle::from_degrees(-12.0),
                 Angle::ZERO,
             )));
         }
-        let mut masks = Vec::with_capacity(infos.len());
+        let mut rasters = Vec::with_capacity(infos.len());
+        let mut raster_bytes = 0usize;
         let mut pen_x = 0.0f32;
         let mut pen_y = 0.0f32;
         let mut advance = 0.0f32;
         let mut bounds = None::<(i32, i32, i32, i32)>;
         for (info, position) in infos.iter().zip(positions) {
             let glyph_id = info.glyph_id as u16;
-            if renderer.render_into(&mut scaler, glyph_id, &mut image)
-                && image.content == Content::Mask
-            {
+            if renderer.render_into(&mut scaler, glyph_id, &mut image) {
                 let placement = image.placement;
                 let width = placement.width;
                 let height = placement.height;
+                let color = image.content == Content::Color;
                 let expected = (width as usize)
                     .checked_mul(height as usize)
+                    .and_then(|pixels| pixels.checked_mul(if color { 4 } else { 1 }))
                     .ok_or("shaped glyph dimensions overflow")?;
-                if image.data.len() != expected {
-                    return Err("font rasterizer returned an unsupported glyph mask".into());
+                if (!color && image.content != Content::Mask) || image.data.len() != expected {
+                    return Err("font rasterizer returned an unsupported glyph format".into());
                 }
+                raster_bytes = raster_bytes
+                    .checked_add(expected)
+                    .ok_or("shaped raster overflow")?;
+                if width > 512 || height > 512 || raster_bytes > 512 * 512 * 4 {
+                    return Err("shaped grapheme exceeds the raster memory limit".into());
+                }
+                straighten_color_outline(&mut image);
                 if width > 0 && height > 0 {
                     let x =
                         (pen_x + position.x_offset as f32 * scale).round() as i32 + placement.left;
@@ -604,12 +717,13 @@ impl Font {
                         ),
                         None => (x, y, right, bottom),
                     });
-                    masks.push(PositionedMask {
+                    rasters.push(PositionedRaster {
                         x,
                         y,
                         width,
                         height,
                         pixels: image.data.clone(),
+                        color,
                     });
                 }
             }
@@ -635,30 +749,25 @@ impl Font {
         if width > 512 || height > 512 {
             return Err("shaped grapheme exceeds the 512-pixel raster limit".into());
         }
-        let mut pixels = vec![0u8; (width * height) as usize];
-        for mask in masks {
-            for y in 0..mask.height {
-                for x in 0..mask.width {
-                    let source = (y * mask.width + x) as usize;
-                    let target_x = (mask.x - left) as u32 + x;
-                    let target_y = (mask.y - top) as u32 + y;
-                    let target = (target_y * width + target_x) as usize;
-                    pixels[target] = pixels[target].max(mask.pixels[source]);
-                }
-            }
-        }
+        let (pixels, color) = composite_rasters(&rasters, [left, top], width, height);
+        let bytes_per_pixel = if color { 4 } else { 1 };
         let padded_width = width.checked_add(2).ok_or("glyph width overflow")?;
         let padded_height = height.checked_add(2).ok_or("glyph height overflow")?;
         let (atlas_x, atlas_y) = self
-            .allocate_in(padded_width, padded_height, false)
+            .allocate_in(padded_width, padded_height, color)
             .ok_or(CACHE_FULL)?;
         let x = atlas_x + 1;
         let y = atlas_y + 1;
+        let row_bytes = width as usize * bytes_per_pixel;
+        let atlas = if color {
+            &mut self.color_atlas
+        } else {
+            &mut self.atlas
+        };
         for row in 0..height {
-            let source = (row * width) as usize;
-            let target = ((y + row) * self.atlas_size + x) as usize;
-            self.atlas[target..target + width as usize]
-                .copy_from_slice(&pixels[source..source + width as usize]);
+            let source = row as usize * row_bytes;
+            let target = ((y + row) * self.atlas_size + x) as usize * bytes_per_pixel;
+            atlas[target..target + row_bytes].copy_from_slice(&pixels[source..source + row_bytes]);
         }
         let info = GlyphInfo {
             uv_min: [
@@ -672,7 +781,7 @@ impl Font {
             size: [width as f32, height as f32],
             bearing: [left as f32, -top as f32],
             advance,
-            color: false,
+            color,
         };
         self.glyphs.insert(key, (index, info));
         Ok((
@@ -684,7 +793,7 @@ impl Font {
                 width,
                 height,
                 pixels,
-                color: false,
+                color,
             }),
         ))
     }
@@ -715,6 +824,69 @@ impl Font {
         *shelf_height = (*shelf_height).max(height);
         Some(result)
     }
+}
+
+// Swash's COLR compositor produces premultiplied channels; PNG emoji use
+// straight alpha. Both atlas paths must match Vulkan's SRC_ALPHA blend.
+fn straighten_color_outline(image: &mut swash::scale::image::Image) {
+    if image.content != Content::Color || !matches!(image.source, Source::ColorOutline(_)) {
+        return;
+    }
+    for rgba in image.data.chunks_exact_mut(4) {
+        let alpha = u32::from(rgba[3]);
+        if alpha != 0 {
+            for channel in &mut rgba[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+}
+
+fn composite_rasters(
+    rasters: &[PositionedRaster],
+    origin: [i32; 2],
+    width: u32,
+    height: u32,
+) -> (Vec<u8>, bool) {
+    let color = rasters.iter().any(|raster| raster.color);
+    let stride = if color { 4 } else { 1 };
+    let mut pixels = vec![0; width as usize * height as usize * stride];
+    for raster in rasters {
+        for y in 0..raster.height {
+            for x in 0..raster.width {
+                let source = (y * raster.width + x) as usize;
+                let tx = (raster.x - origin[0]) as u32 + x;
+                let ty = (raster.y - origin[1]) as u32 + y;
+                let target = (ty * width + tx) as usize * stride;
+                if !color {
+                    let a = u32::from(raster.pixels[source]);
+                    let d = u32::from(pixels[target]);
+                    pixels[target] = (a + (d * (255 - a) + 127) / 255) as u8;
+                    continue;
+                }
+                let rgba: [u8; 4] = if raster.color {
+                    raster.pixels[source * 4..source * 4 + 4]
+                        .try_into()
+                        .unwrap()
+                } else {
+                    [255, 255, 255, raster.pixels[source]]
+                };
+                let a = u32::from(rgba[3]);
+                let d = u32::from(pixels[target + 3]);
+                let alpha = a * 255 + d * (255 - a);
+                if alpha == 0 {
+                    continue;
+                }
+                for channel in 0..3 {
+                    let numerator = u32::from(rgba[channel]) * a * 255
+                        + u32::from(pixels[target + channel]) * d * (255 - a);
+                    pixels[target + channel] = ((numerator + alpha / 2) / alpha) as u8;
+                }
+                pixels[target + 3] = ((alpha + 127) / 255) as u8;
+            }
+        }
+    }
+    (pixels, color)
 }
 
 /// Recursively searches `dir` for font files whose stem matches `family`.
@@ -869,6 +1041,248 @@ mod tests {
     use super::*;
 
     #[test]
+    fn real_styles_match_native_faces_without_double_synthetic_styling() {
+        let Some(path) = Font::resolve_family_path("DejaVu Sans Mono") else {
+            eprintln!("skipped: DejaVu Sans Mono unavailable");
+            return;
+        };
+        let mut font = Font::load(Some(&path), 18.0).unwrap();
+        let metrics = font.metrics();
+        for (slot, bold, italic) in [(0, true, false), (1, false, true), (2, true, true)] {
+            let style = font.styles[slot].as_ref().expect("installed DejaVu style");
+            let bytes = style.bytes.clone();
+            let native_path =
+                faces::style_path("DejaVu Sans Mono", ["Bold", "Italic", "Bold Italic"][slot])
+                    .unwrap();
+            let mut native = Font::load(Some(&native_path), 18.0).unwrap();
+            assert_eq!(bytes, native.bytes);
+            for text in ["i", "W", "e\u{301}"] {
+                let (_, actual, upload) = font.glyph_text(text, bold, italic).unwrap();
+                let (_, expected, native_upload) = native.glyph_text(text, false, false).unwrap();
+                assert_eq!(actual.size, expected.size);
+                assert_eq!(actual.bearing, expected.bearing);
+                assert_eq!(upload.unwrap().pixels, native_upload.unwrap().pixels);
+            }
+            assert_eq!(
+                font.metrics(),
+                metrics,
+                "style never alters grid dimensions"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_style_faces_invalidate_cache_and_missing_faces_leave_it_intact() {
+        let mut font = Font::load(None, 18.0).unwrap();
+        let metrics = font.metrics();
+        let native_italic = font.styles[1].as_ref().unwrap().bytes.clone();
+        let native_both = font.styles[2].as_ref().unwrap().bytes.clone();
+        font.glyph('i', true, false).unwrap();
+        assert!(
+            font.set_style_face(true, false, Some("/nonexistent/aura-font.ttf"), None)
+                .is_err()
+        );
+        assert_eq!(font.glyphs.len(), 1);
+        let Some(path) = Font::resolve_family_path("Liberation Mono Bold") else {
+            eprintln!("skipped: Liberation Mono Bold unavailable");
+            return;
+        };
+        font.set_style_face(true, false, path.to_str(), None)
+            .unwrap();
+        assert!(font.glyphs.is_empty());
+        let mut native = Font::load(Some(&path), 18.0).unwrap();
+        let (_, actual, upload) = font.glyph('i', true, false).unwrap();
+        let (_, expected, native_upload) = native.glyph('i', false, false).unwrap();
+        assert_eq!(actual.size, expected.size);
+        assert_eq!(upload.unwrap().pixels, native_upload.unwrap().pixels);
+        assert_eq!(font.metrics(), metrics);
+        font.set_style_face(true, false, Some("Liberation Mono Bold"), None)
+            .unwrap();
+        assert_eq!(font.styles[0].as_ref().unwrap().bytes, native.bytes);
+        font.set_style_face(true, true, None, Some("Bold Italic"))
+            .unwrap();
+        assert_eq!(font.styles[2].as_ref().unwrap().bytes, native_both);
+        font.set_style_face(false, true, None, Some("Italic"))
+            .unwrap();
+        assert_eq!(font.styles[1].as_ref().unwrap().bytes, native_italic);
+    }
+
+    #[test]
+    fn complete_devanagari_cluster_and_joining_context_use_configured_fallback() {
+        let Some(path) = Font::resolve_family_path("Noto Sans Devanagari") else {
+            eprintln!("skipped: Noto Sans Devanagari unavailable");
+            return;
+        };
+        let mut font = Font::load(None, 18.0).unwrap();
+        font.set_fallback_families(&[path.to_string_lossy().into_owned()]);
+        assert_eq!(font.resolve_text_face("कि", false, false), 1);
+        for (before, after) in [("", ""), ("अ", "क")] {
+            let (id, info, upload) = font
+                .glyph_text_with_context("कि", before, after, false, false)
+                .unwrap();
+            assert!(!info.color && info.size[0] > 0.0 && info.size[1] > 0.0);
+            assert!(upload.unwrap().pixels.iter().any(|&p| p != 0));
+            assert!(
+                font.glyphs
+                    .iter()
+                    .any(|(key, &(index, _))| key.face == 1 && index == id)
+            );
+            assert!(
+                font.glyph_text_with_context("कि", before, after, false, false)
+                    .unwrap()
+                    .2
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn emoji_clusters_select_one_color_face_and_preserve_ligatures() {
+        let mut font = Font::load(None, 18.0).unwrap();
+        font.resolve_text_face("👩\u{200d}💻", false, false);
+        if !font
+            .fallbacks
+            .iter()
+            .any(|face| faces::has_color(FontRef::from_index(&face.bytes, face.index).unwrap()))
+        {
+            eprintln!("skipped: color emoji font unavailable");
+            return;
+        }
+        for text in [
+            "👩\u{200d}💻",
+            "👨\u{200d}👩\u{200d}👧\u{200d}👦",
+            "👍🏽",
+            "🇪🇸",
+            "❤\u{fe0f}",
+        ] {
+            let face_id = font.resolve_text_face(text, false, false);
+            let selected = font.face(face_id).unwrap();
+            assert!(faces::covers(selected, text) && faces::has_color(selected));
+            let fallback = &font.fallbacks[face_id as usize - 1];
+            let face = rustybuzz::Face::from_slice(&fallback.bytes, fallback.index as u32).unwrap();
+            let mut buffer = rustybuzz::UnicodeBuffer::new();
+            buffer.push_str(text);
+            buffer.guess_segment_properties();
+            let shape = rustybuzz::shape(&face, &[], buffer);
+            assert_eq!(
+                shape.len(),
+                1,
+                "{text} must be one ligature, not separate emoji"
+            );
+            let mut context = ScaleContext::new();
+            let mut scaler = context.builder(selected).size(18.0).hint(true).build();
+            let reference = Render::new(&[Source::ColorBitmap(swash::scale::StrikeWith::BestFit)])
+                .render(&mut scaler, shape.glyph_infos()[0].glyph_id as u16)
+                .expect("emoji ligature bitmap");
+            let (_, info, upload) = font.glyph_text(text, false, false).unwrap();
+            assert!(
+                info.color && info.size[0] > 0.0 && info.size[1] > 0.0,
+                "{text} lost its color raster"
+            );
+            let upload = upload.unwrap();
+            assert_eq!(
+                upload.pixels.len(),
+                (upload.width * upload.height * 4) as usize
+            );
+            assert!(upload.pixels.chunks_exact(4).any(|p| p[3] != 0));
+            assert_eq!(upload.pixels.len(), reference.data.len());
+            for (actual, expected) in upload
+                .pixels
+                .chunks_exact(4)
+                .zip(reference.data.chunks_exact(4))
+            {
+                assert_eq!(actual[3], expected[3]);
+                if actual[3] != 0 {
+                    assert_eq!(
+                        actual, expected,
+                        "{text} must preserve the font's actual bitmap colors"
+                    );
+                }
+            }
+            assert!(font.glyph_text(text, false, false).unwrap().2.is_none());
+        }
+        let text_face = font.resolve_text_face("❤\u{fe0e}", false, false);
+        assert_eq!(
+            text_face, 0,
+            "text presentation must retain the primary monochrome face"
+        );
+    }
+
+    #[test]
+    fn color_cluster_cache_pressure_is_recoverable() {
+        let mut font = Font::load(None, 18.0).unwrap();
+        let (_, info, _) = font.glyph_text("👩\u{200d}💻", false, false).unwrap();
+        if !info.color {
+            eprintln!("skipped: color emoji font unavailable");
+            return;
+        }
+        font.invalidate_atlas();
+        font.color_shelf_y = font.atlas_size;
+        assert_eq!(
+            font.glyph_text("👩\u{200d}💻", false, false).unwrap_err(),
+            CACHE_FULL
+        );
+        assert!(font.glyphs.is_empty());
+        font.invalidate_atlas();
+        assert!(
+            font.glyph_text("👩\u{200d}💻", false, false)
+                .unwrap()
+                .2
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn overlapping_masks_and_color_layers_use_alpha_composition() {
+        let mask = || PositionedRaster {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            pixels: vec![128],
+            color: false,
+        };
+        assert_eq!(
+            composite_rasters(&[mask(), mask()], [0, 0], 1, 1),
+            (vec![192], false)
+        );
+        let rgba = |pixels| PositionedRaster {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            pixels,
+            color: true,
+        };
+        assert_eq!(
+            composite_rasters(
+                &[rgba(vec![0, 0, 255, 128]), rgba(vec![255, 0, 0, 128])],
+                [0, 0],
+                1,
+                1
+            ),
+            (vec![170, 0, 85, 192], true)
+        );
+        assert_eq!(
+            composite_rasters(&[rgba(vec![255, 0, 0, 128]), mask()], [0, 0], 1, 1),
+            (vec![255, 170, 170, 192], true)
+        );
+    }
+
+    #[test]
+    fn colr_pixels_are_converted_from_premultiplied_to_straight_alpha() {
+        let mut image = swash::scale::image::Image::new();
+        image.source = Source::ColorOutline(0);
+        image.content = Content::Color;
+        image.data = vec![32, 64, 96, 128, 0, 0, 0, 0, 40, 80, 120, 255];
+        straighten_color_outline(&mut image);
+        assert_eq!(
+            image.data,
+            [64, 128, 191, 128, 0, 0, 0, 0, 40, 80, 120, 255]
+        );
+    }
+
+    #[test]
     fn a_full_atlas_does_not_poison_glyph_or_cluster_cache() {
         let mut font = Font::load(None, 18.0).unwrap();
         font.shelf_y = font.atlas_size;
@@ -913,7 +1327,7 @@ mod tests {
         let mut font = Font::load(None, 14.0).unwrap();
         font.set_fallback_families(&[path.to_string_lossy().into_owned()]);
         assert_eq!(font.fallback_count(), 0);
-        font.resolve_face('中');
+        font.resolve_text_face("中", false, false);
         assert!(font.fallback_count() <= MAX_FALLBACKS);
         assert_eq!(font.fallbacks[0].bytes, fs::read(path).unwrap());
     }
