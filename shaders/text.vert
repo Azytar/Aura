@@ -9,6 +9,7 @@ layout(location = 1) flat out uint fg;
 layout(location = 2) flat out uint visible;
 layout(location = 3) flat out uint color_flag;
 layout(location = 4) flat out vec4 cell_bounds;
+layout(location = 5) flat out uint graphic;
 void main() {
     uint index = gl_InstanceIndex;
     uint col = index % grid.cols;
@@ -18,12 +19,14 @@ void main() {
     float span = (cell.flags & 1u) != 0u ? 2.0 : 1.0;
     cell_bounds = vec4(cell_origin, cell_origin + vec2(span * grid.cell_width, grid.cell_height));
     visible = cell.glyph == 0xffffffffu ? 0u : 1u;
-    Glyph glyph = glyphs[cell.glyph == 0xffffffffu ? 0u : cell.glyph];
+    graphic = visible != 0u && (cell.glyph & 0x80000000u) != 0u ? cell.glyph & 0x7fffffffu : 0u;
+    Glyph glyph = glyphs[visible == 0u || graphic != 0u ? 0u : cell.glyph];
     vec2 corners[4] = vec2[](vec2(0,0), vec2(1,0), vec2(0,1), vec2(1,1));
     vec2 corner = corners[gl_VertexIndex];
     vec2 origin = vec2(float(col) * grid.cell_width + glyph.size_bearing.z + float(grid.offset_x),
                        float(row) * grid.cell_height + grid.ascent - glyph.size_bearing.w + float(grid.offset_y));
     vec2 pixel = origin + corner * glyph.size_bearing.xy;
+    if (graphic != 0u) pixel = vec2(col, row) * vec2(grid.cell_width, grid.cell_height) + corner * vec2(grid.cell_width, grid.cell_height);
     gl_Position = vec4(pixel.x * 2.0 / (float(grid.cols) * grid.cell_width) - 1.0,
                        pixel.y * 2.0 / (float(grid.rows) * grid.cell_height) - 1.0, 0.0, 1.0);
     uv = mix(glyph.uv.xy, glyph.uv.zw, corner);
