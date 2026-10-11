@@ -82,6 +82,12 @@ change the size during the session (fresh rasterization, rebuilt atlas,
 window and PTY geometry updated); `Ctrl+0` restores the configured startup
 size. The TOML value itself never changes at runtime.
 
+Braille, box drawing and block elements are drawn from cell geometry, so plots
+and TUI borders remain aligned across font changes and configured spacing.
+Real style faces and complete-grapheme fallback retain the primary grid metrics.
+See [Cell graphics and font routing](docs/CELL_GRAPHICS.md) for behavior,
+regression coverage and limits.
+
 ## Local install
 
 ```sh
