@@ -17,6 +17,24 @@ const ATLAS_SIZE: u32 = 1024;
 const MAX_COLS: usize = MAX_GRID_COLUMNS;
 const MAX_ROWS: usize = MAX_GRID_ROWS;
 
+// Glyph indices occupy at most 16 bits. A high-bit tag selects cell geometry
+// in the shader without allocating atlas pixels or changing terminal content.
+const GRAPHIC_TAG: u32 = 0x8000_0000;
+
+fn graphic_cell(cell: Cell, grapheme: Option<&str>, palette: &Palette) -> Option<GpuCell> {
+    if !matches!(cell.content, 0x2500..=0x259f | 0x2800..=0x28ff)
+        || grapheme.is_some_and(|text| text.chars().count() != 1)
+    {
+        return None;
+    }
+    Some(GpuCell {
+        glyph: GRAPHIC_TAG | cell.content,
+        fg: color(palette, cell.fg, true),
+        bg: color(palette, cell.bg, false),
+        flags: cell.flags,
+    })
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
 pub struct GpuCell {
@@ -432,6 +450,14 @@ impl OffscreenRenderer {
                                 bg: color(&self.palette, cell.bg, false),
                                 flags: cell.flags,
                             };
+                            continue;
+                        }
+                        if let Some(graphic) = graphic_cell(
+                            cell,
+                            terminal.viewport_stored_grapheme(row, column),
+                            &self.palette,
+                        ) {
+                            cells[row * cols + column] = graphic;
                             continue;
                         }
                         let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
@@ -1236,6 +1262,9 @@ impl Renderer {
                 bg: color(&self.palette, cell.bg, false),
                 flags: cell.flags,
             });
+        }
+        if let Some(graphic) = graphic_cell(cell, grapheme, &self.palette) {
+            return Ok(graphic);
         }
         let ch = char::from_u32(cell.content).unwrap_or('\u{fffd}');
         let bold = cell.flags().contains(CellFlags::BOLD);
