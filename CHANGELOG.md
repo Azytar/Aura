@@ -70,9 +70,11 @@ per commit.
   configuration can seed terminal state without reaching into private fields.
 - Selection details: a double or triple click followed by a drag keeps
   extending by whole words or lines, dragging past an edge scrolls the
-  view, releasing the button publishes the selection as the X11 PRIMARY
-  selection, and `Shift+Insert` or a middle click pastes it back. A
-  keystroke clears the local selection instead of leaving a stale highlight.
+  view on a repeating tick while the pointer stays outside (faster the
+  further out it is), releasing the button publishes the selection as the
+  X11 PRIMARY selection, and `Shift+Insert` or a middle click pastes it
+  back. A keystroke clears the local selection instead of leaving a stale
+  highlight.
 
 ### Fixed
 
