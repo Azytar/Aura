@@ -94,6 +94,10 @@ install -Dm644 aura.desktop /usr/share/applications/aura.desktop
 - `Ctrl+Plus` / `Ctrl+Minus` change the runtime font size by 1.0 px
   (clamped to 6-72 px); `Ctrl+0` restores the configured `font.size`.
 - `Ctrl+Shift+C` copy selection, `Ctrl+Shift+V` paste.
+- Local mouse selection: click and drag, double click for a word, triple
+  click for a line; dragging past an edge scrolls the view. Releasing a
+  selection publishes it as the X11 PRIMARY selection; `Shift+Insert` or a
+  middle click pastes that selection.
 - `Shift+PageUp` / `Shift+PageDown` scrollback, `Ctrl+Shift+Home` top,
   `Ctrl+Shift+End` bottom.
 
