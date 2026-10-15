@@ -349,14 +349,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         .filter(|(time, detail, old, _)| {
                                             *detail == button.detail
                                                 && button.time.wrapping_sub(*time) <= 400
-                                                && old.row == point.row
+                                                && old.line == point.line
                                                 && old.column.abs_diff(point.column) <= 1
                                         })
                                         .map_or(1, |(_, _, _, count)| count % 3 + 1);
                                     last_click = Some((button.time, button.detail, point, count));
                                     match count {
-                                        2 => terminal.select_word(point),
-                                        3 => terminal.select_line(point.row),
+                                        2 => terminal.set_selection_words(point, point),
+                                        3 => terminal.set_selection_lines(point, point),
                                         _ => {
                                             selection_anchor = Some(point);
                                             terminal.set_selection(point, point);
@@ -1368,10 +1368,14 @@ fn selection_point(
     padding: [u32; 2],
 ) -> SelectionPoint {
     let (column, row) = cell_position(x, y, metrics, padding);
-    SelectionPoint {
-        row: row.min(terminal.active_grid().height() - 1),
-        column: column.min(terminal.active_grid().width() - 1),
-    }
+    let row = row.min(terminal.active_grid().height() - 1);
+    let column = column.min(terminal.active_grid().width() - 1);
+    // Anchors are absolute buffer lines, not viewport rows: they must keep
+    // naming the same content while the viewport scrolls under the drag.
+    let line = terminal
+        .viewport_line(row)
+        .unwrap_or_else(|| terminal.active_grid().first_line());
+    SelectionPoint { line, column }
 }
 
 #[cfg(test)]

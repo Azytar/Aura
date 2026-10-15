@@ -47,9 +47,12 @@ pub enum CursorStyle {
     Bar,
 }
 
+/// A point in the retained buffer. `line` is an absolute line number that
+/// keeps naming the same content while the viewport scrolls; it only loses
+/// meaning when trimming drops that content. `column` indexes a cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SelectionPoint {
-    pub row: usize,
+    pub line: u64,
     pub column: usize,
 }
 
@@ -323,6 +326,11 @@ impl Terminal {
         }
     }
 
+    /// Absolute line number shown at a viewport row of the active screen.
+    pub fn viewport_line(&self, row: usize) -> Option<u64> {
+        self.active_grid().viewport_line(row)
+    }
+
     pub fn page_up(&mut self) {
         if self.is_alternate_screen() {
             return;
@@ -366,41 +374,64 @@ impl Terminal {
     }
 
     pub fn selection(&self) -> Option<(SelectionPoint, SelectionPoint)> {
-        self.selection
+        self.normalized_selection()
     }
 
+    /// Selects the cell rectangle between two buffer points.
     pub fn set_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
-        let width = self.active_grid().width();
-        let height = self.active_grid().height();
+        let grid = self.grid.active();
+        let width = grid.width();
+        let first = grid.first_line();
+        let last = grid.last_line();
         let clamp = |point: SelectionPoint| SelectionPoint {
-            row: point.row.min(height - 1),
+            line: point.line.clamp(first, last),
             column: point.column.min(width - 1),
         };
-        let next = (clamp(anchor), clamp(focus));
-        let old = self.selection;
-        self.selection = Some(next);
-        for (start, end) in [old, Some(next)].into_iter().flatten() {
-            for row in start.row.min(end.row)..=start.row.max(end.row) {
-                self.grid.active_mut().mark_row_dirty(row);
-            }
-        }
+        self.store_selection(clamp(anchor), clamp(focus));
     }
 
-    pub fn select_line(&mut self, row: usize) {
-        let last = self.active_grid().width() - 1;
+    /// Selects whole words: the start endpoint grows left and the end endpoint
+    /// grows right to the bounds of the same-class run (alphanumeric and `_`
+    /// versus everything else) under each one.
+    pub fn set_selection_words(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        let (anchor_start, _) = self.word_bounds(anchor);
+        let (_, focus_end) = self.word_bounds(focus);
         self.set_selection(
-            SelectionPoint { row, column: 0 },
-            SelectionPoint { row, column: last },
+            SelectionPoint {
+                line: anchor.line,
+                column: anchor_start,
+            },
+            SelectionPoint {
+                line: focus.line,
+                column: focus_end,
+            },
         );
     }
 
-    pub fn select_word(&mut self, point: SelectionPoint) {
-        let row = point.row.min(self.active_grid().height() - 1);
-        let column = point.column.min(self.active_grid().width() - 1);
-        let word_class = |column| {
-            self.grid
-                .active()
-                .viewport_row(row)
+    /// Selects whole lines: each endpoint grows to the full row width.
+    pub fn set_selection_lines(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        let last = self.active_grid().width() - 1;
+        self.set_selection(
+            SelectionPoint {
+                line: anchor.line,
+                column: 0,
+            },
+            SelectionPoint {
+                line: focus.line,
+                column: last,
+            },
+        );
+    }
+
+    /// Bounds of the contiguous same-class run at `point`. Uses absolute lines
+    /// so double-clicking a word still names the same cells after scrolling.
+    fn word_bounds(&self, point: SelectionPoint) -> (usize, usize) {
+        let grid = self.grid.active();
+        let width = grid.width();
+        let line = point.line.clamp(grid.first_line(), grid.last_line());
+        let column = point.column.min(width - 1);
+        let word_class = |column: usize| {
+            grid.row_at_line(line)
                 .and_then(|row| row.grapheme_at(column))
                 .and_then(|text| text.chars().next())
                 .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
@@ -411,57 +442,98 @@ impl Terminal {
             start -= 1;
         }
         let mut end = column;
-        while end + 1 < self.active_grid().width() && word_class(end + 1) == class {
+        while end + 1 < width && word_class(end + 1) == class {
             end += 1;
         }
-        self.set_selection(
-            SelectionPoint { row, column: start },
-            SelectionPoint { row, column: end },
-        );
+        (start, end)
     }
 
-    pub fn clear_selection(&mut self) {
-        if let Some((start, end)) = self.selection.take() {
-            for row in start.row.min(end.row)..=start.row.max(end.row) {
+    fn store_selection(&mut self, anchor: SelectionPoint, focus: SelectionPoint) {
+        let old = self.selection.replace((anchor, focus));
+        for (start, end) in [old, Some((anchor, focus))].into_iter().flatten() {
+            self.mark_line_range_dirty(start.line.min(end.line), start.line.max(end.line));
+        }
+    }
+
+    /// Marks the visible rows touching `start..=end`; lines outside the
+    /// viewport have no pixels to repaint.
+    fn mark_line_range_dirty(&mut self, start: u64, end: u64) {
+        let (from, to) = {
+            let grid = self.grid.active();
+            let (Some(first), Some(last)) =
+                (grid.viewport_line(0), grid.viewport_line(grid.height() - 1))
+            else {
+                return;
+            };
+            (start.max(first), end.min(last))
+        };
+        for line in from..=to {
+            if let Some(row) = self.grid.active().line_viewport(line) {
                 self.grid.active_mut().mark_row_dirty(row);
             }
         }
     }
 
-    pub fn selection_text(&self) -> Option<String> {
+    pub fn clear_selection(&mut self) {
+        if let Some((start, end)) = self.selection.take() {
+            self.mark_line_range_dirty(start.line.min(end.line), start.line.max(end.line));
+        }
+    }
+
+    /// The selection clamped to the lines still retained. A selection whose
+    /// lines were trimmed away entirely reports `None`.
+    fn normalized_selection(&self) -> Option<(SelectionPoint, SelectionPoint)> {
         let (anchor, focus) = self.selection?;
-        let (start, end) = if (anchor.row, anchor.column) <= (focus.row, focus.column) {
+        let (mut start, mut end) = if (anchor.line, anchor.column) <= (focus.line, focus.column) {
             (anchor, focus)
         } else {
             (focus, anchor)
         };
-        let mut output = String::new();
-        for row_index in start.row..=end.row {
-            let row = self.grid.active().viewport_row(row_index)?;
-            let first = if row_index == start.row {
-                start.column
-            } else {
-                0
+        let grid = self.grid.active();
+        let first = grid.first_line();
+        let last = grid.last_line();
+        if end.line < first || start.line > last {
+            return None;
+        }
+        if start.line < first {
+            start = SelectionPoint {
+                line: first,
+                column: 0,
             };
-            let last = if row_index == end.row {
+        }
+        if end.line > last {
+            end = SelectionPoint {
+                line: last,
+                column: grid.width() - 1,
+            };
+        }
+        Some((start, end))
+    }
+
+    pub fn selection_text(&self) -> Option<String> {
+        let (start, end) = self.normalized_selection()?;
+        let grid = self.grid.active();
+        let mut output = String::new();
+        for line in start.line..=end.line {
+            let row = grid.row_at_line(line)?;
+            let first = if line == start.line { start.column } else { 0 };
+            let last = if line == end.line {
                 end.column
             } else {
                 row.cells().len() - 1
             };
-            let mut line = String::new();
+            let mut text = String::new();
             for column in first..=last {
                 if let Some(grapheme) = row.grapheme_at(column) {
-                    line.push_str(&grapheme);
+                    text.push_str(&grapheme);
                 } else {
-                    line.push(' ');
+                    text.push(' ');
                 }
             }
-            output.push_str(line.trim_end());
-            if row_index < end.row
-                && self
-                    .grid
-                    .active()
-                    .viewport_row(row_index + 1)
+            output.push_str(text.trim_end());
+            if line < end.line
+                && grid
+                    .row_at_line(line + 1)
                     .is_some_and(|next| !next.is_wrapped())
             {
                 output.push('\n');
@@ -470,12 +542,36 @@ impl Terminal {
         Some(output)
     }
 
+    /// Linear range over the visible grid for the renderer's selection
+    /// highlight: the visible intersection of the selection, or `None` when
+    /// none of it is on screen.
     pub fn selection_cell_range(&self) -> Option<(u32, u32)> {
-        let (anchor, focus) = self.selection?;
-        let width = self.active_grid().width();
-        let start = anchor.row * width + anchor.column;
-        let end = focus.row * width + focus.column;
-        Some((start.min(end) as u32, start.max(end) as u32))
+        let (start, end) = self.normalized_selection()?;
+        let grid = self.grid.active();
+        let width = grid.width() as u32;
+        let first_visible = grid.viewport_line(0)?;
+        let last_visible = grid.viewport_line(grid.height() - 1)?;
+        if end.line < first_visible || start.line > last_visible {
+            return None;
+        }
+        let top_line = start.line.max(first_visible);
+        let bottom_line = end.line.min(last_visible);
+        let top_row = grid.line_viewport(top_line)? as u32;
+        let bottom_row = grid.line_viewport(bottom_line)? as u32;
+        let start_column = if top_line == start.line {
+            start.column as u32
+        } else {
+            0
+        };
+        let end_column = if bottom_line == end.line {
+            end.column as u32
+        } else {
+            width - 1
+        };
+        Some((
+            top_row * width + start_column,
+            bottom_row * width + end_column,
+        ))
     }
 
     pub fn encode_paste(&self, bytes: &[u8]) -> Vec<u8> {
@@ -519,17 +615,14 @@ impl Terminal {
             return Ok(());
         }
         self.grid.resize(width, height)?;
+        // Reflow rewrites logical lines, so a selection made against the old
+        // geometry no longer names the same cells; drop it instead of keeping
+        // a highlight whose text would silently change.
+        self.clear_selection();
         let old_width = self.tabs.len();
         self.tabs.resize(width, false);
         for col in old_width..width {
             self.tabs[col] = col != 0 && col % 8 == 0;
-        }
-        if let Some((anchor, focus)) = self.selection {
-            let clamp = |point: SelectionPoint| SelectionPoint {
-                row: point.row.min(height - 1),
-                column: point.column.min(width - 1),
-            };
-            self.selection = Some((clamp(anchor), clamp(focus)));
         }
         self.top_margin = 0;
         self.bottom_margin = height - 1;
@@ -1958,13 +2051,114 @@ mod tests {
         feed(&mut terminal, "café\r\nnext".as_bytes());
         let before = terminal.active_grid().cell(0, 0);
         terminal.set_selection(
-            SelectionPoint { row: 0, column: 0 },
-            SelectionPoint { row: 1, column: 3 },
+            SelectionPoint { line: 0, column: 0 },
+            SelectionPoint { line: 1, column: 3 },
         );
         assert_eq!(terminal.selection_text().as_deref(), Some("café\nnext"));
         assert_eq!(terminal.active_grid().cell(0, 0), before);
         assert_eq!(terminal.selection_cell_range(), Some((0, 11)));
         terminal.clear_selection();
+        assert!(terminal.selection().is_none());
+    }
+
+    #[test]
+    fn selection_keeps_naming_the_same_lines_while_the_viewport_scrolls() {
+        let mut terminal = terminal(6, 2);
+        feed(&mut terminal, b"aa\r\nbb\r\ncc\r\ndd");
+        // Live view shows cc/dd; aa/bb are in scrollback.
+        assert_eq!(terminal.viewport_line(0), Some(2));
+        terminal.set_selection(
+            SelectionPoint { line: 2, column: 0 },
+            SelectionPoint { line: 2, column: 1 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("cc"));
+        assert_eq!(terminal.selection_cell_range(), Some((0, 1)));
+        terminal.scroll_view_up(1);
+        assert_eq!(terminal.viewport_line(0), Some(1));
+        assert_eq!(terminal.selection_text().as_deref(), Some("cc"));
+        assert_eq!(terminal.selection_cell_range(), Some((6, 7)));
+        terminal.scroll_view_up(1);
+        assert_eq!(terminal.selection_text().as_deref(), Some("cc"));
+        assert_eq!(terminal.selection_cell_range(), None);
+        terminal.scroll_view_down(2);
+        assert_eq!(terminal.selection_cell_range(), Some((0, 1)));
+    }
+
+    #[test]
+    fn trimming_scrollback_clamps_or_drops_an_anchored_selection() {
+        let mut terminal = terminal(4, 2);
+        terminal.set_scrollback_limit(1);
+        feed(&mut terminal, b"aa\r\nbb\r\ncc");
+        // Scrollback [aa], screen [bb, cc].
+        terminal.set_selection(
+            SelectionPoint { line: 0, column: 0 },
+            SelectionPoint { line: 0, column: 1 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("aa"));
+        // One scroll drops aa; a selection of it cannot survive.
+        feed(&mut terminal, b"\r\ndd");
+        assert_eq!(terminal.active_grid().first_line(), 1);
+        assert!(terminal.selection().is_none());
+        assert_eq!(terminal.selection_text(), None);
+        // A selection on a retained line survives even when it leaves the view.
+        terminal.set_selection(
+            SelectionPoint { line: 2, column: 0 },
+            SelectionPoint { line: 2, column: 1 },
+        );
+        feed(&mut terminal, b"\r\nee");
+        assert_eq!(terminal.active_grid().first_line(), 2);
+        assert_eq!(terminal.selection_text().as_deref(), Some("cc"));
+        assert_eq!(terminal.selection_cell_range(), None);
+        // Trimming the selected line itself drops the selection.
+        feed(&mut terminal, b"\r\nff");
+        assert_eq!(terminal.active_grid().first_line(), 3);
+        assert!(terminal.selection().is_none());
+    }
+
+    #[test]
+    fn word_and_line_selection_extend_endpoints_over_the_buffer() {
+        let mut terminal = terminal(10, 2);
+        feed(&mut terminal, b"foo bar\r\nbaz");
+        terminal.set_selection_words(
+            SelectionPoint { line: 0, column: 1 },
+            SelectionPoint { line: 0, column: 5 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("foo bar"));
+        terminal.set_selection_words(
+            SelectionPoint { line: 1, column: 1 },
+            SelectionPoint { line: 1, column: 1 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("baz"));
+        terminal.set_selection_lines(
+            SelectionPoint { line: 0, column: 2 },
+            SelectionPoint { line: 1, column: 1 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("foo bar\nbaz"));
+    }
+
+    #[test]
+    fn selection_cell_range_returns_only_the_visible_intersection() {
+        let mut terminal = terminal(4, 2);
+        feed(&mut terminal, b"aa\r\nbb\r\ncc\r\ndd");
+        terminal.set_selection(
+            SelectionPoint { line: 0, column: 0 },
+            SelectionPoint { line: 3, column: 1 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("aa\nbb\ncc\ndd"));
+        // Live view shows lines 2..=3: the highlight starts at its own row 0.
+        assert_eq!(terminal.selection_cell_range(), Some((0, 5)));
+    }
+
+    #[test]
+    fn resize_drops_the_selection_instead_of_keeping_stale_cells() {
+        let mut terminal = terminal(8, 2);
+        feed(&mut terminal, b"hello");
+        terminal.set_selection(
+            SelectionPoint { line: 0, column: 0 },
+            SelectionPoint { line: 0, column: 4 },
+        );
+        assert_eq!(terminal.selection_text().as_deref(), Some("hello"));
+        terminal.resize(6, 2).unwrap();
         assert!(terminal.selection().is_none());
     }
 
