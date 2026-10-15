@@ -68,6 +68,11 @@ per commit.
   to parse and silently lost all of its other settings.
 - `Terminal::set_modes` and `Terminal::set_scrollback_limit` on the core, so
   configuration can seed terminal state without reaching into private fields.
+- Selection details: a double or triple click followed by a drag keeps
+  extending by whole words or lines, dragging past an edge scrolls the
+  view, releasing the button publishes the selection as the X11 PRIMARY
+  selection, and `Shift+Insert` or a middle click pastes it back. A
+  keystroke clears the local selection instead of leaving a stale highlight.
 
 ### Fixed
 
@@ -79,6 +84,11 @@ per commit.
 - The offscreen renderer ignored the terminal's selection entirely (it
   always passed `u32::MAX`), so the swapchain path's selection behaviour was
   never exercised by tests. The offscreen target now mirrors it.
+- Selections were anchored to viewport rows, so scrolling after selecting
+  made the highlight and the copied text name different lines. Selections
+  now carry absolute buffer line numbers: they follow their content while
+  the viewport scrolls, clamp when history is trimmed, and are dropped on
+  reflow because a resize renumbers lines.
 
 ### Changed
 
