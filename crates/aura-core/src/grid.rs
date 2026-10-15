@@ -149,6 +149,11 @@ pub enum GridError {
 }
 
 /// A fixed-size screen backed by circular physical rows.
+///
+/// Rows are numbered from the first line the grid ever held. `first_line`
+/// advances whenever old rows are dropped, so a line number keeps identifying
+/// the same content while the viewport scrolls and only loses meaning once
+/// that content itself is trimmed away.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grid {
     width: usize,
@@ -159,6 +164,7 @@ pub struct Grid {
     scrollback: VecDeque<Row>,
     scrollback_limit: usize,
     viewport_offset: usize,
+    first_line: u64,
 }
 
 impl Grid {
@@ -180,6 +186,7 @@ impl Grid {
             scrollback: VecDeque::new(),
             scrollback_limit: DEFAULT_SCROLLBACK_ROWS,
             viewport_offset: 0,
+            first_line: 0,
         };
         grid.mark_all_dirty();
         Ok(grid)
@@ -263,6 +270,47 @@ impl Grid {
         }
     }
 
+    /// Absolute number of the earliest retained line. Dropping old history
+    /// advances this origin instead of renumbering the surviving lines.
+    pub const fn first_line(&self) -> u64 {
+        self.first_line
+    }
+
+    /// Absolute number of the last retained line.
+    pub fn last_line(&self) -> u64 {
+        self.first_line + (self.scrollback.len() + self.height) as u64 - 1
+    }
+
+    /// Returns a row by its absolute line number.
+    pub fn row_at_line(&self, line: u64) -> Option<&Row> {
+        let index = usize::try_from(line.checked_sub(self.first_line)?).ok()?;
+        if index < self.scrollback.len() {
+            self.scrollback.get(index)
+        } else {
+            self.row(index - self.scrollback.len())
+        }
+    }
+
+    /// Absolute line number shown at a viewport row.
+    pub fn viewport_line(&self, row: usize) -> Option<u64> {
+        if row >= self.height {
+            return None;
+        }
+        let total = self.scrollback.len() + self.height;
+        let end = total.saturating_sub(self.viewport_offset);
+        let start = end.saturating_sub(self.height);
+        Some(self.first_line + (start + row) as u64)
+    }
+
+    /// Viewport row currently showing an absolute line, when it is visible.
+    pub fn line_viewport(&self, line: u64) -> Option<usize> {
+        let index = usize::try_from(line.checked_sub(self.first_line)?).ok()?;
+        let total = self.scrollback.len() + self.height;
+        let end = total.saturating_sub(self.viewport_offset);
+        let start = end.saturating_sub(self.height);
+        (index >= start && index < end).then_some(index - start)
+    }
+
     pub const fn viewport_offset(&self) -> usize {
         self.viewport_offset
     }
@@ -283,6 +331,7 @@ impl Grid {
         self.scrollback_limit = limit;
         while self.scrollback.len() > limit {
             self.scrollback.pop_front();
+            self.first_line += 1;
             self.viewport_offset = self.viewport_offset.saturating_sub(1);
         }
         self.set_viewport_offset(self.viewport_offset);
@@ -308,6 +357,7 @@ impl Grid {
                 .push_back(self.row(row).expect("visible row").clone());
             if self.scrollback.len() > self.scrollback_limit {
                 self.scrollback.pop_front();
+                self.first_line += 1;
                 self.viewport_offset = self.viewport_offset.saturating_sub(1);
             }
         }
@@ -618,6 +668,7 @@ impl Grid {
 
     /// Discards saved rows and returns the viewport to the live screen.
     pub fn clear_scrollback(&mut self) {
+        self.first_line += self.scrollback.len() as u64;
         self.scrollback.clear();
         self.set_viewport_offset(0);
     }
@@ -917,6 +968,9 @@ impl Grid {
         let desired_start = reflowed.len().saturating_sub(new_height);
         let start = new_cursor.map_or(desired_start, |(row, _)| desired_start.min(row));
         let mut scrollback: VecDeque<Row> = reflowed.drain(..start).collect();
+        // Reflow rebuilds the buffer, so line numbers are only guaranteed
+        // monotonic: advance the origin by whatever the new limit discards.
+        self.first_line += scrollback.len().saturating_sub(self.scrollback_limit) as u64;
         while scrollback.len() > self.scrollback_limit {
             scrollback.pop_front();
         }

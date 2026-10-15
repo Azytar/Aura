@@ -695,8 +695,8 @@ fn selection_uses_the_configured_palette_colour() {
     let mut terminal = Terminal::new(3, 1).expect("create terminal grid");
     terminal.process(b"   ");
     terminal.set_selection(
-        aura_core::SelectionPoint { row: 0, column: 1 },
-        aura_core::SelectionPoint { row: 0, column: 1 },
+        aura_core::SelectionPoint { line: 0, column: 1 },
+        aura_core::SelectionPoint { line: 0, column: 1 },
     );
     let mut renderer = OffscreenRenderer::new(width, height).expect("create offscreen renderer");
     renderer.set_palette(aura_config::Palette::DARK);
