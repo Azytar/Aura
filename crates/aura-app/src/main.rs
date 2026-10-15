@@ -177,6 +177,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut invalidated = false;
     let mut cursor_blink_on = true;
     let mut selection_anchor = None;
+    let mut selection_kind = SelectionKind::Cell;
     let mut last_click: Option<(u32, u8, SelectionPoint, u8)> = None;
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
@@ -291,7 +292,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     && modifiers.contains(KeyButMask::SHIFT)
                                     && matches!(sym, 0x76 | 0x56)
                                 {
-                                    clipboard.request_paste(&connection, window)?;
+                                    clipboard.request_paste(
+                                        &connection,
+                                        window,
+                                        clipboard.clipboard_atom,
+                                    )?;
+                                    continue;
+                                }
+                                if modifiers.contains(KeyButMask::SHIFT) && sym == 0xff63 {
+                                    // Alacritty's default: Shift+Insert pastes
+                                    // the PRIMARY selection without reaching the
+                                    // application.
+                                    clipboard.request_paste(
+                                        &connection,
+                                        window,
+                                        clipboard.primary_atom,
+                                    )?;
                                     continue;
                                 }
                                 if modifiers.contains(KeyButMask::CONTROL)
@@ -320,6 +336,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(bytes) =
                                     keyboard.bytes(sym, modifiers, terminal.modes())
                                 {
+                                    // Typing belongs to the application now;
+                                    // a lingering highlight would confuse it
+                                    // with fresh output.
+                                    terminal.clear_selection();
                                     input.push(&bytes);
                                     cursor_blink_on = true;
                                     invalidated = true;
@@ -335,6 +355,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         terminal.scroll_view_down(3);
                                     }
                                     invalidated = true;
+                                } else if terminal.modes().mouse_tracking == MouseTracking::Off
+                                    && button.detail == 2
+                                {
+                                    // X11 convention: middle click pastes PRIMARY.
+                                    clipboard.request_paste(
+                                        &connection,
+                                        window,
+                                        clipboard.primary_atom,
+                                    )?;
                                 } else if terminal.modes().mouse_tracking == MouseTracking::Off
                                     && button.detail == 1
                                 {
@@ -354,12 +383,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         })
                                         .map_or(1, |(_, _, _, count)| count % 3 + 1);
                                     last_click = Some((button.time, button.detail, point, count));
-                                    match count {
-                                        2 => terminal.set_selection_words(point, point),
-                                        3 => terminal.set_selection_lines(point, point),
-                                        _ => {
-                                            selection_anchor = Some(point);
-                                            terminal.set_selection(point, point);
+                                    selection_anchor = Some(point);
+                                    selection_kind = match count {
+                                        2 => SelectionKind::Word,
+                                        3 => SelectionKind::Line,
+                                        _ => SelectionKind::Cell,
+                                    };
+                                    match selection_kind {
+                                        SelectionKind::Cell => terminal.set_selection(point, point),
+                                        SelectionKind::Word => {
+                                            terminal.set_selection_words(point, point)
+                                        }
+                                        SelectionKind::Line => {
+                                            terminal.set_selection_lines(point, point)
                                         }
                                     }
                                     invalidated = true;
@@ -382,6 +418,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Event::ButtonRelease(button) => {
                                 if terminal.modes().mouse_tracking == MouseTracking::Off {
                                     selection_anchor = None;
+                                    // Own the PRIMARY selection like any X11
+                                    // client, so other applications can paste
+                                    // the highlighted text with a middle click.
+                                    if let Some(text) = terminal.selection_text() {
+                                        clipboard.set_text(
+                                            &connection,
+                                            window,
+                                            clipboard.primary_atom,
+                                            text.as_bytes(),
+                                        )?;
+                                    }
                                 } else if terminal.modes().mouse_tracking == MouseTracking::Press {
                                     continue;
                                 } else if let Some(bytes) = mouse_report(
@@ -421,6 +468,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 } else if terminal.modes().mouse_tracking != MouseTracking::Drag
                                     && let Some(anchor) = selection_anchor
                                 {
+                                    // Dragging past the top or bottom edge scrolls
+                                    // the view, so off-screen lines stay reachable.
+                                    let padding_y = config.window.padding_y as i32;
+                                    let bottom = i32::from(last_winsize.pixel_height) - padding_y;
+                                    if i32::from(motion.event_y) < padding_y {
+                                        terminal.scroll_view_up(1);
+                                    } else if i32::from(motion.event_y) >= bottom {
+                                        terminal.scroll_view_down(1);
+                                    }
                                     let point = selection_point(
                                         motion.event_x,
                                         motion.event_y,
@@ -428,7 +484,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         &terminal,
                                         [config.window.padding_x, config.window.padding_y],
                                     );
-                                    terminal.set_selection(anchor, point);
+                                    match selection_kind {
+                                        SelectionKind::Cell => {
+                                            terminal.set_selection(anchor, point)
+                                        }
+                                        SelectionKind::Word => {
+                                            terminal.set_selection_words(anchor, point)
+                                        }
+                                        SelectionKind::Line => {
+                                            terminal.set_selection_lines(anchor, point)
+                                        }
+                                    }
                                     invalidated = true;
                                 }
                             }
@@ -1047,11 +1113,12 @@ impl Clipboard {
         &self,
         connection: &XCBConnection,
         window: u32,
+        selection: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         connection
             .convert_selection(
                 window,
-                self.clipboard_atom,
+                selection,
                 self.utf8_atom,
                 self.property_atom,
                 x11rb::CURRENT_TIME,
@@ -1358,6 +1425,15 @@ fn cell_position(x: i16, y: i16, metrics: CellMetrics, padding: [u32; 2]) -> (us
         (x / u64::from(metrics.width.max(1))) as usize,
         (y / u64::from(metrics.height.max(1))) as usize,
     )
+}
+
+/// What a click-drag is selecting. A double click widens both endpoints to
+/// whole words, a triple click to whole lines.
+#[derive(Clone, Copy)]
+enum SelectionKind {
+    Cell,
+    Word,
+    Line,
 }
 
 fn selection_point(
