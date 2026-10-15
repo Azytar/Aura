@@ -159,6 +159,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if unsafe { libc::timerfd_settime(timer, 0, &interval, std::ptr::null_mut()) } == -1 {
         return Err(io::Error::last_os_error().into());
     }
+    let autoscroll_timer = unsafe {
+        libc::timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
+        )
+    };
+    if autoscroll_timer == -1 {
+        return Err(io::Error::last_os_error().into());
+    }
+    // SAFETY: timerfd_create returned a new descriptor owned by this scope.
+    let _autoscroll_owner = unsafe { OwnedFd::from_raw_fd(autoscroll_timer) };
     let x_fd = connection.as_raw_fd();
     let pty_fd = pty.master_fd()?;
     epoll_add(epoll, x_fd, 1, libc::EPOLLIN as u32)?;
@@ -169,6 +180,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         libc::EPOLLIN as u32 | libc::EPOLLHUP as u32,
     )?;
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
+    epoll_add(epoll, autoscroll_timer, 5, libc::EPOLLIN as u32)?;
     epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
     let mut input = input::Input::default();
     let mut watching_write = false;
@@ -178,6 +190,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut cursor_blink_on = true;
     let mut selection_anchor = None;
     let mut selection_kind = SelectionKind::Cell;
+    let mut autoscroll_dir: Option<i8> = None;
+    let mut pointer = (0i16, 0i16);
     let mut last_click: Option<(u32, u8, SelectionPoint, u8)> = None;
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
@@ -418,6 +432,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Event::ButtonRelease(button) => {
                                 if terminal.modes().mouse_tracking == MouseTracking::Off {
                                     selection_anchor = None;
+                                    if autoscroll_dir.take().is_some() {
+                                        set_autoscroll_timer(autoscroll_timer, false)?;
+                                    }
                                     // Own the PRIMARY selection like any X11
                                     // client, so other applications can paste
                                     // the highlighted text with a middle click.
@@ -469,17 +486,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     && let Some(anchor) = selection_anchor
                                 {
                                     // Dragging past the top or bottom edge scrolls
-                                    // the view, so off-screen lines stay reachable.
+                                    // the view. The repeating tick keeps scrolling
+                                    // while the pointer rests outside, so a still
+                                    // hand never stalls a long selection.
                                     let padding_y = config.window.padding_y as i32;
                                     let bottom = i32::from(last_winsize.pixel_height) - padding_y;
-                                    if i32::from(motion.event_y) < padding_y {
+                                    let y = i32::from(motion.event_y);
+                                    let direction = if y < padding_y {
+                                        Some(-1)
+                                    } else if y >= bottom {
+                                        Some(1)
+                                    } else {
+                                        None
+                                    };
+                                    if direction != autoscroll_dir {
+                                        set_autoscroll_timer(
+                                            autoscroll_timer,
+                                            direction.is_some(),
+                                        )?;
+                                        autoscroll_dir = direction;
+                                    }
+                                    if direction == Some(-1) {
                                         terminal.scroll_view_up(1);
-                                    } else if i32::from(motion.event_y) >= bottom {
+                                    } else if direction == Some(1) {
                                         terminal.scroll_view_down(1);
                                     }
+                                    pointer = (motion.event_x, motion.event_y);
                                     let point = selection_point(
-                                        motion.event_x,
-                                        motion.event_y,
+                                        pointer.0,
+                                        pointer.1,
                                         configured_metrics(&font, &config),
                                         &terminal,
                                         [config.window.padding_x, config.window.padding_y],
@@ -574,6 +609,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 4 => running = false,
+                5 => {
+                    let mut expirations = 0u64;
+                    let _ = unsafe {
+                        libc::read(
+                            autoscroll_timer,
+                            (&mut expirations as *mut u64).cast(),
+                            size_of::<u64>(),
+                        )
+                    };
+                    if let (Some(direction), Some(anchor)) = (autoscroll_dir, selection_anchor) {
+                        let metrics = configured_metrics(&font, &config);
+                        let padding_y = config.window.padding_y as i32;
+                        let bottom = i32::from(last_winsize.pixel_height) - padding_y;
+                        // The further the pointer sits outside, the faster the
+                        // tick drags the view along, like Alacritty's velocity.
+                        let distance = if direction < 0 {
+                            padding_y - i32::from(pointer.1)
+                        } else {
+                            i32::from(pointer.1) - bottom
+                        };
+                        let cell = i32::try_from(metrics.height.max(1)).unwrap_or(i32::MAX);
+                        let extra = (distance / cell).clamp(0, 3);
+                        let lines = 1 + extra as usize;
+                        if direction < 0 {
+                            terminal.scroll_view_up(lines);
+                        } else {
+                            terminal.scroll_view_down(lines);
+                        }
+                        let point = selection_point(
+                            pointer.0,
+                            pointer.1,
+                            metrics,
+                            &terminal,
+                            [config.window.padding_x, config.window.padding_y],
+                        );
+                        match selection_kind {
+                            SelectionKind::Cell => terminal.set_selection(anchor, point),
+                            SelectionKind::Word => terminal.set_selection_words(anchor, point),
+                            SelectionKind::Line => terminal.set_selection_lines(anchor, point),
+                        }
+                        invalidated = true;
+                    } else {
+                        set_autoscroll_timer(autoscroll_timer, false)?;
+                        autoscroll_dir = None;
+                    }
+                }
                 _ => {}
             }
         }
@@ -930,6 +1011,27 @@ fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Starts or stops the repeating tick that keeps an edge drag scrolling while
+/// the pointer rests outside the viewport. Motion events alone stop arriving
+/// as soon as the hand stands still or the pointer reaches a screen edge.
+fn set_autoscroll_timer(fd: i32, enabled: bool) -> io::Result<()> {
+    let nanos = if enabled { 16_000_000 } else { 0 };
+    let spec = libc::itimerspec {
+        it_interval: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: nanos,
+        },
+        it_value: libc::timespec {
+            tv_sec: 0,
+            tv_nsec: nanos,
+        },
+    };
+    if unsafe { libc::timerfd_settime(fd, 0, &spec, std::ptr::null_mut()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn set_title(
