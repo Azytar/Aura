@@ -909,3 +909,25 @@ fn complete_emoji_clusters_reach_the_color_shader_and_preserve_cell_ownership() 
         }
     }
 }
+
+#[test]
+fn overwriting_a_wide_right_margin_pair_removes_its_spacer_pixels() {
+    if !require_gpu() {
+        return;
+    }
+    let mut font = Font::load(None, 18.0).unwrap();
+    let m = font.metrics();
+    let mut actual = Terminal::new(4, 1).unwrap();
+    actual.process("\x1b[?25lAB界".as_bytes());
+    let mut renderer = OffscreenRenderer::new(m.width * 4, m.height).unwrap();
+    renderer.render(&mut actual, &mut font).unwrap();
+    actual.process(b"\x08X");
+    let overwritten = renderer.render(&mut actual, &mut font).unwrap();
+    let mut expected = Terminal::new(4, 1).unwrap();
+    expected.process(b"\x1b[?25lABX");
+    let fresh = renderer.render(&mut expected, &mut font).unwrap();
+    assert!(
+        overwritten == fresh,
+        "wide glyph or spacer pixels survived overwriting the pair"
+    );
+}

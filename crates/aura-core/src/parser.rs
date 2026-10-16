@@ -131,6 +131,19 @@ impl Parser {
             return self.advance_utf8(byte);
         }
 
+        // C1 controls interrupt unfinished ESC/CSI sequences just like their
+        // seven-bit spellings. UTF-8 continuations and string payloads retain
+        // their own lexical rules and must never be dispatched here.
+        if (0x80..=0x9f).contains(&byte)
+            && !matches!(
+                self.state,
+                State::Osc | State::OscEscape | State::Dcs | State::DcsEscape
+            )
+        {
+            self.reset_sequence();
+            return self.begin_c1(byte);
+        }
+
         if byte == 0x18 || byte == 0x1a {
             self.reset_sequence();
             return None;
@@ -494,6 +507,27 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn c1_csi_restarts_each_incomplete_namespace_across_every_split() {
+        let expected = parse(b"\x1b[2;3HX");
+        for prefix in [
+            b"\x1b".as_slice(),
+            b"\x1b(",
+            b"\x1b[12;",
+            b"\x1b[ ",
+            b"\x1b[:",
+        ] {
+            let input = [prefix, b"\x9b2;3HX"].concat();
+            for split in 0..=input.len() {
+                let mut parser = Parser::new();
+                let mut events = Vec::new();
+                parser.feed(&input[..split], |event| events.push(event));
+                parser.feed(&input[split..], |event| events.push(event));
+                assert_eq!(events, expected, "prefix {prefix:?}, split {split}");
+            }
+        }
+    }
+
     #[test]
     fn utf8_continuations_in_control_strings_are_not_c1_terminators() {
         let input = "\x1b]0;ÜМ title\x1b\\X".as_bytes();

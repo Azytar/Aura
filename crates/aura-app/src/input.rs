@@ -23,7 +23,12 @@ impl Input {
     }
 
     pub fn flush(&mut self, mut write: impl FnMut(&[u8]) -> io::Result<usize>) -> io::Result<()> {
-        while !self.bytes.is_empty() {
+        // Bound syscalls, including EINTR retries, so signals or tiny writes
+        // cannot starve X11 events. Pending bytes keep EPOLLOUT armed.
+        for _ in 0..64 {
+            if self.bytes.is_empty() {
+                break;
+            }
             let (first, _) = self.bytes.as_slices();
             match write(first) {
                 Ok(0) => {
@@ -47,6 +52,92 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tiny_successful_writes_also_yield_and_resume_in_order() {
+        let mut input = Input::default();
+        let payload = "é中".repeat(500).into_bytes();
+        input.push(&payload);
+        let mut output = Vec::new();
+        input
+            .flush(|bytes| {
+                output.push(bytes[0]);
+                Ok(1)
+            })
+            .unwrap();
+        assert!(
+            input.pending(),
+            "one wake must not drain an arbitrarily slow writer"
+        );
+        while input.pending() {
+            input
+                .flush(|bytes| {
+                    output.push(bytes[0]);
+                    Ok(1)
+                })
+                .unwrap();
+        }
+        assert_eq!(output, payload);
+    }
+
+    #[test]
+    fn repeated_interruptions_yield_without_dropping_input() {
+        let mut input = Input::default();
+        input.push(b"keep");
+        let mut calls = 0;
+        input
+            .flush(|_| {
+                calls += 1;
+                assert!(
+                    calls <= 64,
+                    "flush starved the event loop on repeated EINTR"
+                );
+                Err(io::ErrorKind::Interrupted.into())
+            })
+            .unwrap();
+        assert!(input.pending());
+        let mut output = Vec::new();
+        input
+            .flush(|bytes| {
+                output.extend_from_slice(bytes);
+                Ok(bytes.len())
+            })
+            .unwrap();
+        assert_eq!(output, b"keep");
+    }
+
+    #[test]
+    fn fatal_write_errors_preserve_only_the_unaccepted_suffix() {
+        for kind in [io::ErrorKind::WriteZero, io::ErrorKind::BrokenPipe] {
+            let mut input = Input::default();
+            input.push("aéZ".as_bytes());
+            let mut output = Vec::new();
+            let mut calls = 0;
+            let error = input
+                .flush(|bytes| {
+                    calls += 1;
+                    if calls == 1 {
+                        output.extend_from_slice(&bytes[..2]);
+                        Ok(2)
+                    } else if kind == io::ErrorKind::WriteZero {
+                        Ok(0)
+                    } else {
+                        Err(kind.into())
+                    }
+                })
+                .unwrap_err();
+            assert_eq!(error.kind(), kind);
+            assert_eq!(calls, 2);
+            input
+                .flush(|bytes| {
+                    output.extend_from_slice(bytes);
+                    Ok(bytes.len())
+                })
+                .unwrap();
+            assert_eq!(output, "aéZ".as_bytes());
+            assert!(!input.pending());
+        }
+    }
 
     #[test]
     fn a_real_nonblocking_pty_keeps_a_large_utf8_paste_under_backpressure() {
@@ -136,9 +227,9 @@ mod tests {
             input.flush(|_| Ok(0)).unwrap_err().kind(),
             io::ErrorKind::WriteZero
         );
-        // The event loop treats `WriteZero` as transient backpressure: the
-        // unwritten bytes must stay queued so the next EPOLLOUT wake retries
-        // them instead of the emulator exiting with the queue dropped.
+        // A zero write is fatal, but no unaccepted bytes are removed. Only
+        // WouldBlock indicates backpressure; retrying WriteZero on a writable
+        // descriptor would keep waking the event loop without progress.
         assert_eq!(input.bytes.len(), 4);
         assert!(input.pending());
     }
