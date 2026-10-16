@@ -885,7 +885,9 @@ fn complete_emoji_clusters_reach_the_color_shader_and_preserve_cell_ownership() 
         let pixels = renderer.render(&mut terminal, &mut font).unwrap();
         assert!(
             pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .take((cw * 2) as usize)
                 .any(|p| p[0] != p[1])
                 || (0..ch).any(|y| (0..cw * 2).any(|x| {

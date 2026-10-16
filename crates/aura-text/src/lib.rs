@@ -832,11 +832,14 @@ fn straighten_color_outline(image: &mut swash::scale::image::Image) {
     if image.content != Content::Color || !matches!(image.source, Source::ColorOutline(_)) {
         return;
     }
-    for rgba in image.data.chunks_exact_mut(4) {
+    for rgba in image.data.as_chunks_mut::<4>().0 {
         let alpha = u32::from(rgba[3]);
-        if alpha != 0 {
-            for channel in &mut rgba[..3] {
-                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+        for channel in &mut rgba[..3] {
+            let premultiplied = u32::from(*channel) * 255 + alpha / 2;
+            // A zero alpha leaves the channels untouched; expressing the
+            // division through `checked_div` states that contract directly.
+            if let Some(straight) = premultiplied.checked_div(alpha) {
+                *channel = straight.min(255) as u8;
             }
         }
     }
@@ -1184,12 +1187,14 @@ mod tests {
                 upload.pixels.len(),
                 (upload.width * upload.height * 4) as usize
             );
-            assert!(upload.pixels.chunks_exact(4).any(|p| p[3] != 0));
+            assert!(upload.pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0));
             assert_eq!(upload.pixels.len(), reference.data.len());
             for (actual, expected) in upload
                 .pixels
-                .chunks_exact(4)
-                .zip(reference.data.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(reference.data.as_chunks::<4>().0.iter())
             {
                 assert_eq!(actual[3], expected[3]);
                 if actual[3] != 0 {
