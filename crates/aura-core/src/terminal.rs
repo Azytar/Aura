@@ -614,7 +614,26 @@ impl Terminal {
         if self.grid.active().width() == width && self.grid.active().height() == height {
             return Ok(());
         }
+        let main_wrap = if self.is_alternate_screen() {
+            self.main_pending_wrap
+        } else {
+            self.pending_wrap
+        };
+        let alternate = self.is_alternate_screen();
         self.grid.resize(width, height)?;
+        // A delayed-wrap cursor names the final occupied cell. After reflow
+        // it must advance to the insertion point unless still at the margin.
+        let main = self.grid.screen_mut(ActiveScreen::Main);
+        let cursor = main.cursor();
+        if main_wrap && cursor.column + 1 < width {
+            main.set_cursor(cursor.column + 1, cursor.row);
+        }
+        let main_wrap = main_wrap && cursor.column + 1 >= width;
+        if let Some(saved) = &mut self.alternate_saved_cursor {
+            saved.cursor = main.cursor();
+            saved.pending_wrap = main_wrap;
+        }
+        self.main_pending_wrap = main_wrap;
         // Reflow rewrites logical lines, so a selection made against the old
         // geometry no longer names the same cells; drop it instead of keeping
         // a highlight whose text would silently change.
@@ -626,14 +645,7 @@ impl Terminal {
         }
         self.top_margin = 0;
         self.bottom_margin = height - 1;
-        self.pending_wrap = false;
-        // `pending_wrap` belongs to the active screen and is invalidated by the
-        // new geometry. `main_pending_wrap` is the saved pending-wrap state of
-        // the main screen: when resizing from the alternate screen it must be
-        // preserved, but on the main screen it is stale and reset.
-        if !self.is_alternate_screen() {
-            self.main_pending_wrap = false;
-        }
+        self.pending_wrap = !alternate && main_wrap;
         Ok(())
     }
 
@@ -1606,6 +1618,68 @@ fn dec_graphic(ch: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_scrolled_view_keeps_its_logical_anchor_when_width_changes() {
+        let mut t = terminal(4, 2);
+        feed(&mut t, b"abcdefghijklmnop\r\n");
+        t.scrollback_top();
+        assert_eq!(t.viewport_cell(0, 0).unwrap().content, 'a' as u32);
+        t.resize(2, 2).unwrap();
+        assert_eq!(t.viewport_cell(0, 0).unwrap().content, 'a' as u32);
+        t.resize(8, 2).unwrap();
+        assert_eq!(t.viewport_cell(0, 0).unwrap().content, 'a' as u32);
+    }
+
+    #[test]
+    fn shrinking_unused_rows_keeps_the_prompt_and_cursor_in_place() {
+        let mut t = terminal(8, 10);
+        feed(&mut t, b"output\r\nprompt");
+        t.resize(8, 5).unwrap();
+        assert_eq!(line(&t, 0), "output..");
+        assert_eq!(line(&t, 1), "prompt..");
+        assert_eq!(t.cursor(), Cursor { column: 6, row: 1 });
+        assert_eq!(t.scrollback_len(), 0);
+    }
+
+    #[test]
+    fn widening_a_full_line_preserves_the_insertion_point() {
+        for text in ["ABCD", "AB界"] {
+            let mut t = terminal(4, 3);
+            feed(&mut t, text.as_bytes());
+            t.resize(8, 3).unwrap();
+            assert_eq!(t.cursor(), Cursor { column: 4, row: 0 });
+            feed(&mut t, b"X");
+            assert_eq!(t.active_grid().cell(0, 4).unwrap().content, 'X' as u32);
+            assert_eq!(
+                t.active_grid().cell(0, 3).unwrap().content,
+                if text == "ABCD" { 'D' as u32 } else { 0 }
+            );
+        }
+    }
+
+    #[test]
+    fn reflow_does_not_insert_a_space_before_a_wrapped_wide_character() {
+        let mut t = terminal(3, 3);
+        feed(&mut t, "AB界X".as_bytes());
+        t.resize(8, 3).unwrap();
+        assert_eq!(line(&t, 0), "AB界.X...");
+        assert_eq!(t.cursor(), Cursor { column: 5, row: 0 });
+    }
+
+    #[test]
+    fn alternate_resize_preserves_coordinates_and_the_reflowed_main_cursor() {
+        let mut t = terminal(6, 4);
+        feed(&mut t, b"abcdefghi\x1b[?1049h123456\r\nXYZ");
+        t.resize(4, 4).unwrap();
+        assert_eq!(line(&t, 0), "1234");
+        assert_eq!(line(&t, 1), "XYZ.");
+        assert_eq!(t.scrollback_len(), 0);
+        feed(&mut t, b"\x1b[?1049lX");
+        assert_eq!(line(&t, 0), "abcd");
+        assert_eq!(line(&t, 1), "efgh");
+        assert_eq!(line(&t, 2), "iX..");
+    }
+
     #[test]
     fn clear_removes_wide_cells_links_and_graphemes_and_homes_the_cursor() {
         let mut t = terminal(8, 3);

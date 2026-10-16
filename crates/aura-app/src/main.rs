@@ -42,7 +42,7 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let termination = signals::Termination::new()?;
-    let config = AppConfig::load();
+    let config = AppConfig::load_from_path(None)?;
     let mut font_sizes = RuntimeFontSize::new(config.font.size);
     let mut font = Font::load_with_family(&config.font.family, font_sizes.current())
         .map_err(io::Error::other)?;
@@ -70,6 +70,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         config.font.glyph_offsets(),
     );
     let (pixel_width, pixel_height) = (geometry.pixel_width, geometry.pixel_height);
+    let window_width = u16::try_from(pixel_width)
+        .map_err(|_| io::Error::other("configured window width exceeds X11's 65535-pixel limit"))?;
+    let window_height = u16::try_from(pixel_height).map_err(|_| {
+        io::Error::other("configured window height exceeds X11's 65535-pixel limit")
+    })?;
     let (connection, screen_index) = XCBConnection::connect(None)?;
     let screen = &connection.setup().roots[screen_index];
     let window = connection.generate_id()?;
@@ -87,8 +92,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         screen.root,
         0,
         0,
-        pixel_width as u16,
-        pixel_height as u16,
+        window_width,
+        window_height,
         0,
         WindowClass::INPUT_OUTPUT,
         screen.root_visual,
@@ -105,7 +110,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     set_title(&connection, window, "Terminal")?;
     set_window_properties(&connection, window, &geometry)?;
-    let mut clipboard = Clipboard::new(&connection)?;
+    let mut clipboard = Clipboard::new(&connection, config.security.max_paste_bytes)?;
     connection.change_property32(
         PropMode::REPLACE,
         window,
@@ -200,6 +205,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut keyboard = Keyboard::new(&connection)?;
     let mut running = true;
     let mut invalidated = false;
+    let mut font_resize_pending = false;
     let mut cursor_blink_on = true;
     let mut selection_anchor = None;
     let mut selection_kind = SelectionKind::Cell;
@@ -212,6 +218,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut stats = RenderStats::new();
 
     while running {
+        let mut pending_resize = None;
         // XKB/property replies can read X events into XCB while emptying the
         // socket. Drain that queue before sleeping on its file descriptor.
         let mut queued_event = connection.poll_for_event()?;
@@ -260,19 +267,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             | Event::XkbNewKeyboardNotify(_) => {
                                 keyboard.reload(&connection)?;
                             }
-                            Event::ConfigureNotify(configure) => {
-                                resize(
-                                    &mut terminal,
-                                    &mut pty,
-                                    &mut last_winsize,
-                                    &mut renderer,
-                                    (
-                                        configured_metrics(&font, &config).width,
-                                        configured_metrics(&font, &config).height,
-                                    ),
-                                    (config.window.padding_x, config.window.padding_y),
-                                    configure,
-                                )?;
+                            Event::ConfigureNotify(configure) if configure.window == window => {
+                                // Reconcile only the latest geometry in this batch;
+                                // intermediate drag events need no reflow or swapchain.
+                                pending_resize = Some(configure);
                                 invalidated = true;
                             }
                             Event::Expose(_) => invalidated = true,
@@ -285,17 +283,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         FontSizeAction::Reset => font_sizes.reset(),
                                     };
                                     if changed {
-                                        resize_font(
-                                            &config,
-                                            &mut font_sizes,
-                                            &mut font,
-                                            &mut terminal,
-                                            &mut pty,
-                                            &mut last_winsize,
-                                            &connection,
-                                            window,
-                                            &mut renderer,
-                                        )?;
+                                        // Apply the final size once per event batch rather
+                                        // than rebuilding the atlas for each repeated key.
+                                        font_resize_pending = true;
                                         cursor_blink_on = true;
                                         invalidated = true;
                                     }
@@ -693,6 +683,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {}
             }
+        }
+        if running && font_resize_pending {
+            resize_font(
+                &config,
+                &font_sizes,
+                &mut font,
+                &mut terminal,
+                &mut pty,
+                &mut last_winsize,
+                &connection,
+                window,
+                &mut renderer,
+                pending_resize
+                    .take()
+                    .map(|event| (event.width, event.height)),
+            )?;
+            font_resize_pending = false;
+        }
+        if running && let Some(event) = pending_resize {
+            let metrics = configured_metrics(&font, &config);
+            resize(
+                &mut terminal,
+                &mut pty,
+                &mut last_winsize,
+                &mut renderer,
+                (metrics.width, metrics.height),
+                (config.window.padding_x, config.window.padding_y),
+                event,
+            )?;
         }
         if running {
             input.flush(|bytes| pty.write(bytes))?;
@@ -1121,12 +1140,10 @@ fn set_size_hints(
         .atom;
     let padding_x = geometry
         .pixel_width
-        .saturating_sub(geometry.columns as u32 * geometry.cell_width)
-        / 2;
+        .saturating_sub(geometry.columns as u32 * geometry.cell_width);
     let padding_y = geometry
         .pixel_height
-        .saturating_sub(geometry.rows as u32 * geometry.cell_height)
-        / 2;
+        .saturating_sub(geometry.rows as u32 * geometry.cell_height);
     let hints: [u32; 18] = [
         P_SIZE | P_MIN_SIZE | P_RESIZE_INC | P_BASE_SIZE,
         0,
@@ -1199,6 +1216,7 @@ fn decode_clipboard_payload(encoded: &[u8]) -> Option<Vec<u8>> {
 }
 
 struct Clipboard {
+    max_paste_bytes: usize,
     clipboard_atom: u32,
     primary_atom: u32,
     utf8_atom: u32,
@@ -1209,11 +1227,15 @@ struct Clipboard {
 }
 
 impl Clipboard {
-    fn new(connection: &XCBConnection) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(
+        connection: &XCBConnection,
+        max_paste_bytes: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let atom = |name: &[u8]| -> Result<u32, Box<dyn std::error::Error>> {
             Ok(connection.intern_atom(false, name)?.reply()?.atom)
         };
         Ok(Self {
+            max_paste_bytes,
             clipboard_atom: atom(b"CLIPBOARD")?,
             primary_atom: AtomEnum::PRIMARY.into(),
             utf8_atom: atom(b"UTF8_STRING")?,
@@ -1337,11 +1359,14 @@ impl Clipboard {
                 property,
                 AtomEnum::ANY,
                 0,
-                MAX_CLIPBOARD_BYTES.div_ceil(4) as u32,
+                self.max_paste_bytes.div_ceil(4) as u32,
             )?
             .reply()?;
+        // X11 leaves a property intact after a partial read. Discard it even
+        // when the paste exceeds the configured limit, never forward a prefix.
+        connection.delete_property(window, property)?;
         if reply.format != 8
-            || reply.value.len() > MAX_CLIPBOARD_BYTES
+            || reply.value.len() > self.max_paste_bytes
             || reply.bytes_after != 0
             || (reply.type_ != self.utf8_atom && reply.type_ != AtomEnum::STRING.into())
         {
@@ -1390,17 +1415,13 @@ fn resize(
     Ok(())
 }
 
-/// Runtime font-size change: re-rasterizes at the new size, rebuilds the
-/// atlas state, recomputes the single-source geometry, resizes the window
-/// pixels (keeping the configured columns×rows), propagates `TIOCSWINSZ`,
-/// and invalidates the frame. Screen content, modes, cursor, alternate
-/// screen, and scrollback all survive via the existing `Terminal::resize`
-/// path — which is a no-op here because columns×rows do not change; pixel
-/// geometry and the renderer still refresh.
+/// Re-rasterizes the font while preserving the actual outer window extent.
+/// Grid, PTY and size hints then use the new cell metrics; the window manager
+/// remains in charge of the window's size and placement.
 #[allow(clippy::too_many_arguments)]
 fn resize_font(
     config: &AppConfig,
-    font_sizes: &mut RuntimeFontSize,
+    font_sizes: &RuntimeFontSize,
     font: &mut Font,
     terminal: &mut Terminal,
     pty: &mut Pty,
@@ -1408,49 +1429,54 @@ fn resize_font(
     connection: &XCBConnection,
     window: u32,
     renderer: &mut Renderer,
+    extent: Option<(u16, u16)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let (pixel_width, pixel_height) =
+        extent.unwrap_or((last_winsize.pixel_width, last_winsize.pixel_height));
     // New rasterization + new metrics + cleared glyph cache/atlas shelves.
-    font.set_size(font_sizes.current())
+    let font_changed = font
+        .set_size(font_sizes.current())
         .map_err(io::Error::other)?;
-    // Single source of truth: one geometry feeds window, grid, PTY, renderer.
+    let metrics = configured_metrics(font, config);
+    let (columns, rows) = grid_dimensions(
+        u32::from(pixel_width).saturating_sub(2 * config.window.padding_x),
+        u32::from(pixel_height).saturating_sub(2 * config.window.padding_y),
+        metrics.width,
+        metrics.height,
+    );
     let geometry = FontGeometry::new(
         font.metrics().width,
         font.metrics().height,
-        terminal.active_grid().width(),
-        terminal.active_grid().height(),
+        columns,
+        rows,
         config.window.padding_x,
         config.window.padding_y,
         config.font.glyph_offsets(),
     );
-    // Keep the current grid size; only pixel geometry changed. Reflow policy
-    // stays identical to a normal resize (no second reflow implementation).
     terminal
-        .resize(geometry.columns, geometry.rows)
+        .resize(columns, rows)
         .map_err(|error| io::Error::other(format!("terminal resize: {error:?}")))?;
-    let mut winsize = PtySize::new(geometry.columns, geometry.rows)?;
-    let (px, py) = geometry.pty_pixels();
-    winsize.pixel_width = px;
-    winsize.pixel_height = py;
-    pty.resize(winsize)?;
-    *last_winsize = winsize;
-    // Ask the window manager for the new pixel size; a tiling WM may ignore
-    // it, in which case the next ConfigureNotify reconciles via `resize()`.
-    connection.configure_window(
-        window,
-        &x11rb::protocol::xproto::ConfigureWindowAux::new()
-            .width(geometry.pixel_width)
-            .height(geometry.pixel_height),
-    )?;
-    connection.flush()?;
+    let mut winsize = PtySize::new(columns, rows)?;
+    winsize.pixel_width = pixel_width;
+    winsize.pixel_height = pixel_height;
+    if *last_winsize != winsize {
+        pty.resize(winsize)?;
+        *last_winsize = winsize;
+    }
     // A new size re-rasterizes every glyph, so the renderer's glyph table, cell
     // cache, and both atlases are stale and must be dropped. This is the only
     // path that does so: `Renderer::resize` reconciles the swapchain alone and
     // must not invalidate font state for a plain window resize.
-    renderer.invalidate_font();
+    if font_changed {
+        renderer.invalidate_font();
+    }
     // Cell metrics changed, so the resize increments and minimum size move too.
     set_size_hints(connection, window, &geometry)?;
     renderer
-        .resize(geometry.pixel_width, geometry.pixel_height)
+        .resize(
+            u32::from(last_winsize.pixel_width),
+            u32::from(last_winsize.pixel_height),
+        )
         .map_err(io::Error::other)?;
     Ok(())
 }
@@ -1595,6 +1621,84 @@ fn selection_point(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_pastes_obey_the_configured_limit_without_partial_utf8() {
+        let Ok((connection, screen_index)) = XCBConnection::connect(None) else {
+            eprintln!("SKIP: configured paste integration needs X11");
+            return;
+        };
+        let screen = &connection.setup().roots[screen_index];
+        let window = connection.generate_id().unwrap();
+        connection
+            .create_window(
+                screen.root_depth,
+                window,
+                screen.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                screen.root_visual,
+                &CreateWindowAux::default(),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        for limit in [4, 80_000] {
+            let table = toml::from_str(&format!("[security]\nmax_paste_bytes = {limit}")).unwrap();
+            let config = AppConfig::load_from_text(&table).unwrap();
+            let clipboard = Clipboard::new(&connection, config.security.max_paste_bytes).unwrap();
+            for length in [0, limit, limit + 1, limit + 100] {
+                let bytes = vec![b'a'; length];
+                connection
+                    .change_property8(
+                        PropMode::REPLACE,
+                        window,
+                        clipboard.property_atom,
+                        clipboard.utf8_atom,
+                        &bytes,
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let result = clipboard
+                    .receive_paste(&connection, window, clipboard.property_atom)
+                    .unwrap();
+                assert_eq!(result, (length <= limit).then_some(bytes));
+                assert_eq!(
+                    connection
+                        .get_property(false, window, clipboard.property_atom, AtomEnum::ANY, 0, 1)
+                        .unwrap()
+                        .reply()
+                        .unwrap()
+                        .type_,
+                    u32::from(AtomEnum::NONE)
+                );
+            }
+            let bytes = "é中".as_bytes();
+            connection
+                .change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    clipboard.property_atom,
+                    clipboard.utf8_atom,
+                    bytes,
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            assert_eq!(
+                clipboard
+                    .receive_paste(&connection, window, clipboard.property_atom)
+                    .unwrap(),
+                (bytes.len() <= limit).then(|| bytes.to_vec())
+            );
+        }
+        connection.destroy_window(window).unwrap().check().unwrap();
+    }
 
     #[test]
     fn mouse_reports_follow_tracking_and_sgr_modes() {
