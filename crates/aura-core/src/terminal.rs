@@ -692,6 +692,18 @@ impl Terminal {
             }
             0x0e => self.use_g1 = true,
             0x0f => self.use_g1 = false,
+            // C1 single-byte forms of the ECMA-48 controls the parser
+            // already emits as `Control`: IND (ESC D), NEL (ESC E) and HTS
+            // (ESC H) behave exactly like their two-byte spellings.
+            0x84 => self.index(),
+            0x85 => {
+                self.carriage_return();
+                self.index();
+            }
+            0x88 => {
+                let column = self.cursor().column;
+                self.tabs[column] = true;
+            }
             _ => {}
         }
     }
@@ -2222,6 +2234,29 @@ mod tests {
         assert_eq!(line(&terminal, 0), "ABF");
         assert_eq!(terminal.cursor(), Cursor { column: 2, row: 0 });
         assert!(!terminal.modes().auto_wrap);
+    }
+
+    #[test]
+    fn c1_single_byte_controls_match_their_escape_spellings() {
+        // The parser emits 0x84/0x85/0x88 as `Control`; they must behave
+        // exactly like ESC D (IND), ESC E (NEL) and ESC H (HTS).
+        let mut index = terminal(4, 3);
+        feed(&mut index, b"\x84");
+        assert_eq!(index.cursor(), Cursor { column: 0, row: 1 });
+        feed(&mut index, b"\x84\x84\x84");
+        assert_eq!(index.cursor(), Cursor { column: 0, row: 2 });
+
+        let mut next_line = terminal(4, 3);
+        feed(&mut next_line, b"AB\x85CD");
+        assert_eq!(line(&next_line, 0), "AB..");
+        assert_eq!(line(&next_line, 1), "CD..");
+        assert_eq!(next_line.cursor(), Cursor { column: 2, row: 1 });
+
+        let mut tabs = terminal(8, 1);
+        feed(&mut tabs, b"\x1b[3g");
+        feed(&mut tabs, b"\x1b[1;4H\x88\r\tX");
+        assert_eq!(tabs.active_grid().cell(0, 3).unwrap().content, 'X' as u32);
+        assert_eq!(tabs.cursor().column, 4);
     }
 
     #[test]
