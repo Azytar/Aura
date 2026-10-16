@@ -27,8 +27,9 @@
 family = "firacode-nerd"
 size = 14.0
 
-# Per-style face overrides. Both keys are optional; omit a section to use the
-# primary face for that style.
+# Per-style face overrides. Omit a section to discover available sibling faces,
+# with synthetic styling when a native style is unavailable. Omitted family
+# uses the loaded primary family; explicit file paths are also accepted.
 # [font.bold]
 # family = "Iosevka"
 # style = "Bold"

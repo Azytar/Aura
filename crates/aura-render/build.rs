@@ -4,6 +4,7 @@ use std::process::Command;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    println!("cargo:rerun-if-changed=../../shaders/cell_graphics.glsl");
     for shader in [
         "background.vert",
         "background.frag",
