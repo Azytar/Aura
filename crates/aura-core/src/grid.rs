@@ -837,7 +837,7 @@ impl Grid {
         true
     }
 
-    /// Resizes without reflow: preserve the top-left intersection and discard the rest.
+    /// Reflows logical main-screen lines while retaining the cursor and history.
     pub fn resize(&mut self, new_width: usize, new_height: usize) -> Result<(), GridError> {
         // Same-size resizes (font zoom) must not reflow: rebuilding logical
         // lines here would reorder scrollback and move the cursor even though
@@ -858,8 +858,20 @@ impl Grid {
         let mut source: Vec<Row> = self.scrollback.iter().cloned().collect();
         source.extend((0..self.height).map(|row| self.row(row).expect("visible row").clone()));
         let cursor_source_row = self.scrollback.len() + old_cursor_row;
+        // Empty rows below the cursor are spare screen space, not history.
+        // Drop them before choosing the new viewport so shrinking a mostly
+        // empty window does not scroll the prompt up unnecessarily.
+        while source.len() > cursor_source_row + 1
+            && source.last().is_some_and(|row| {
+                !row.wrapped && row.cells.iter().all(|cell| *cell == Cell::EMPTY)
+            })
+        {
+            source.pop();
+        }
         let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
         let mut cursor_position = None;
+        let mut viewport_position = None;
+        let viewport_source_row = self.scrollback.len().saturating_sub(old_viewport_offset);
         let mut source_line = 0;
         for (index, row) in source.iter().enumerate() {
             let source_offset;
@@ -869,6 +881,9 @@ impl Grid {
                 source_offset = 0;
             } else {
                 source_offset = logical_lines[source_line].len();
+            }
+            if old_viewport_offset != 0 && index == viewport_source_row {
+                viewport_position = Some((source_line, source_offset));
             }
             if index == cursor_source_row {
                 cursor_position = Some((source_line, source_offset + self.cursor.column));
@@ -885,6 +900,17 @@ impl Grid {
             if index == cursor_source_row {
                 used = used.max(self.cursor.column + 1);
             }
+            // A wide glyph can wrap with one unused column left behind.
+            // That structural padding is not a space in the logical line.
+            if continues
+                && used == self.width
+                && row.cells[used - 1] == Cell::EMPTY
+                && source
+                    .get(index + 1)
+                    .is_some_and(|next| next.cells[0].is_wide_leading())
+            {
+                used -= 1;
+            }
             if used > 0 && row.cells[used - 1].is_wide_leading() {
                 used = (used + 1).min(self.width);
             }
@@ -899,16 +925,21 @@ impl Grid {
 
         let mut reflowed = Vec::new();
         let mut new_cursor = None;
+        let mut new_viewport_row = None;
         for (line_index, line) in logical_lines.iter().enumerate() {
             let mut offset = 0;
             let mut continuation = false;
             if line.is_empty() {
                 reflowed.push(Row::new(new_width));
+                if viewport_position == Some((line_index, 0)) {
+                    new_viewport_row = Some(reflowed.len() - 1);
+                }
                 if cursor_position == Some((line_index, 0)) {
                     new_cursor = Some((reflowed.len() - 1, 0));
                 }
             }
             while offset < line.len() {
+                let row_start = offset;
                 let mut row = Row::new(new_width);
                 row.wrapped = continuation;
                 let row_index = reflowed.len();
@@ -924,6 +955,11 @@ impl Grid {
                                 cell.flags().without_wide(),
                             );
                             row.graphemes[0] = Some("\u{fffd}".to_owned());
+                            if cursor_position.is_some_and(|(line, pos)| {
+                                line == line_index && (offset..offset + 2).contains(&pos)
+                            }) {
+                                new_cursor = Some((row_index, 0));
+                            }
                             offset += 2;
                             column = 1;
                             continue;
@@ -938,8 +974,11 @@ impl Grid {
                             row.cells[column + 1] = *spacer;
                             row.hyperlinks[column + 1] = *spacer_link;
                         }
-                        if cursor_position == Some((line_index, offset)) {
-                            new_cursor = Some((row_index, column));
+                        if let Some((line, pos)) = cursor_position
+                            && line == line_index
+                            && (offset..offset + 2).contains(&pos)
+                        {
+                            new_cursor = Some((row_index, column + pos - offset));
                         }
                         offset += 2;
                         column += 2;
@@ -960,6 +999,11 @@ impl Grid {
                     row.graphemes[0] = grapheme.clone();
                     row.hyperlinks[0] = *hyperlink;
                     offset += 1;
+                }
+                if viewport_position.is_some_and(|(line, pos)| {
+                    line == line_index && (row_start..offset).contains(&pos)
+                }) {
+                    new_viewport_row = Some(row_index);
                 }
                 reflowed.push(row);
                 continuation = true;
@@ -986,10 +1030,45 @@ impl Grid {
         self.rows = rows;
         self.base_row = 0;
         self.scrollback = scrollback;
-        self.viewport_offset = old_viewport_offset.min(self.scrollback.len());
+        // Anchor the same logical content, not the old number of physical
+        // rows: wrapping changes that distance whenever the width changes.
+        self.viewport_offset = new_viewport_row
+            .map_or(old_viewport_offset, |row| start.saturating_sub(row))
+            .min(self.scrollback.len());
         self.cursor.column = cursor_column;
         self.cursor.row = cursor_row.min(new_height - 1);
         self.mark_all_dirty();
+        Ok(())
+    }
+
+    fn resize_fixed(&mut self, width: usize, height: usize) -> Result<(), GridError> {
+        validate_dimensions(width, height)?;
+        if (width, height) == (self.width, self.height) {
+            return Ok(());
+        }
+        let mut rows: Vec<Row> = (0..height).map(|_| Row::new(width)).collect();
+        for (index, target) in rows.iter_mut().enumerate().take(self.height) {
+            let source = self.row(index).expect("existing visible row");
+            let count = width.min(self.width);
+            target.cells[..count].copy_from_slice(&source.cells[..count]);
+            target.graphemes[..count].clone_from_slice(&source.graphemes[..count]);
+            target.hyperlinks[..count].copy_from_slice(&source.hyperlinks[..count]);
+            repair_wide_pairs(&mut target.cells);
+            for column in 0..width {
+                if target.cells[column].content == 0 && !target.cells[column].is_wide_spacer() {
+                    target.graphemes[column] = None;
+                    target.hyperlinks[column] = None;
+                }
+            }
+        }
+        self.rows = rows;
+        self.base_row = 0;
+        self.width = width;
+        self.height = height;
+        self.cursor = Cursor {
+            column: self.cursor.column.min(width - 1),
+            row: self.cursor.row.min(height - 1),
+        };
         Ok(())
     }
 
@@ -1144,7 +1223,7 @@ impl TerminalGrid {
 
     pub fn resize(&mut self, width: usize, height: usize) -> Result<(), GridError> {
         self.main.resize(width, height)?;
-        self.alternate.resize(width, height)
+        self.alternate.resize_fixed(width, height)
     }
 
     /// Sets the scrollback limit on the main screen. The alternate screen

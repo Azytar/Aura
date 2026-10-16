@@ -133,11 +133,13 @@ impl FontGeometry {
         let effective_cell_width = cell_width.saturating_add_signed(letter_spacing).max(1);
         let effective_cell_height = cell_height.saturating_add_signed(line_spacing).max(1);
         let pixel_width = (columns.saturating_mul(effective_cell_width as usize))
-            .saturating_add(2 * padding_x as usize)
-            .max(1) as u32;
+            .saturating_add((padding_x as usize).saturating_mul(2))
+            .max(1);
+        let pixel_width = u32::try_from(pixel_width).unwrap_or(u32::MAX);
         let pixel_height = (rows.saturating_mul(effective_cell_height as usize))
-            .saturating_add(2 * padding_y as usize)
-            .max(1) as u32;
+            .saturating_add((padding_y as usize).saturating_mul(2))
+            .max(1);
+        let pixel_height = u32::try_from(pixel_height).unwrap_or(u32::MAX);
         Self {
             cell_width: effective_cell_width,
             cell_height: effective_cell_height,
@@ -375,11 +377,11 @@ impl FontStyleConfig {
             family: section
                 .get("family")
                 .and_then(|v| v.as_str())
-                .map(str::to_string),
+                .map(|s| s.trim().to_owned()),
             style: section
                 .get("style")
                 .and_then(|v| v.as_str())
-                .map(str::to_string),
+                .map(|s| s.trim().to_owned()),
         })
     }
 }
@@ -421,7 +423,7 @@ impl FontConfig {
         let mut family = font
             .get("family")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
+            .map(|s| s.trim().to_owned())
             .unwrap_or_else(|| DEFAULT_FONT_FAMILY.to_string());
 
         // Trim and validate non-empty family.
@@ -435,7 +437,7 @@ impl FontConfig {
 
         let size = font
             .get("size")
-            .and_then(|v| v.as_float())
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
             .unwrap_or(DEFAULT_FONT_SIZE as f64) as f32;
 
         if !size.is_finite() || !(MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&size) {
@@ -461,7 +463,7 @@ impl FontConfig {
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .filter_map(|v| v.as_str().map(|s| s.trim().to_owned()))
                     .collect()
             })
             .unwrap_or_default();
@@ -497,14 +499,14 @@ fn parse_offset(font: &toml::Table, key: &'static str, default: i32) -> Result<i
     let value = font
         .get(key)
         .and_then(|v| v.as_integer())
-        .unwrap_or(default as i64) as i32;
-    if !(-MAX_OFFSET..=MAX_OFFSET).contains(&value) {
+        .unwrap_or(default as i64);
+    if !(-i64::from(MAX_OFFSET)..=i64::from(MAX_OFFSET)).contains(&value) {
         return Err(ConfigError::invalid_value(
             key,
             format!("must be between -{MAX_OFFSET} and {MAX_OFFSET}"),
         ));
     }
-    Ok(value)
+    Ok(value as i32)
 }
 
 /// Parses a spacing value from the font table, clamping to valid range.
@@ -512,19 +514,19 @@ fn parse_spacing(font: &toml::Table, key: &'static str, default: i32) -> Result<
     let value = font
         .get(key)
         .and_then(|v| v.as_integer())
-        .unwrap_or(default as i64) as i32;
+        .unwrap_or(default as i64);
     let max = if key == "line_spacing" {
         MAX_LINE_SPACING
     } else {
         MAX_LETTER_SPACING
     };
-    if !(0..=max).contains(&value) {
+    if !(0..=i64::from(max)).contains(&value) {
         return Err(ConfigError::invalid_value(
             key,
             format!("must be between 0 and {max}"),
         ));
     }
-    Ok(value)
+    Ok(value as i32)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -571,8 +573,11 @@ impl WindowConfig {
 
         let padding_x = match window.get("padding_x").and_then(|v| v.as_integer()) {
             Some(value) => {
-                if value < 0 {
-                    return Err(ConfigError::invalid_value("padding_x", "must be >= 0"));
+                if !(0..=i64::from(u16::MAX / 2)).contains(&value) {
+                    return Err(ConfigError::invalid_value(
+                        "window.padding_x",
+                        "two padding margins must fit within X11's 65535-pixel limit",
+                    ));
                 }
                 value as u32
             }
@@ -581,8 +586,11 @@ impl WindowConfig {
 
         let padding_y = match window.get("padding_y").and_then(|v| v.as_integer()) {
             Some(value) => {
-                if value < 0 {
-                    return Err(ConfigError::invalid_value("padding_y", "must be >= 0"));
+                if !(0..=i64::from(u16::MAX / 2)).contains(&value) {
+                    return Err(ConfigError::invalid_value(
+                        "window.padding_y",
+                        "two padding margins must fit within X11's 65535-pixel limit",
+                    ));
                 }
                 value as u32
             }
@@ -872,11 +880,11 @@ impl SecurityConfig {
             .get("max_paste_bytes")
             .and_then(|value| value.as_integer())
         {
-            Some(value) if value > 0 => value as usize,
+            Some(value) if (1..=MAX_PASTE_BYTES as i64).contains(&value) => value as usize,
             Some(_) => {
                 return Err(ConfigError::invalid_value(
                     "security.max_paste_bytes",
-                    "must be > 0",
+                    format!("must be between 1 and {MAX_PASTE_BYTES}"),
                 ));
             }
             None => DEFAULT_MAX_PASTE_BYTES,
@@ -888,6 +896,136 @@ impl SecurityConfig {
         })
     }
 }
+
+#[derive(Clone, Copy)]
+enum ConfigType {
+    String,
+    Number,
+    Integer,
+    Boolean,
+    Table,
+    Strings,
+    Color,
+    Array,
+}
+
+fn validate_section(
+    table: &toml::Table,
+    section: &'static str,
+    fields: &[(&str, ConfigType)],
+) -> Result<(), ConfigError> {
+    for (key, value) in table {
+        let Some((_, kind)) = fields.iter().find(|(name, _)| *name == key) else {
+            return Err(ConfigError::invalid_value(
+                section,
+                format!("unknown option {key}"),
+            ));
+        };
+        let valid = match kind {
+            ConfigType::String => value.as_str().is_some_and(|s| !s.trim().is_empty()),
+            ConfigType::Number => value.is_float() || value.is_integer(),
+            ConfigType::Integer => value.is_integer(),
+            ConfigType::Boolean => value.is_bool(),
+            ConfigType::Table => value.is_table(),
+            ConfigType::Strings => value.as_array().is_some_and(|values| {
+                values
+                    .iter()
+                    .all(|v| v.as_str().is_some_and(|s| !s.trim().is_empty()))
+            }),
+            ConfigType::Color => value.is_str() || value.is_integer(),
+            ConfigType::Array => value.is_array(),
+        };
+        if !valid {
+            return Err(ConfigError::invalid_value(
+                section,
+                format!("invalid type or empty value for {key}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_config(table: &toml::Table) -> Result<(), ConfigError> {
+    use ConfigType::*;
+    validate_section(
+        table,
+        "configuration",
+        &[
+            ("font", Table),
+            ("window", Table),
+            ("colors", Table),
+            ("cursor", Table),
+            ("scrollback", Table),
+            ("security", Table),
+        ],
+    )?;
+    let schemas: &[(&str, &[(&str, ConfigType)])] = &[
+        (
+            "font",
+            &[
+                ("family", String),
+                ("size", Number),
+                ("offset_x", Integer),
+                ("offset_y", Integer),
+                ("line_spacing", Integer),
+                ("letter_spacing", Integer),
+                ("bold", Table),
+                ("italic", Table),
+                ("bold_italic", Table),
+                ("fallback", Table),
+            ],
+        ),
+        (
+            "window",
+            &[
+                ("columns", Integer),
+                ("lines", Integer),
+                ("padding_x", Integer),
+                ("padding_y", Integer),
+            ],
+        ),
+        (
+            "colors",
+            &[
+                ("theme", String),
+                ("foreground", Color),
+                ("background", Color),
+                ("cursor", Color),
+                ("selection", Color),
+                ("palette", Array),
+            ],
+        ),
+        ("cursor", &[("style", String), ("blink", Boolean)]),
+        ("scrollback", &[("lines", Integer)]),
+        (
+            "security",
+            &[("osc52", String), ("max_paste_bytes", Integer)],
+        ),
+    ];
+    for (name, fields) in schemas {
+        if let Some(section) = table.get(*name).and_then(toml::Value::as_table) {
+            validate_section(section, name, fields)?;
+        }
+    }
+    if let Some(font) = table.get("font").and_then(toml::Value::as_table) {
+        for name in ["bold", "italic", "bold_italic"] {
+            if let Some(style) = font.get(name).and_then(toml::Value::as_table) {
+                validate_section(
+                    style,
+                    "font style",
+                    &[("family", String), ("style", String)],
+                )?;
+            }
+        }
+        if let Some(fallback) = font.get("fallback").and_then(toml::Value::as_table) {
+            validate_section(fallback, "font.fallback", &[("families", Strings)])?;
+        }
+    }
+    Ok(())
+}
+
+/// Leaves room for bracketed-paste delimiters in the bounded PTY input queue.
+pub const MAX_PASTE_BYTES: usize = 1024 * 1024 - 12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
@@ -948,42 +1086,30 @@ impl AppConfig {
             None => return Ok(Self::defaults()),
         };
 
-        if !path.is_file() {
-            return Ok(Self::defaults());
-        }
-
-        let content = std::fs::read_to_string(path)
-            .map_err(|error| ConfigError::io(path.display().to_string(), error.to_string()))?;
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::defaults());
+            }
+            Err(error) => {
+                return Err(ConfigError::io(
+                    path.display().to_string(),
+                    error.to_string(),
+                ));
+            }
+        };
 
         let parsed: toml::Table = toml::from_str(&content)
             .map_err(|error| ConfigError::parse(path.display().to_string(), error.to_string()))?;
 
-        let font = FontConfig::parse_table(&parsed)?;
-        let window = WindowConfig::parse_table(&parsed)?;
-
-        // Every other section is optional: a configuration that only sets the
-        // font, or only the colours, must load with the rest at their
-        // defaults. A missing or empty file is equally valid and yields all
-        // defaults.
-        let colors = ColorsConfig::parse_table(&parsed)?;
-        let cursor = CursorConfig::parse_table(&parsed)?;
-        let scrollback = ScrollbackConfig::parse_table(&parsed)?;
-        let security = SecurityConfig::parse_table(&parsed)?;
-
-        Ok(Self {
-            font,
-            window,
-            colors,
-            cursor,
-            scrollback,
-            security,
-        })
+        Self::load_from_text(&parsed)
     }
 
     /// Builds a configuration from an already parsed TOML table. Kept separate
     /// from [`Self::load_from_path`] so parsing can be exercised without
     /// touching the filesystem.
     pub fn load_from_text(table: &toml::Table) -> Result<Self, ConfigError> {
+        validate_config(table)?;
         let font = FontConfig::parse_table(table)?;
         let window = WindowConfig::parse_table(table)?;
         let colors = ColorsConfig::parse_table(table)?;
@@ -1091,6 +1217,69 @@ impl std::error::Error for ConfigError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_limit_fits_the_input_queue_and_geometry_saturates_without_wrapping() {
+        for value in [0, MAX_PASTE_BYTES + 1] {
+            let table = toml::from_str(&format!("[security]\nmax_paste_bytes = {value}")).unwrap();
+            assert!(AppConfig::load_from_text(&table).is_err());
+        }
+        let geometry = FontGeometry::new(
+            10,
+            20,
+            usize::MAX,
+            usize::MAX,
+            u32::MAX,
+            u32::MAX,
+            GlyphOffsets::default(),
+        );
+        assert_eq!(
+            (geometry.pixel_width, geometry.pixel_height),
+            (u32::MAX, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn integer_font_sizes_are_honoured() {
+        let table = toml::from_str("[font]\nsize = 20\n").unwrap();
+        assert_eq!(AppConfig::load_from_text(&table).unwrap().font.size, 20.0);
+    }
+
+    #[test]
+    fn invalid_types_and_misspelled_keys_are_reported() {
+        for text in [
+            "font = 'monospace'",
+            "[font]\nsize = 'large'",
+            "[font]\nsizee = 20",
+            "[font.bold]\nfamily = 42",
+            "[font.fallback]\nfamilies = ['monospace', 42]",
+            "[window]\ncolumns = '80'",
+            "[cursor]\nblink = 'false'",
+            "[security]\nmax_paste_bytes = '10'",
+            "[scrollback]\nlines = false",
+        ] {
+            let table = toml::from_str(text).unwrap();
+            assert!(
+                AppConfig::load_from_text(&table).is_err(),
+                "silently accepted {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_integers_cannot_wrap_into_valid_geometry() {
+        for text in [
+            "[font]\noffset_x = 4294967296",
+            "[font]\nline_spacing = 4294967296",
+            "[window]\npadding_x = 4294967296",
+        ] {
+            let table = toml::from_str(text).unwrap();
+            assert!(
+                AppConfig::load_from_text(&table).is_err(),
+                "silently wrapped {text}"
+            );
+        }
+    }
 
     #[test]
     fn large_windows_and_invalid_config_respect_the_gpu_grid_budget() {

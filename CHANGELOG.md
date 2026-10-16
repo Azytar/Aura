@@ -23,6 +23,25 @@ per commit.
 
 ### Fixed
 
+- Runtime font zoom keeps the window extent fixed, recalculates the grid and
+  PTY dimensions, and rebuilds the font atlas once per input batch. Resize
+  bursts reconcile the final geometry rather than every queued intermediate.
+- X11 base/minimum size hints account for padding on both sides.
+- Main-screen resize preserves the insertion point of full lines, avoids
+  scrolling away prompts when unused rows shrink, retains the logical
+  scrollback viewport anchor, and omits structural padding before wrapped
+  wide glyphs. Alternate-screen content keeps its coordinates without reflow;
+  leaving it restores the reflowed main-screen cursor.
+- Integer font sizes are honoured. Unknown configuration keys, invalid types,
+  unreadable files and out-of-range integers now produce startup errors rather
+  than silently falling back to defaults or wrapping into valid values.
+- `security.max_paste_bytes` is applied to incoming X11 pastes, including
+  limits above the old fixed 64 KiB cap. Oversized pastes are rejected whole
+  and their temporary properties are discarded. The upper bound leaves room
+  for bracketed-paste markers in the input queue.
+- The example configuration uses the portable default monospace family and
+  keeps font offset/spacing options in the correct TOML section.
+
 - Aborted compose sequences no longer swallow the cancelling key. A dead
   key followed by a character with no composed form (for example
   dead-acute then `c`) previously returned no input at all, losing a

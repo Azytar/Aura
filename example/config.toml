@@ -3,6 +3,7 @@
 # This file is optional. When it is absent, AURA uses exactly these defaults and
 # is fully functional. Every section is optional: a file that only sets the
 # colours, or only the window, loads with everything else at its default.
+# Unknown options, invalid types and out-of-range values are startup errors.
 #
 # Copy this file to ~/.config/aura/config.toml to use it as-is, or copy the
 # parts you want.
@@ -22,10 +23,19 @@
 #
 # Runtime zoom: Ctrl+Plus / Ctrl+Minus change the live size by 1.0 px (clamped
 # to the same 6.0-72.0 range); Ctrl+0 restores this configured size. The TOML
-# value itself never changes at runtime.
+# value itself never changes at runtime. Zoom preserves the outer window size;
+# the number of complete rows and columns changes with the font metrics.
 [font]
-family = "firacode-nerd"
+family = "monospace"
 size = 14.0
+
+# Visual-only glyph nudges. These do not change cell geometry.
+# offset_x = 0
+# offset_y = 0
+
+# Extra space between lines and cells, in pixels. Both change cell geometry.
+# line_spacing = 0
+# letter_spacing = 0
 
 # Per-style face overrides. Omit a section to discover available sibling faces,
 # with synthetic styling when a native style is unavailable. Omitted family
@@ -46,19 +56,12 @@ size = 14.0
 # [font.fallback]
 # families = ["Noto Sans CJK", "Noto Color Emoji", "Noto Sans Symbols 2"]
 
-# Visual-only glyph nudges. These do not change cell geometry.
-# offset_x = 0
-# offset_y = 0
-
-# Extra space between lines and cells, in pixels. Both change cell geometry.
-# line_spacing = 0
-# letter_spacing = 0
-
 # ---------------------------------------------------------------------------
 # Window
 # ---------------------------------------------------------------------------
 # Startup size in whole cells, plus padding on each side in pixels. The window
-# manager can only ever resize to a whole number of cells.
+# manager receives cell-sized resize hints. Fractional cell areas are cleared
+# with the background colour rather than stretching glyphs.
 [window]
 columns = 120
 lines = 32
@@ -115,6 +118,8 @@ lines = 10000
 # the clipboard; "disabled" ignores OSC 52 entirely.
 #
 # `max_paste_bytes` bounds a single paste before it is forwarded to the child.
+# Range: 1-1048564 bytes (1 MiB minus bracketed-paste delimiters). An oversized
+# paste is rejected as a whole; no partial UTF-8 or escape sequence is sent.
 [security]
 osc52 = "write-only"    # write-only | disabled
 max_paste_bytes = 65536

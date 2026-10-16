@@ -59,7 +59,9 @@ configuration is provided in `example/config.toml`.
 
 The TOML file is read once at startup; it is never hot-reloaded. Every
 section is optional, so a file that only sets the colours, or only the window,
-loads with everything else at its defaults. Supported keys:
+loads with everything else at its defaults. Unknown keys, invalid types and
+out-of-range values are reported at startup instead of silently loading defaults.
+Supported keys:
 
 - `font.family`, `font.size` (startup size, 6-72 px)
 - `font.bold`, `font.italic`, `font.bold_italic` (optional per-style faces)
@@ -72,6 +74,7 @@ loads with everything else at its defaults. Supported keys:
 - `cursor.style` (`block`, `underline`, `bar`) and `cursor.blink`
 - `scrollback.lines` (0 disables history, up to 1000000)
 - `security.osc52` (`write-only` or `disabled`) and `security.max_paste_bytes`
+  (1-1048564 bytes; oversized pastes are rejected whole).
 
 `example/config.toml` documents every key with its default. AURA never answers
 an OSC 52 *read* request, so the clipboard cannot be extracted by something
@@ -79,8 +82,9 @@ running inside the terminal.
 
 `font.size` is the configured startup size. `Ctrl+Plus` / `Ctrl+Minus`
 change the size during the session (fresh rasterization, rebuilt atlas,
-window and PTY geometry updated); `Ctrl+0` restores the configured startup
-size. The TOML value itself never changes at runtime.
+grid and PTY dimensions updated); `Ctrl+0` restores the configured startup
+size. Zoom keeps the outer window size fixed and recalculates the visible rows
+and columns. The TOML value itself never changes at runtime.
 
 Braille, box drawing and block elements are drawn from cell geometry, so plots
 and TUI borders remain aligned across font changes and configured spacing.
@@ -124,8 +128,10 @@ install -Dm644 aura.desktop /usr/share/applications/aura.desktop
 ## Testing
 
 ```sh
-cargo test            # 148 tests, including GPU readback assertions
+cargo test --locked   # Includes GPU readback assertions
 ./tests/e2e_shell_smoke.sh target/release/aura
+# Dedicated X11 display: checks resize/zoom geometry and pixel round trips.
+python3 tests/x11_resize.py target/release/aura
 ```
 
 `cargo test` runs the GPU readback suite as part of the normal run. It prints a
