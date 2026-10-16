@@ -21,6 +21,29 @@ per commit.
 
 ## [Unreleased]
 
+### Fixed
+
+- Aborted compose sequences no longer swallow the cancelling key. A dead
+  key followed by a character with no composed form (for example
+  dead-acute then `c`) previously returned no input at all, losing a
+  keystroke on every aborted sequence, including during password entry.
+  The cancelling key is now encoded like any other key.
+- C1 single-byte controls `IND` (0x84), `NEL` (0x85) and `HTS` (0x88) are
+  now honoured exactly like their `ESC D`, `ESC E` and `ESC H` spellings
+  instead of being silently dropped.
+- Scrollback shortcuts (`Shift+PgUp`/`Shift+PgDn`,
+  `Ctrl+Shift+Home`/`Ctrl+Shift+End`) no longer swallow keys on the
+  alternate screen. They now reach the fullscreen application as modified
+  navigation keys; previously `vim`, `less` and similar programs never
+  received them.
+- Mouse drags no longer extend the local selection while mouse tracking
+  is active. Press-mode tracking used to highlight locally at the same
+  time as the application received the press, naming different lines.
+- A zero-length PTY write no longer terminates the emulator. It is
+  treated as transient backpressure: the bytes stay queued and the next
+  wake retries them.
+- Interrupted PTY reads are retried instead of aborting the event loop.
+
 ### Added
 
 - Workspace restructured into the AURA crate layout: `crates/aura-core`,
