@@ -294,7 +294,12 @@ fn double_corners_preserve_two_separate_connected_strokes() {
             terminal.process(format!("\x1b[?25l{character}").as_bytes());
             let mut renderer = OffscreenRenderer::new(cw, ch).unwrap();
             let pixels = renderer.render(&mut terminal, &mut font).unwrap();
-            let mut unseen: Vec<bool> = pixels.chunks_exact(4).map(|p| p[0] > 44).collect();
+            let mut unseen: Vec<bool> = pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[0] > 44)
+                .collect();
             let mut components = Vec::new();
             for start in 0..unseen.len() {
                 if !unseen[start] {
@@ -352,8 +357,8 @@ fn graphical_cells_survive_zoom_and_selection_preserves_original_text() {
     renderer.invalidate_atlas();
     assert_eq!(renderer.render(&mut terminal, &mut font).unwrap(), original);
     terminal.set_selection(
-        aura_core::SelectionPoint { row: 0, column: 0 },
-        aura_core::SelectionPoint { row: 0, column: 3 },
+        aura_core::SelectionPoint { line: 0, column: 0 },
+        aura_core::SelectionPoint { line: 0, column: 3 },
     );
     renderer.render(&mut terminal, &mut font).unwrap();
     assert_eq!(terminal.selection_text().as_deref(), Some("⣇█╬i"));
