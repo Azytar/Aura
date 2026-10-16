@@ -30,7 +30,7 @@ impl Keyboard {
         if context.get_raw_ptr().is_null() {
             return Err(io::Error::other("cannot create XKB context").into());
         }
-        let mut state = device_state(&context, connection)?;
+        let state = device_state(&context, connection)?;
         eprintln!(
             "DEBUG keyboard device={} kc24=0x{:x} kc31=0x{:x} kc33=0x{:x} kc54=0x{:x}",
             x11::get_core_keyboard_device_id(connection),
@@ -138,6 +138,18 @@ impl Keyboard {
                     }
                     keymap::compose::Status::Cancelled => {
                         compose.reset();
+                        // A cancelling dead key can start a new sequence. Feed
+                        // it once after reset; ordinary keys still fall through.
+                        compose.feed(keymap::Keysym::new(sym));
+                        match compose.status() {
+                            keymap::compose::Status::Composing => return None,
+                            keymap::compose::Status::Composed => {
+                                let bytes = composed_bytes(compose);
+                                compose.reset();
+                                return bytes;
+                            }
+                            _ => {}
+                        }
                         // The key that aborts a dead-key sequence is
                         // ordinary input (dead-acute followed by `c` has no
                         // composed form). Dropping it loses a keystroke,
@@ -335,6 +347,88 @@ mod tests {
         let mut state = keymap::State::new(&map);
         state.update_mask(modifiers, 0, 0, 0, 0, group);
         state.key_get_one_sym(map.key_by_name(name).unwrap()).raw()
+    }
+
+    #[test]
+    fn repeated_keypress_snapshots_do_not_accumulate_modifiers_or_groups() {
+        let context = keymap::Context::new(keymap::CONTEXT_NO_FLAGS);
+        let map = keymap::Keymap::new_from_names(
+            &context,
+            "evdev",
+            "pc105",
+            "us,de",
+            "",
+            None,
+            keymap::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let mut keyboard = Keyboard {
+            state: keymap::State::new(&map),
+            compose: None,
+            context,
+        };
+        for (name, mask, expected) in [
+            ("AC01", 1u16, b"A".as_slice()),
+            ("AC01", 4, b"\x01"),
+            ("AC01", 8, b"\x1ba"),
+            ("AD01", (1 << 13) | (1 << 7), b"@"),
+            ("AD06", 1 << 13, b"z"),
+            ("AC01", 0, b"a"),
+        ] {
+            let event = KeyPressEvent {
+                detail: map.key_by_name(name).unwrap().raw() as u8,
+                state: KeyButMask::from(mask),
+                ..Default::default()
+            };
+            for _ in 0..8 {
+                let (sym, modifiers) = keyboard.key(&event);
+                assert_eq!(
+                    keyboard
+                        .bytes(sym, modifiers, aura_core::Modes::default())
+                        .as_deref(),
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_dead_key_cancelling_compose_can_start_a_new_sequence() {
+        let context = keymap::Context::new(keymap::CONTEXT_NO_FLAGS);
+        let map = keymap::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "us",
+            "",
+            None,
+            keymap::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let table = keymap::compose::Table::new_from_buffer(
+            &context,
+            "<dead_acute> <e> : \"é\"\n<dead_grave> <a> : \"à\"\n",
+            "C.UTF-8",
+            keymap::compose::FORMAT_TEXT_V1,
+            keymap::compose::COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let mut keyboard = Keyboard {
+            state: keymap::State::new(&map),
+            compose: Some(keymap::compose::State::new(
+                &table,
+                keymap::compose::STATE_NO_FLAGS,
+            )),
+            context,
+        };
+        let modifiers = KeyButMask::default();
+        let modes = aura_core::Modes::default();
+        assert_eq!(keyboard.bytes(0xfe51, modifiers, modes), None);
+        assert_eq!(keyboard.bytes(0xfe50, modifiers, modes), None);
+        assert_eq!(
+            keyboard.bytes('a' as u32, modifiers, modes),
+            Some("à".as_bytes().to_vec())
+        );
     }
 
     #[test]

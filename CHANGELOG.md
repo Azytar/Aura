@@ -39,10 +39,28 @@ per commit.
 - Mouse drags no longer extend the local selection while mouse tracking
   is active. Press-mode tracking used to highlight locally at the same
   time as the application received the press, naming different lines.
-- A zero-length PTY write no longer terminates the emulator. It is
-  treated as transient backpressure: the bytes stay queued and the next
-  wake retries them.
+- PTY writes yield after a bounded number of attempts, including repeated
+  interruptions and tiny partial writes, so pending input cannot starve X11.
+  `WouldBlock` retains the unwritten suffix for the next writable wake;
+  `WriteZero` and `BrokenPipe` propagate as errors without retry loops or
+  removing unaccepted bytes. A zero write is no longer mistaken for
+  transient backpressure.
 - Interrupted PTY reads are retried instead of aborting the event loop.
+- A cancelling dead key can begin a fresh Compose sequence; for example,
+  dead-acute then dead-grave then `a` now produces `à` with the matching
+  Compose rules instead of dropping the second accent.
+- C1 `RI` (0x8d) now scrolls like `ESC M`. C1 controls and sequence
+  introducers interrupt unfinished ESC/CSI sequences instead of being lost.
+  UTF-8 continuation bytes and control-string payloads keep their lexical
+  interpretation.
+- A wide glyph ending at the right margin leaves the cursor on the final
+  occupied column. Cursor reports and backspace now agree with the cell
+  pair, including when replacing it with narrow text.
+- Leaving the alternate screen clears its selection instead of highlighting
+  unrelated main-screen text. Stale local drags and autoscroll stop when
+  screen changes or mouse tracking invalidate their selection.
+- A hard reset returns the viewport to the cleared live screen instead of
+  continuing to display old scrollback.
 
 ### Added
 

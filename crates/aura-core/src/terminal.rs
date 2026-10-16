@@ -700,6 +700,7 @@ impl Terminal {
                 self.carriage_return();
                 self.index();
             }
+            0x8d => self.reverse_index(),
             0x88 => {
                 let column = self.cursor().column;
                 self.tabs[column] = true;
@@ -1043,13 +1044,10 @@ impl Terminal {
                 .set_hyperlink(cursor.row, cursor.column, Some(id));
         }
         self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
-        if cursor.column + 2 >= self.active_grid().width() {
-            if self.modes.auto_wrap {
-                self.pending_wrap = true;
-            }
-        } else {
-            self.set_cursor(cursor.column + 2, cursor.row);
-        }
+        // Even with delayed wrap the cursor names the last occupied column,
+        // not the leading half. DSR, backspace and relative moves use it.
+        self.set_cursor(cursor.column + 2, cursor.row);
+        self.pending_wrap = self.modes.auto_wrap && cursor.column + 2 >= self.active_grid().width();
     }
 
     fn write_single(&mut self, ch: char) {
@@ -1322,6 +1320,7 @@ impl Terminal {
             self.home_cursor();
             self.pending_wrap = false;
         } else if self.is_alternate_screen() {
+            self.clear_selection();
             self.grid.select_screen(ActiveScreen::Main);
             self.pending_wrap = self.main_pending_wrap;
             if save_main && self.alternate_1049_active {
@@ -1495,6 +1494,7 @@ impl Terminal {
 
     fn reset(&mut self) {
         self.grid.select_screen(ActiveScreen::Main);
+        self.jump_to_bottom();
         self.grid.screen_mut(ActiveScreen::Main).clear_all();
         self.grid.screen_mut(ActiveScreen::Alternate).clear_all();
         self.grid.screen_mut(ActiveScreen::Main).set_cursor(0, 0);
@@ -1606,6 +1606,100 @@ fn dec_graphic(ch: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clear_removes_wide_cells_links_and_graphemes_and_homes_the_cursor() {
+        let mut t = terminal(8, 3);
+        feed(
+            &mut t,
+            "\x1b]8;;https://example.org\x1b\\界e\u{301}\x1b]8;;\x1b\\\r\nold\r\nold\r\n"
+                .as_bytes(),
+        );
+        feed(&mut t, b"\x1b[H\x1b[2J\x1b[3J");
+        assert_eq!(t.cursor(), Cursor { column: 0, row: 0 });
+        assert_eq!(t.scrollback_len(), 0);
+        for row in 0..3 {
+            for column in 0..8 {
+                let cell = t.viewport_cell(row, column).unwrap();
+                assert_eq!(cell.content, 0);
+                assert!(!cell.flags().contains(CellFlags::WIDE_LEADING));
+                assert!(!cell.flags().contains(CellFlags::WIDE_SPACER));
+                assert!(t.viewport_stored_grapheme(row, column).is_none());
+                assert!(t.hyperlink_at(row, column).is_none());
+            }
+        }
+        feed(&mut t, b"X");
+        assert_eq!(line(&t, 0), "X.......");
+    }
+
+    #[test]
+    fn c1_reverse_index_matches_escape_at_the_scroll_margin() {
+        for sequence in [b"\x8d".as_slice(), b"\x1bM"] {
+            let mut t = terminal(4, 3);
+            feed(&mut t, b"AAAA\r\nBBBB\r\nCCCC\x1b[1;3H");
+            feed(&mut t, sequence);
+            assert_eq!(line(&t, 0), "....");
+            assert_eq!(line(&t, 1), "AAAA");
+            assert_eq!(t.cursor(), Cursor { column: 2, row: 0 });
+        }
+    }
+
+    #[test]
+    fn c1_interrupts_unfinished_escape_sequences_without_losing_text() {
+        for prefix in [b"\x1b[12;".as_slice(), b"\x1b(", b"\x1b"] {
+            let mut t = terminal(4, 3);
+            feed(&mut t, b"A");
+            feed(&mut t, prefix);
+            feed(&mut t, b"\x85B");
+            assert_eq!(line(&t, 0), "A...");
+            assert_eq!(line(&t, 1), "B...");
+            assert_eq!(t.cursor(), Cursor { column: 1, row: 1 });
+        }
+    }
+
+    #[test]
+    fn wide_glyph_at_right_margin_reports_and_moves_from_the_last_column() {
+        for prefix in ["AB界", "AB❤\u{fe0f}"] {
+            let mut t = terminal(4, 2);
+            feed(&mut t, prefix.as_bytes());
+            assert_eq!(t.cursor(), Cursor { column: 3, row: 0 });
+            assert_eq!(feed(&mut t, b"\x1b[6n"), b"\x1b[1;4R");
+            feed(&mut t, b"\x08X");
+            assert_eq!(line(&t, 0), "ABX.");
+            assert_eq!(line(&t, 1), "....");
+        }
+    }
+
+    #[test]
+    fn leaving_alternate_screen_discards_its_selection() {
+        let mut t = terminal(5, 2);
+        feed(&mut t, b"main\x1b[?1049halt");
+        let point = SelectionPoint {
+            line: t.viewport_line(0).unwrap(),
+            column: 0,
+        };
+        t.set_selection(point, point);
+        assert_eq!(t.selection_text().as_deref(), Some("a"));
+        feed(&mut t, b"\x1b[?1049l");
+        assert!(t.selection().is_none());
+        assert_eq!(line(&t, 0), "main.");
+        assert_eq!(t.cursor(), Cursor { column: 4, row: 0 });
+    }
+
+    #[test]
+    fn reset_shows_the_cleared_live_screen_instead_of_old_scrollback() {
+        let mut t = terminal(5, 2);
+        feed(&mut t, b"old\r\nold\r\nold\r\n");
+        t.scrollback_top();
+        assert!(t.viewport_offset() > 0);
+        feed(&mut t, b"\x1bc");
+        assert_eq!(t.viewport_offset(), 0);
+        assert_eq!(t.cursor(), Cursor { column: 0, row: 0 });
+        for row in 0..2 {
+            assert!((0..5).all(|column| t.viewport_cell(row, column).unwrap().content == 0));
+        }
+        assert_eq!(t.modes(), Modes::default());
+    }
+
     #[test]
     fn mixed_tui_updates_resize_and_chunking_preserve_wide_cell_ownership() {
         let mut whole = terminal(40, 12);

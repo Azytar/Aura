@@ -453,11 +453,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::ButtonRelease(button) => {
+                                // Release always ends the local drag, even if the
+                                // application enabled mouse tracking mid-gesture.
+                                selection_anchor = None;
+                                if autoscroll_dir.take().is_some() {
+                                    set_autoscroll_timer(autoscroll_timer, false)?;
+                                }
                                 if terminal.modes().mouse_tracking == MouseTracking::Off {
-                                    selection_anchor = None;
-                                    if autoscroll_dir.take().is_some() {
-                                        set_autoscroll_timer(autoscroll_timer, false)?;
-                                    }
                                     // Own the PRIMARY selection like any X11
                                     // client, so other applications can paste
                                     // the highlighted text with a middle click.
@@ -506,6 +508,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     input.push(&bytes);
                                 } else if terminal.modes().mouse_tracking == MouseTracking::Off
+                                    && held_button(motion.state) == Some(1)
+                                    && terminal.selection().is_some()
                                     && let Some(anchor) = selection_anchor
                                 {
                                     // Dragging past the top or bottom edge scrolls
@@ -644,7 +648,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             size_of::<u64>(),
                         )
                     };
-                    if let (Some(direction), Some(anchor)) = (autoscroll_dir, selection_anchor) {
+                    if let (Some(direction), Some(anchor)) = (autoscroll_dir, selection_anchor)
+                        && terminal.modes().mouse_tracking == MouseTracking::Off
+                        && terminal.selection().is_some()
+                    {
                         let metrics = configured_metrics(&font, &config);
                         let padding_y = config.window.padding_y as i32;
                         let bottom = i32::from(last_winsize.pixel_height) - padding_y;
@@ -677,22 +684,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         invalidated = true;
                     } else {
+                        // A screen switch, reset, resize or application-owned
+                        // mouse mode invalidates the old buffer coordinates.
                         set_autoscroll_timer(autoscroll_timer, false)?;
                         autoscroll_dir = None;
+                        selection_anchor = None;
                     }
                 }
                 _ => {}
             }
         }
         if running {
-            match input.flush(|bytes| pty.write(bytes)) {
-                Err(error) if error.kind() == io::ErrorKind::WriteZero => {
-                    // A zero-length PTY write is transient backpressure, not
-                    // a broken pipe: the bytes stay queued and EPOLLOUT is
-                    // armed below via `pending()`, so the next wake retries.
-                }
-                other => other?,
-            }
+            input.flush(|bytes| pty.write(bytes))?;
             if watching_write != input.pending() {
                 watching_write = input.pending();
                 let mut interest = libc::epoll_event {
