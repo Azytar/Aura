@@ -324,9 +324,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     )?;
                                     continue;
                                 }
+                                // Scrollback shortcuts are local-view operations. On the
+                                // alternate screen the application owns the viewport,
+                                // so these keys fall through to the encoding below
+                                // and reach it as modified navigation keys instead
+                                // of scrolling (and clearing the selection of) a
+                                // view the application never sees.
                                 if modifiers.contains(KeyButMask::CONTROL)
                                     && modifiers.contains(KeyButMask::SHIFT)
                                     && matches!(sym, 0xff50 | 0xff57)
+                                    && !terminal.is_alternate_screen()
                                 {
                                     if sym == 0xff50 {
                                         terminal.scrollback_top();
@@ -338,6 +345,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 if modifiers.contains(KeyButMask::SHIFT)
                                     && matches!(sym, 0xff55 | 0xff56)
+                                    && !terminal.is_alternate_screen()
                                 {
                                     if sym == 0xff55 {
                                         terminal.page_up();
@@ -350,10 +358,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(bytes) =
                                     keyboard.bytes(sym, modifiers, terminal.modes())
                                 {
-                                    // Typing belongs to the application now;
-                                    // a lingering highlight would confuse it
-                                    // with fresh output.
+                                    // Typing belongs to the application now; a
+                                    // lingering highlight would confuse it with
+                                    // fresh output, and the echo must be visible
+                                    // instead of landing under a scrolled view.
                                     terminal.clear_selection();
+                                    terminal.jump_to_bottom();
                                     input.push(&bytes);
                                     cursor_blink_on = true;
                                     invalidated = true;
@@ -482,7 +492,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     )
                                 {
                                     input.push(&bytes);
-                                } else if terminal.modes().mouse_tracking != MouseTracking::Drag
+                                } else if terminal.modes().mouse_tracking == MouseTracking::Off
                                     && let Some(anchor) = selection_anchor
                                 {
                                     // Dragging past the top or bottom edge scrolls
@@ -543,6 +553,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     clipboard.receive_paste(&connection, window, notify.property)?
                                 {
                                     let paste = terminal.encode_paste(&bytes);
+                                    // A paste is input: show where it lands.
+                                    terminal.jump_to_bottom();
                                     input.push(&paste);
                                     invalidated = true;
                                 }
@@ -589,6 +601,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                             Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                             Err(error) => return Err(error.into()),
                         }
                     }
@@ -659,7 +672,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if running {
-            input.flush(|bytes| pty.write(bytes))?;
+            match input.flush(|bytes| pty.write(bytes)) {
+                Err(error) if error.kind() == io::ErrorKind::WriteZero => {
+                    // A zero-length PTY write is transient backpressure, not
+                    // a broken pipe: the bytes stay queued and EPOLLOUT is
+                    // armed below via `pending()`, so the next wake retries.
+                }
+                other => other?,
+            }
             if watching_write != input.pending() {
                 watching_write = input.pending();
                 let mut interest = libc::epoll_event {

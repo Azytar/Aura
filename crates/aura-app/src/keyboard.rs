@@ -30,7 +30,15 @@ impl Keyboard {
         if context.get_raw_ptr().is_null() {
             return Err(io::Error::other("cannot create XKB context").into());
         }
-        let state = device_state(&context, connection)?;
+        let mut state = device_state(&context, connection)?;
+        eprintln!(
+            "DEBUG keyboard device={} kc24=0x{:x} kc31=0x{:x} kc33=0x{:x} kc54=0x{:x}",
+            x11::get_core_keyboard_device_id(connection),
+            state.key_get_one_sym(keymap::Keycode::new(24)).raw(),
+            state.key_get_one_sym(keymap::Keycode::new(31)).raw(),
+            state.key_get_one_sym(keymap::Keycode::new(33)).raw(),
+            state.key_get_one_sym(keymap::Keycode::new(54)).raw(),
+        );
         // Types and virtual modifiers are part of a layout, not just its symbols.
         xkb::select_events(
             connection,
@@ -72,6 +80,12 @@ impl Keyboard {
 
     pub fn reload(&mut self, connection: &XCBConnection) -> Result<(), io::Error> {
         self.state = device_state(&self.context, connection)?;
+        eprintln!(
+            "DEBUG reload: kc24=0x{:x} kc31=0x{:x} kc54=0x{:x}",
+            self.state.key_get_one_sym(keymap::Keycode::new(24)).raw(),
+            self.state.key_get_one_sym(keymap::Keycode::new(31)).raw(),
+            self.state.key_get_one_sym(keymap::Keycode::new(54)).raw(),
+        );
         if let Some(compose) = &mut self.compose {
             compose.reset();
         }
@@ -93,6 +107,10 @@ impl Keyboard {
         );
         let keycode = keymap::Keycode::new(u32::from(event.detail));
         let sym = self.state.key_get_one_sym(keycode).raw();
+        eprintln!(
+            "DEBUG key event: keycode={} sym=0x{:x} state=0x{:x}",
+            event.detail, sym, mask
+        );
         let consumed = self.state.key_get_consumed_mods(keycode) as u16;
         // AltGr can consume Control/Alt on some layouts; those modifiers must
         // not turn its printable character into an application shortcut.
@@ -120,7 +138,11 @@ impl Keyboard {
                     }
                     keymap::compose::Status::Cancelled => {
                         compose.reset();
-                        return None;
+                        // The key that aborts a dead-key sequence is
+                        // ordinary input (dead-acute followed by `c` has no
+                        // composed form). Dropping it loses a keystroke,
+                        // which is especially costly during password entry,
+                        // so fall through and encode it like any other key.
                     }
                     keymap::compose::Status::Nothing => {}
                 }
@@ -370,6 +392,51 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_compose_still_emits_the_cancelling_key() {
+        // Regression test: the key that aborts a dead-key sequence has no
+        // composed form, but it is still ordinary input. Dropping it lost a
+        // keystroke on every aborted sequence, including password entry.
+        let context = keymap::Context::new(keymap::CONTEXT_NO_FLAGS);
+        let map = keymap::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            "us",
+            "",
+            None,
+            keymap::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let table = keymap::compose::Table::new_from_buffer(
+            &context,
+            "<dead_acute> <e> : \"é\"\n",
+            "C.UTF-8",
+            keymap::compose::FORMAT_TEXT_V1,
+            keymap::compose::COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let mut keyboard = Keyboard {
+            state: keymap::State::new(&map),
+            compose: Some(keymap::compose::State::new(
+                &table,
+                keymap::compose::STATE_NO_FLAGS,
+            )),
+            context,
+        };
+        let modifiers = KeyButMask::default();
+        let modes = aura_core::Modes::default();
+        assert_eq!(keyboard.bytes(0xfe51, modifiers, modes), None);
+        assert_eq!(
+            keyboard.bytes('c' as u32, modifiers, modes),
+            Some(vec![b'c'])
+        );
+        assert_eq!(
+            keyboard.bytes('e' as u32, modifiers, modes),
+            Some(vec![b'e'])
+        );
+    }
+
+    #[test]
     fn application_keypad_retains_physical_key_identity() {
         for (sym, suffix) in [
             (0xffb1, b'q'),
@@ -412,6 +479,20 @@ mod tests {
         );
         assert_eq!(key(0xff09, KeyButMask::SHIFT, false), b"\x1b[Z");
         assert_eq!(key(0xffc9, KeyButMask::CONTROL, false), b"\x1b[24;5~");
+        // The encodings the alternate-screen fall-through relies on: when a
+        // fullscreen application runs, Shift+PgUp/PgDn and Ctrl+Shift+Home/End
+        // must reach it as modified navigation keys instead of scrolling the
+        // local view.
+        assert_eq!(key(0xff55, KeyButMask::SHIFT, false), b"\x1b[5;2~");
+        assert_eq!(key(0xff56, KeyButMask::SHIFT, false), b"\x1b[6;2~");
+        assert_eq!(
+            key(0xff50, KeyButMask::CONTROL | KeyButMask::SHIFT, false),
+            b"\x1b[1;6H"
+        );
+        assert_eq!(
+            key(0xff57, KeyButMask::CONTROL | KeyButMask::SHIFT, false),
+            b"\x1b[1;6F"
+        );
         for (sym, byte) in [
             ('a', 1),
             ('A', 1),

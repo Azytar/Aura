@@ -136,5 +136,10 @@ mod tests {
             input.flush(|_| Ok(0)).unwrap_err().kind(),
             io::ErrorKind::WriteZero
         );
+        // The event loop treats `WriteZero` as transient backpressure: the
+        // unwritten bytes must stay queued so the next EPOLLOUT wake retries
+        // them instead of the emulator exiting with the queue dropped.
+        assert_eq!(input.bytes.len(), 4);
+        assert!(input.pending());
     }
 }
