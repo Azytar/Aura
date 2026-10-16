@@ -851,3 +851,59 @@ fn a_long_sessions_full_atlas_is_rebuilt_for_visible_glyphs() {
             .any(|p| p[0] > 150)
     );
 }
+
+#[test]
+fn complete_emoji_clusters_reach_the_color_shader_and_preserve_cell_ownership() {
+    if !require_gpu() {
+        return;
+    }
+    let mut font = Font::load(None, 18.0).unwrap();
+    if !font
+        .glyph_text("👩\u{200d}💻", false, false)
+        .unwrap()
+        .1
+        .color
+    {
+        eprintln!("skipped: color emoji font unavailable");
+        return;
+    }
+    let (cw, ch) = (font.metrics().width, font.metrics().height);
+    for text in ["👩\u{200d}💻", "👍🏽", "🇪🇸", "❤\u{fe0f}"] {
+        let mut terminal = Terminal::new(3, 1).unwrap();
+        terminal.process(b"\x1b[?25l");
+        terminal.process(text.as_bytes());
+        terminal.process(b"\x1b[44m ");
+        assert!(
+            terminal
+                .viewport_cell(0, 1)
+                .unwrap()
+                .flags()
+                .contains(aura_core::CellFlags::WIDE_SPACER)
+        );
+        let width = cw * 3;
+        let mut renderer = OffscreenRenderer::new(width, ch).unwrap();
+        let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+        assert!(
+            pixels
+                .chunks_exact(4)
+                .take((cw * 2) as usize)
+                .any(|p| p[0] != p[1])
+                || (0..ch).any(|y| (0..cw * 2).any(|x| {
+                    let offset = ((y * width + x) * 4) as usize;
+                    let p = &pixels[offset..offset + 4];
+                    p[0].max(p[1]).max(p[2]) - p[0].min(p[1]).min(p[2]) > 20
+                })),
+            "{text} did not reach the color shader"
+        );
+        for y in 0..ch {
+            for x in cw * 2..width {
+                let offset = ((y * width + x) * 4) as usize;
+                assert_eq!(
+                    &pixels[offset..offset + 4],
+                    [0, 0, 238, 255],
+                    "{text} painted its neighbor"
+                );
+            }
+        }
+    }
+}

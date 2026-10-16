@@ -47,6 +47,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut font = Font::load_with_family(&config.font.family, font_sizes.current())
         .map_err(io::Error::other)?;
     font.set_fallback_families(&config.font.fallback_families);
+    for (bold, italic, face) in [
+        (true, false, &config.font.bold),
+        (false, true, &config.font.italic),
+        (true, true, &config.font.bold_italic),
+    ] {
+        if let Some(face) = face {
+            if face.family.is_none() && face.style.is_none() {
+                continue;
+            }
+            font.set_style_face(bold, italic, face.family.as_deref(), face.style.as_deref())
+                .map_err(io::Error::other)?;
+        }
+    }
     let geometry = FontGeometry::new(
         font.metrics().width,
         font.metrics().height,
