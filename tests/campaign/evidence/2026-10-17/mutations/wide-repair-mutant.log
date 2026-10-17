@@ -1,0 +1,22 @@
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 1 test
+
+thread 'terminal::campaign::replay_cases' (34675) panicked at crates/aura-core/src/terminal/campaign.rs:265:21:
+orphan leading screen=Main line=0 col=0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'terminal::campaign::replay_cases' (34675) panicked at crates/aura-core/src/terminal/campaign.rs:616:46:
+replay=/workspace/Aura/tests/campaign/cases/wide-delete.case: property=state first_step=1 action=Some(Bytes([27, 91, 49, 59, 50, 72, 27, 91, 80])): orphan leading screen=Main line=0 col=0
+test terminal::campaign::replay_cases ... FAILED
+
+failures:
+
+failures:
+    terminal::campaign::replay_cases
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 104 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p aura-core --lib`

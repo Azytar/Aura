@@ -1072,6 +1072,33 @@ impl Grid {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn assert_sidecar_ownership(&self, links: &std::collections::HashMap<u32, String>) {
+        for row in self.rows.iter().chain(&self.scrollback) {
+            for (column, cell) in row.cells.iter().enumerate() {
+                if cell.content == 0 && !cell.is_wide_spacer() {
+                    assert!(row.graphemes[column].is_none(), "orphan grapheme");
+                    assert!(row.hyperlinks[column].is_none(), "orphan hyperlink");
+                }
+                if let Some(id) = row.hyperlinks[column] {
+                    assert!(links.contains_key(&id), "unknown hyperlink id");
+                }
+                if cell.is_wide_leading() && column + 1 < self.width {
+                    assert_eq!(
+                        row.hyperlinks[column],
+                        row.hyperlinks[column + 1],
+                        "split wide hyperlink"
+                    );
+                    assert_eq!(
+                        (cell.fg, cell.bg),
+                        (row.cells[column + 1].fg, row.cells[column + 1].bg),
+                        "split wide rendition"
+                    );
+                }
+            }
+        }
+    }
+
     pub fn mark_row_dirty(&mut self, row: usize) -> bool {
         let Some(target) = self.row_mut(row) else {
             return false;
@@ -1157,7 +1184,9 @@ fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut [Option<String>]) {
 
 fn clear_orphan_hyperlinks(cells: &[Cell], hyperlinks: &mut [Option<u32>]) {
     for (cell, link) in cells.iter().zip(hyperlinks) {
-        if cell.content == 0 {
+        // Wide spacers have no scalar but still belong to the leading
+        // cell's hyperlink. Only a genuinely empty cell loses ownership.
+        if cell.content == 0 && !cell.is_wide_spacer() {
             *link = None;
         }
     }

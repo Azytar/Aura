@@ -1,0 +1,7 @@
+PASS native incremental/fresh font=DejaVuSansMono.ttf size=9 pixels=92x130
+PASS native incremental/fresh font=DejaVuSansMono.ttf size=12 pixels=116x154
+PASS native incremental/fresh font=DejaVuSansMono.ttf size=17 pixels=152x202
+PASS native incremental/fresh font=DejaVuSansMono.ttf size=18 pixels=152x210
+PASS native incremental/fresh font=DejaVuSansMono.ttf size=23 pixels=188x258
+PASS native incremental/fresh font=DejaVuSansMono.ttf size=36 pixels=284x378
+COMPLETE native GPU profile=exhaustive cases=6

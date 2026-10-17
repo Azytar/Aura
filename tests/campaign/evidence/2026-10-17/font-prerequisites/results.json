@@ -1,0 +1,38 @@
+[
+  {
+    "label": "text",
+    "required": "0",
+    "exit": 0,
+    "expected": true
+  },
+  {
+    "label": "text",
+    "required": "1",
+    "exit": 101,
+    "expected": true
+  },
+  {
+    "label": "text",
+    "restored": true,
+    "exit": 0,
+    "source_sha256": "bfd5e1666ca16ddc25d64206eb1830fcfc913f72fabbee6eba9a68bafe3a57d9"
+  },
+  {
+    "label": "gpu",
+    "required": "0",
+    "exit": 0,
+    "expected": true
+  },
+  {
+    "label": "gpu",
+    "required": "1",
+    "exit": 101,
+    "expected": true
+  },
+  {
+    "label": "gpu",
+    "restored": true,
+    "exit": 0,
+    "source_sha256": "90405580dd688f5d414d481491a8a92f5a1aabc5c7d6654018b11a0580df7624"
+  }
+]

@@ -1,0 +1,21 @@
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 6 tests
+test terminal::campaign::all_short_partitions_and_directed_limits ... ok
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... COMPLETE braille pairs count=65536 elapsed=161.18391ms
+ok
+test terminal::campaign::generated_combining_resize ... campaign property=combining profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=combining cases=64 elapsed=21.011535ms
+ok
+test terminal::campaign::generated_independent_ascii_model ... campaign property=model profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=model cases=64 elapsed=49.481182ms
+ok
+test terminal::campaign::generated_state_and_fragmentation ... campaign property=state profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=state cases=64 elapsed=106.490832ms
+ok
+test terminal::campaign::replay_cases ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.36s
+

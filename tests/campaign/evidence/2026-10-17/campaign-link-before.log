@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 1 test
+
+thread 'terminal::campaign::replay_cases' (30263) panicked at crates/aura-core/src/grid.rs:1087:21:
+assertion `left == right` failed: split wide hyperlink
+  left: Some(1)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'terminal::campaign::replay_cases' (30263) panicked at crates/aura-core/src/terminal/campaign.rs:616:46:
+replay=/workspace/Aura/tests/campaign/cases/insert-wide-link.case: property=state first_step=2 action=Some(Bytes([231, 149, 140, 228, 184, 173])): assertion `left == right` failed: split wide hyperlink
+  left: Some(1)
+ right: None
+test terminal::campaign::replay_cases ... FAILED
+
+failures:
+
+failures:
+    terminal::campaign::replay_cases
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 103 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p aura-core --lib`

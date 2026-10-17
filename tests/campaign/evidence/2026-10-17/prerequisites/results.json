@@ -1,0 +1,12 @@
+[
+  {
+    "required": "0",
+    "exit": 0,
+    "expected": true
+  },
+  {
+    "required": "1",
+    "exit": 101,
+    "expected": true
+  }
+]

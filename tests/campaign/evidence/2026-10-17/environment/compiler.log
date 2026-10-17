@@ -1,0 +1,8 @@
+$ glslc --version
+shaderc 2025.2-1
+spirv-tools 2025.1~rc1-1
+glslang 15.1.0+1.4.309.0-1
+
+Target: SPIR-V 1.0
+
+exit=0

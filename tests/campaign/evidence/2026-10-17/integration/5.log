@@ -1,0 +1,3 @@
+PASS: invalid configuration produces actionable startup errors
+PASS: fixed-window zoom, configured reset, padding hints and identical pixels after round trip
+PASS: resize bursts settle on matching window/grid/PTY dimensions without text or pixel residue

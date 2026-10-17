@@ -1,0 +1,53 @@
+[
+  {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "aura-text",
+      "campaign::",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    "variable": "AURA_TEXT_REPLAY",
+    "input": "/workspace/campaign-evidence/replay-controls/text-sample.case",
+    "input_bytes": 25,
+    "exit": 0,
+    "expected": true
+  },
+  {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "aura-core",
+      "terminal::campaign::replay_cases",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    "variable": "AURA_REPLAY",
+    "input": "/workspace/campaign-oversized.case",
+    "input_bytes": 524289,
+    "exit": 101,
+    "expected": true
+  },
+  {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "aura-text",
+      "campaign::",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    "variable": "AURA_TEXT_REPLAY",
+    "input": "/workspace/campaign-oversized.case",
+    "input_bytes": 524289,
+    "exit": 101,
+    "expected": true
+  }
+]

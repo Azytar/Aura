@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/campaign_gpu.rs (target/debug/deps/campaign_gpu-4dca09cf1eefac08)
+
+running 2 tests
+
+thread 'cached_atlas_render_matches_a_new_renderer_and_font' (55032) panicked at crates/aura-render/tests/campaign_gpu.rs:17:13:
+required font /nonexistent/aura-campaign-font.ttf: cannot read /nonexistent/aura-campaign-font.ttf: No such file or directory (os error 2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'unicode_named_braille_witnesses_and_components' (55033) panicked at crates/aura-render/tests/campaign_gpu.rs:17:13:
+required font /nonexistent/aura-campaign-font.ttf: cannot read /nonexistent/aura-campaign-font.ttf: No such file or directory (os error 2)
+test cached_atlas_render_matches_a_new_renderer_and_font ... FAILED
+test unicode_named_braille_witnesses_and_components ... FAILED
+
+failures:
+
+failures:
+    cached_atlas_render_matches_a_new_renderer_and_font
+    unicode_named_braille_witnesses_and_components
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p aura-render --test campaign_gpu`

@@ -1,0 +1,10 @@
+{
+  "environment": "local sysroot /workspace/.aura-env; dedicated Xvfb :99",
+  "variables": {
+    "RUSTFLAGS": "-L native=/workspace/.aura-env/sysroot/usr/lib/x86_64-linux-gnu",
+    "VK_DRIVER_FILES": "/workspace/.aura-env/sysroot/usr/share/vulkan/icd.d/lvp_icd.json",
+    "CARGO_BUILD_JOBS": "4",
+    "LD_LIBRARY_PATH": "/workspace/.aura-env/sysroot/usr/lib/x86_64-linux-gnu"
+  },
+  "font_sha256": "54bf827eb99404e8f430c330ad30f063334f637eba0109b6a18d4f566a8e9dd8"
+}

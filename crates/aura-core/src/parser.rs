@@ -54,6 +54,7 @@ enum State {
 
 /// Incremental VT syntax parser. It owns no terminal or IO state.
 #[derive(Clone, Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Parser {
     state: State,
     escape_intermediates: [u8; 2],

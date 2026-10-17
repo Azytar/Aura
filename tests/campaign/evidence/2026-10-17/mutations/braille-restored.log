@@ -1,0 +1,10 @@
+   Compiling aura-render v0.1.0 (/workspace/Aura/crates/aura-render)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.31s
+     Running tests/campaign_gpu.rs (target/debug/deps/campaign_gpu-4dca09cf1eefac08)
+
+running 1 test
+COMPLETE GPU Unicode witnesses: 256 patterns x 9 cell/spacing/offset configurations
+test unicode_named_braille_witnesses_and_components ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.77s
+

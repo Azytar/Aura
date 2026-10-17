@@ -168,8 +168,6 @@ a `Ctrl+C` when a skew is detected.
 - **No fontconfig discovery.** Fonts are found by scanning standard
   directories, so a font outside them needs an explicit path.
 - Font configuration is startup-only; live reload is not implemented.
-- No coverage-guided fuzzing: only stable toolchains are available, so the
-  `crates/aura-core/fuzz` target runs as plain libFuzzer mutation runs.
 - OSC 8 hyperlinks are parsed and stored, and OSC 52 writes are honoured, but
   nothing opens a link on click.
 
@@ -183,3 +181,7 @@ virtual display:
 ```sh
 python3 tests/x11_daily_use.py target/release/aura
 ```
+
+See [the reproducible test campaign](docs/TEST_CAMPAIGN.md) for seeded
+properties, concrete replay, braille enumeration, GPU checks and instrumented
+nightly fuzzing, including measured budgets and validation limits.
