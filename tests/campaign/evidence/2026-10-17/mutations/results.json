@@ -1,0 +1,29 @@
+[
+  {
+    "name": "braille",
+    "detected": true,
+    "restored": true,
+    "mutant_exit": 101,
+    "mutant_seconds": 1.5264835990019492,
+    "restored_seconds": 2.1369465099996887,
+    "source_sha256": "84b9e5b6f0a87eca55ad4d6d87f408fb2f1c4ea0cce9963ce53e2f902e573753"
+  },
+  {
+    "name": "wide-repair",
+    "detected": true,
+    "restored": true,
+    "mutant_exit": 101,
+    "mutant_seconds": 0.6674571350013139,
+    "restored_seconds": 1.7330916409991914,
+    "source_sha256": "2b6fb2e780373a68ccc58ead5041b3a82dac895df6a1621773f72813bb67d777"
+  },
+  {
+    "name": "dirty-update",
+    "detected": true,
+    "restored": true,
+    "mutant_exit": 1,
+    "mutant_seconds": 1.8512295069958782,
+    "restored_seconds": 2.6348283199986327,
+    "source_sha256": "4e3a57abdec583b9d9a6393095499165619b099b569b74834cc0675dd2b56cca"
+  }
+]

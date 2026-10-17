@@ -23,6 +23,14 @@ per commit.
 
 ### Fixed
 
+- Combining marks arriving after a main-screen resize stay attached to the
+  reflowed base cell instead of using its old coordinates.
+- Insert-mode cell shifts retain hyperlink ownership on valid wide-cell
+  continuation halves.
+- Add bounded, seeded terminal/text properties, concrete failure replay,
+  braille enumeration and independent GPU/native rendering checks, with a
+  reproducible campaign report in `docs/TEST_CAMPAIGN.md`.
+
 - Runtime font zoom keeps the window extent fixed, recalculates the grid and
   PTY dimensions, and rebuilds the font atlas once per input batch. Resize
   bursts reconcile the final geometry rather than every queued intermediate.

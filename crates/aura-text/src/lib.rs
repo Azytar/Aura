@@ -1788,3 +1788,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "campaign.rs"]
+mod campaign;

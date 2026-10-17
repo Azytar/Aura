@@ -1,0 +1,84 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.04s
+     Running tests/campaign_gpu.rs (target/debug/deps/campaign_gpu-4dca09cf1eefac08)
+
+running 2 tests
+test cached_atlas_render_matches_a_new_renderer_and_font ... SKIP Vulkan: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test unicode_named_braille_witnesses_and_components ... SKIP Vulkan: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cell_graphics_gpu.rs (target/debug/deps/cell_graphics_gpu-0496cfd1a068bf3c)
+
+running 8 tests
+test blocks_cover_full_strides_and_fractional_halves_are_complementary ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test braille_centers_form_one_uniform_grid_across_cell_boundaries ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test double_corners_preserve_two_separate_connected_strokes ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test every_box_drawing_character_paints_and_quadrants_keep_their_area ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test every_braille_pattern_keeps_unicode_dot_order_across_sizes_and_spacing ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test graphical_cells_survive_zoom_and_selection_preserves_original_text ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test graphics_ignore_font_style_but_keep_sgr_colors_and_inverse ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test light_heavy_and_double_lines_join_without_dim_center_pixels ... skipped: Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/offscreen_gpu.rs (target/debug/deps/offscreen_gpu-13041dd37b794272)
+
+running 17 tests
+test a_long_sessions_full_atlas_is_rebuilt_for_visible_glyphs ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test color_emoji_samples_the_color_atlas ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test complete_emoji_clusters_reach_the_color_shader_and_preserve_cell_ownership ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test cursor_shapes_invert_expected_regions ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test font_resize_keeps_combining_grapheme_in_one_cell ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test font_resize_repaints_ascii_cells_with_fresh_rasterization ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test font_resize_repaints_color_emoji_from_fresh_color_atlas ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test font_resize_rerasterizes_wide_cells_with_terminal_cell_ownership ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test glyph_cache_hits_keep_later_table_entries ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test inverse_and_truecolor_cells_use_deterministic_colors ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test mixed_fallback_frame_renders_all_atlases ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test narrow_glyph_pixels_and_backgrounds_survive_padding_spacing_and_residue ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test overwriting_a_wide_right_margin_pair_removes_its_spacer_pixels ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test renders_terminal_cells_and_reads_back_expected_colors ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+test selection_uses_the_configured_palette_colour ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test thin_cursors_preserve_the_glyph_outside_the_cursor_stripe ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+ok
+test underline_and_strikethrough_paint_foreground_rows ... Vulkan device unavailable: offscreen Vulkan instance creation: ERROR_INCOMPATIBLE_DRIVER
+skipped: no Vulkan 1.3 graphics device available
+ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

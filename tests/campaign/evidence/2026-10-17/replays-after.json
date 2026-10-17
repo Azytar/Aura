@@ -1,0 +1,30 @@
+[
+  {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "aura-core",
+      "terminal::campaign::replay_cases",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    "AURA_REPLAY": "/workspace/Aura/tests/campaign/cases/combining-resize.case",
+    "exit": 0
+  },
+  {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "aura-core",
+      "terminal::campaign::replay_cases",
+      "--locked",
+      "--",
+      "--nocapture"
+    ],
+    "AURA_REPLAY": "/workspace/Aura/tests/campaign/cases/insert-wide-link.case",
+    "exit": 0
+  }
+]

@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 6 tests
+test terminal::campaign::all_short_partitions_and_directed_limits ... ok
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... COMPLETE braille pairs count=65536 elapsed=306.072702ms
+ok
+test terminal::campaign::generated_combining_resize ... campaign property=combining profile=extended settings=Settings { profile: "extended", seed: 1096110657, algorithm: ChaCha, cases: 2048, actions: 96, width: 24, height: 12, history: 128, shrink: 4096 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=combining cases=2048 elapsed=2.135751487s
+ok
+test terminal::campaign::generated_independent_ascii_model ... campaign property=model profile=extended settings=Settings { profile: "extended", seed: 1096110657, algorithm: ChaCha, cases: 2048, actions: 96, width: 24, height: 12, history: 128, shrink: 4096 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=model cases=2048 elapsed=22.56593451s
+ok
+test terminal::campaign::generated_state_and_fragmentation ... campaign property=state profile=extended settings=Settings { profile: "extended", seed: 1096110657, algorithm: ChaCha, cases: 2048, actions: 96, width: 24, height: 12, history: 128, shrink: 4096 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=state cases=2048 elapsed=16.773003381s
+ok
+test terminal::campaign::replay_cases ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 41.83s
+

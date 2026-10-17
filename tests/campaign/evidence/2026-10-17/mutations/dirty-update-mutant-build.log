@@ -1,0 +1,13 @@
+   Compiling aura-render v0.1.0 (/workspace/Aura/crates/aura-render)
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+warning: unused variable: `dirty`
+    --> crates/aura-render/src/lib.rs:2661:46
+     |
+2661 | pub(crate) fn rows_to_rebuild(height: usize, dirty: Vec<usize>, cache_invalid: bool) -> Vec<usize> {
+     |                                              ^^^^^ help: if this is intentional, prefix it with an underscore: `_dirty`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `aura-render` (lib) generated 1 warning (run `cargo fix --lib -p aura-render` to apply 1 suggestion)
+   Compiling aura-app v0.1.0 (/workspace/Aura/crates/aura-app)
+    Finished `release` profile [optimized] target(s) in 6.32s

@@ -1,0 +1,59 @@
+{
+  "base_commit": "3181591",
+  "initial_worktree": "clean",
+  "ordered_verification": "verification/results.json",
+  "integration": "integration/results.json",
+  "auxiliary_checks": [
+    {
+      "command": "CARGO_TARGET_DIR=/workspace/campaign-msrv-target cargo +1.88.0 check --workspace --all-targets --all-features --locked",
+      "exit": 0,
+      "log": "campaign-msrv-final.log"
+    },
+    {
+      "command": "cargo fmt --manifest-path crates/aura-core/fuzz/Cargo.toml -- --check",
+      "exit": 0,
+      "log": "campaign-fuzz-fmt-final.log"
+    },
+    {
+      "command": "cargo +nightly-2026-10-10 check --manifest-path crates/aura-core/fuzz/Cargo.toml --locked",
+      "exit": 0,
+      "log": "campaign-fuzz-check.log"
+    }
+  ],
+  "final_source_sha256": {
+    "crates/aura-render/build.rs": "026abdb5335b4c6595703a8685cfcc2f6b6b72bb91cb5c9027fa20a1c6089c22",
+    "crates/aura-app/src/input.rs": "5f43297dbc6d4d84b999252107a5cd1bd856eb1feb80cd9d8d143c94a3347ae4",
+    "crates/aura-app/src/keyboard.rs": "d11342503990850b6915156f871f4dba4b73babb0938ed7db59fe70eeefa6c34",
+    "crates/aura-app/src/main.rs": "01d2029c258c2ac908f44f3ce832dfd1bdf69472e017d611bc9424af1add7003",
+    "crates/aura-app/src/signals.rs": "aabf4aa09f57d70641a8d6032c4b895f3dc2e4e7b65cb5f477a3e18d63a153fa",
+    "crates/aura-app/tests/version_consistency.rs": "9e340e29fb4692efaee081ba645f1bf00b3e9927a99dd48a0802137e7fc963ab",
+    "crates/aura-config/src/lib.rs": "8941c07f70a706611f8109470be7ed65a346cbbcccbe0ff14d20bae6a20caa44",
+    "crates/aura-core/benches/workloads.rs": "e9e47e3e52513630fe70973b6e303ddca5dbcbac2d8acd3803d2f52b3c95dbc5",
+    "crates/aura-core/examples/vt_replay.rs": "08a6b274a2a636940ce71418ad60cb3af05e946452498efaece7c7880674f89f",
+    "crates/aura-core/src/grid.rs": "2b6fb2e780373a68ccc58ead5041b3a82dac895df6a1621773f72813bb67d777",
+    "crates/aura-core/src/lib.rs": "eb04e67f30bab05eb2628614ab5a0559e6d71b36e7b47c0a76a8c9f878b77bd2",
+    "crates/aura-core/src/parser.rs": "bb2a7c68b8f5688bdf6201e6d30c1e0ffba9bea5a83700f590788a17f7d534f3",
+    "crates/aura-core/src/terminal.rs": "d0e941c369e613a75f309c8e9d9bcea16fded172c4098ff40b1084f0dcc5a17b",
+    "crates/aura-core/fuzz/fuzz_targets/vt_parser.rs": "25bb96bc1da0f5bffa42080c37fe41c0eb22885eccad867a5d2072937cc9ac2e",
+    "crates/aura-core/src/terminal/campaign.rs": "a12e8fea950df629d13846106d9bcb18c97864be4d6beb22fb1c485ae3651cb3",
+    "crates/aura-pty/src/lib.rs": "6b3860a5e03860b18be98ba1034bb46e2bb2741c4fd6e48d629b361afb378aa7",
+    "crates/aura-pty/tests/pty_terminal.rs": "1f88dcb9685c2ff90c6e07bc513ffb958e5eb5d1064c4360dc624d75480d3139",
+    "crates/aura-render/src/lib.rs": "4e3a57abdec583b9d9a6393095499165619b099b569b74834cc0675dd2b56cca",
+    "crates/aura-render/tests/cell_graphics_gpu.rs": "2c0277211967beba1bc5b108a9dd29d0461032c1e0917aff04d61e557f18b1c6",
+    "crates/aura-render/tests/offscreen_gpu.rs": "4d575f4caef4a5e8ef6355899cab819df39faa6c9a47781a5425e80e0b4bcf64",
+    "crates/aura-render/tests/campaign_gpu.rs": "90405580dd688f5d414d481491a8a92f5a1aabc5c7d6654018b11a0580df7624",
+    "crates/aura-text/benches/glyph_workloads.rs": "f53d7ec6a281c2a8f80558b0e72c6898a3d4096e0c3973ccaf82f85462e7e036",
+    "crates/aura-text/src/faces.rs": "b2fbf404e768d4b5d05fa6bcdaf7ed5c6527c3da005c9dd7023b3e95326f5654",
+    "crates/aura-text/src/lib.rs": "55fc7bdfe468cba55e84e0451165b26e80ae53b4d21c2dabd947d645fc791df7",
+    "crates/aura-text/src/campaign.rs": "bfd5e1666ca16ddc25d64206eb1830fcfc913f72fabbee6eba9a68bafe3a57d9",
+    "shaders/cell_graphics.glsl": "84b9e5b6f0a87eca55ad4d6d87f408fb2f1c4ea0cce9963ce53e2f902e573753",
+    "tests/x11_daily_use.py": "f21283e36cba9a9e940ebf6326a6da1eeb5de4b2373fbd632a2727a9f237f83d",
+    "tests/x11_input_regressions.py": "1a5e3df8fe6d8144df92b0029bb1129753adbea6da92af3a1e6a82b272d72198",
+    "tests/x11_resize.py": "9a4a1ee4cc3a6bddcd3f26c94e9ea65661fdb2d9dc07366cc150c2b0d7e3747a",
+    "tests/x11_shell_workflows.py": "9d86382bb2481b87dac48256cc97174f543f44922a4b4f8979916148b204cb1d",
+    "tests/x11_campaign.py": "d52ea601d1af01509a8dc489ec4e7942ade9c0cb3451d0c5b53eae2c8c5cd440",
+    "tests/campaign/mutations.py": "5002e52f3f82d0806a1654c80a0ace3f4abbae16d946e7cecedf25666b89c3c4",
+    "tests/campaign/run.py": "b3b5f985a66eb09f932437851545f3b32130017c5c8912c178e43800535748f1"
+  },
+  "final_git_state": "uncommitted campaign changes on 3181591; no commits, pushes or tag changes"
+}

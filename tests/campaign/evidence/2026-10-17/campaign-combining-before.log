@@ -1,0 +1,74 @@
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.86s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 1 test
+campaign property=combining profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+proptest: Saving this and future failures in /workspace/Aura/crates/aura-core/proptest-regressions/terminal/campaign.txt
+proptest: If this test was run on a CI system, you may wish to add the following line to your copy of the file. (You may need to create it.)
+cc a8293f2ebc767faae893228e531f6330b08751357e8ced76b57a51cc7106e513
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:398:13:
+combining mark detached during resize
+MINIMAL_CASE=/workspace/campaign-evidence/combining/combining-1096110657-minimal.case
+property=combining first_step=2 action=Some(Bytes([204, 129])): combining mark detached during resize
+
+thread 'terminal::campaign::generated_combining_resize' (27159) panicked at crates/aura-core/src/terminal/campaign.rs:563:9:
+Test failed: property=combining first_step=2 action=Some(Bytes([204, 129])): combining mark detached during resize.
+minimal failing input: [
+    Bytes(
+        [
+            97,
+            97,
+            97,
+            97,
+            97,
+            97,
+            97,
+            97,
+            97,
+        ],
+    ),
+    Resize(
+        1,
+        6,
+    ),
+    Bytes(
+        [
+            204,
+            129,
+        ],
+    ),
+]; settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 }
+test terminal::campaign::generated_combining_resize ... FAILED
+
+failures:
+
+failures:
+    terminal::campaign::generated_combining_resize
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p aura-core --lib`

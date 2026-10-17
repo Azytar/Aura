@@ -1,0 +1,12 @@
+   Compiling libc v0.2.190
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+    Checking arbitrary v1.4.2
+    Checking unicode-width v0.2.2
+    Checking unicode-segmentation v1.13.3
+    Checking aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+   Compiling jobserver v0.1.35
+   Compiling cc v1.6.0
+   Compiling libfuzzer-sys v0.4.13
+    Checking aura-core-fuzz v0.0.0 (/workspace/Aura/crates/aura-core/fuzz)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.81s

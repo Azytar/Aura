@@ -1,0 +1,30 @@
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+warning: field `profile` is never read
+  --> crates/aura-core/src/terminal/campaign.rs:22:5
+   |
+21 | struct Settings {
+   |        -------- field in this struct
+22 |     profile: String,
+   |     ^^^^^^^
+   |
+   = note: `Settings` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `aura-core` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.10s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 5 tests
+campaign property=model settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+campaign property=state settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=model cases=64 elapsed=65.681973ms
+test terminal::campaign::generated_independent_ascii_model ... ok
+test terminal::campaign::replay_cases ... ok
+test terminal::campaign::all_short_partitions_and_directed_limits ... ok
+COMPLETE property=state cases=64 elapsed=115.228533ms
+test terminal::campaign::generated_state_and_fragmentation ... ok
+COMPLETE braille pairs count=65536 elapsed=183.268891ms
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 97 filtered out; finished in 0.19s
+

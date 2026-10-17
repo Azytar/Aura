@@ -1,0 +1,10 @@
+   Compiling aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.83s
+     Running unittests src/lib.rs (target/debug/deps/aura_text-25d07e2b7b0a36ab)
+
+running 1 test
+SKIP controlled DejaVu shaping font: cannot read /nonexistent/aura-campaign-font.ttf: No such file or directory (os error 2)
+test campaign::generated_shaping_and_cache_contract ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+

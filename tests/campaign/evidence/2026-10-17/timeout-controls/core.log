@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 6 tests
+test terminal::campaign::all_short_partitions_and_directed_limits ... ok
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... COMPLETE braille pairs count=65536 elapsed=140.874165ms
+ok
+test terminal::campaign::generated_combining_resize ... campaign property=combining profile=exhaustive settings=Settings { profile: "exhaustive", seed: 1096110657, algorithm: ChaCha, cases: 4096, actions: 128, width: 32, height: 16, history: 256, shrink: 8192 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)

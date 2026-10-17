@@ -20,3 +20,6 @@ unicode-script = "0.5.8"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest = { version = "=1.6.0", default-features = false, features = ["std"] }

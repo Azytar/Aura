@@ -1,0 +1,160 @@
+{
+  "profile": "quick",
+  "effective": {
+    "cases": 1,
+    "actions": 1,
+    "width": 12,
+    "height": 6,
+    "history": 32,
+    "shrink": 1024
+  },
+  "seed": 1096110657,
+  "rng": "chacha",
+  "seed_encoding": "4 little-endian u64 words: seed+i, wrapping; ChaCha32 bytes/XorShift16 bytes",
+  "gpu": "local",
+  "triples": false,
+  "stages": [
+    {
+      "name": "core",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "aura-core",
+        "terminal::campaign",
+        "--locked",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "cwd": "/workspace/Aura",
+      "exit": 0,
+      "status": "COMPLETE",
+      "seconds": 0.3195121500029927
+    },
+    {
+      "name": "text",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "aura-text",
+        "campaign::",
+        "--locked",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "cwd": "/workspace/Aura",
+      "exit": 0,
+      "status": "COMPLETE",
+      "seconds": 0.18948913700296544
+    },
+    {
+      "name": "vulkan",
+      "command": [
+        "vulkaninfo",
+        "--summary"
+      ],
+      "cwd": "/workspace/Aura",
+      "exit": 1,
+      "status": "SKIPPED",
+      "seconds": 0.008344160996784922
+    },
+    {
+      "name": "gpu",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "aura-render",
+        "--test",
+        "campaign_gpu",
+        "--test",
+        "cell_graphics_gpu",
+        "--test",
+        "offscreen_gpu",
+        "--locked",
+        "--",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "cwd": "/workspace/Aura",
+      "exit": 0,
+      "status": "SKIPPED",
+      "seconds": 0.1147500970037072
+    },
+    {
+      "name": "build",
+      "command": [
+        "cargo",
+        "build",
+        "--release",
+        "--locked"
+      ],
+      "cwd": "/workspace/Aura",
+      "exit": 0,
+      "status": "COMPLETE",
+      "seconds": 0.06492245800473029
+    },
+    {
+      "name": "native",
+      "command": [
+        "python3",
+        "tests/x11_campaign.py",
+        "target/release/aura"
+      ],
+      "cwd": "/workspace/Aura",
+      "exit": 77,
+      "status": "SKIPPED",
+      "seconds": 0.11529865700140363
+    }
+  ],
+  "base_commit": "3181591607c11c8b013fd2a51de761392604d243",
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+  "lock_sha256": "5e8cf9cd9248f393921bef5451b1e885fc164937290f3f1e261fd060325c50aa",
+  "font": {
+    "path": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "sha256": "54bf827eb99404e8f430c330ad30f063334f637eba0109b6a18d4f566a8e9dd8"
+  },
+  "initial_status": " M CHANGELOG.md\n M Cargo.lock\n M crates/aura-core/Cargo.toml\n M crates/aura-core/fuzz/fuzz_targets/vt_parser.rs\n M crates/aura-core/src/grid.rs\n M crates/aura-core/src/parser.rs\n M crates/aura-core/src/terminal.rs\n M crates/aura-text/Cargo.toml\n M crates/aura-text/src/lib.rs\n?? crates/aura-core/fuzz/corpus/vt_parser/campaign-combining-resize\n?? crates/aura-core/fuzz/corpus/vt_parser/campaign-insert-wide-link\n?? crates/aura-core/proptest-regressions/\n?? crates/aura-core/src/terminal/\n?? crates/aura-render/tests/campaign_gpu.rs\n?? crates/aura-text/src/campaign.rs\n?? docs/TEST_CAMPAIGN.md\n?? tests/campaign/\n?? tests/x11_campaign.py\n",
+  "source_sha256": {
+    "crates/aura-render/build.rs": "026abdb5335b4c6595703a8685cfcc2f6b6b72bb91cb5c9027fa20a1c6089c22",
+    "crates/aura-app/src/input.rs": "5f43297dbc6d4d84b999252107a5cd1bd856eb1feb80cd9d8d143c94a3347ae4",
+    "crates/aura-app/src/keyboard.rs": "d11342503990850b6915156f871f4dba4b73babb0938ed7db59fe70eeefa6c34",
+    "crates/aura-app/src/main.rs": "01d2029c258c2ac908f44f3ce832dfd1bdf69472e017d611bc9424af1add7003",
+    "crates/aura-app/src/signals.rs": "aabf4aa09f57d70641a8d6032c4b895f3dc2e4e7b65cb5f477a3e18d63a153fa",
+    "crates/aura-app/tests/version_consistency.rs": "9e340e29fb4692efaee081ba645f1bf00b3e9927a99dd48a0802137e7fc963ab",
+    "crates/aura-config/src/lib.rs": "8941c07f70a706611f8109470be7ed65a346cbbcccbe0ff14d20bae6a20caa44",
+    "crates/aura-core/benches/workloads.rs": "e9e47e3e52513630fe70973b6e303ddca5dbcbac2d8acd3803d2f52b3c95dbc5",
+    "crates/aura-core/examples/vt_replay.rs": "08a6b274a2a636940ce71418ad60cb3af05e946452498efaece7c7880674f89f",
+    "crates/aura-core/src/grid.rs": "2b6fb2e780373a68ccc58ead5041b3a82dac895df6a1621773f72813bb67d777",
+    "crates/aura-core/src/lib.rs": "eb04e67f30bab05eb2628614ab5a0559e6d71b36e7b47c0a76a8c9f878b77bd2",
+    "crates/aura-core/src/parser.rs": "bb2a7c68b8f5688bdf6201e6d30c1e0ffba9bea5a83700f590788a17f7d534f3",
+    "crates/aura-core/src/terminal.rs": "d0e941c369e613a75f309c8e9d9bcea16fded172c4098ff40b1084f0dcc5a17b",
+    "crates/aura-core/fuzz/fuzz_targets/vt_parser.rs": "25bb96bc1da0f5bffa42080c37fe41c0eb22885eccad867a5d2072937cc9ac2e",
+    "crates/aura-core/src/terminal/campaign.rs": "05005436aea737227ff1df9fef76200c9bbb04b475e13203198b7ed2171ea6e9",
+    "crates/aura-pty/src/lib.rs": "6b3860a5e03860b18be98ba1034bb46e2bb2741c4fd6e48d629b361afb378aa7",
+    "crates/aura-pty/tests/pty_terminal.rs": "1f88dcb9685c2ff90c6e07bc513ffb958e5eb5d1064c4360dc624d75480d3139",
+    "crates/aura-render/src/lib.rs": "4e3a57abdec583b9d9a6393095499165619b099b569b74834cc0675dd2b56cca",
+    "crates/aura-render/tests/cell_graphics_gpu.rs": "2c0277211967beba1bc5b108a9dd29d0461032c1e0917aff04d61e557f18b1c6",
+    "crates/aura-render/tests/offscreen_gpu.rs": "4d575f4caef4a5e8ef6355899cab819df39faa6c9a47781a5425e80e0b4bcf64",
+    "crates/aura-render/tests/campaign_gpu.rs": "90405580dd688f5d414d481491a8a92f5a1aabc5c7d6654018b11a0580df7624",
+    "crates/aura-text/benches/glyph_workloads.rs": "f53d7ec6a281c2a8f80558b0e72c6898a3d4096e0c3973ccaf82f85462e7e036",
+    "crates/aura-text/src/faces.rs": "b2fbf404e768d4b5d05fa6bcdaf7ed5c6527c3da005c9dd7023b3e95326f5654",
+    "crates/aura-text/src/lib.rs": "55fc7bdfe468cba55e84e0451165b26e80ae53b4d21c2dabd947d645fc791df7",
+    "crates/aura-text/src/campaign.rs": "676ad0d42ff4029e8ad7c7c8c94e68b427d7746eeee6f88937e1d84522d9cbc7",
+    "shaders/cell_graphics.glsl": "84b9e5b6f0a87eca55ad4d6d87f408fb2f1c4ea0cce9963ce53e2f902e573753",
+    "tests/x11_daily_use.py": "f21283e36cba9a9e940ebf6326a6da1eeb5de4b2373fbd632a2727a9f237f83d",
+    "tests/x11_input_regressions.py": "1a5e3df8fe6d8144df92b0029bb1129753adbea6da92af3a1e6a82b272d72198",
+    "tests/x11_resize.py": "9a4a1ee4cc3a6bddcd3f26c94e9ea65661fdb2d9dc07366cc150c2b0d7e3747a",
+    "tests/x11_shell_workflows.py": "9d86382bb2481b87dac48256cc97174f543f44922a4b4f8979916148b204cb1d",
+    "tests/x11_campaign.py": "d52ea601d1af01509a8dc489ec4e7942ade9c0cb3451d0c5b53eae2c8c5cd440",
+    "tests/campaign/mutations.py": "5002e52f3f82d0806a1654c80a0ace3f4abbae16d946e7cecedf25666b89c3c4",
+    "tests/campaign/run.py": "2d16d5a5d4843b6cc8c448f92889f6df07a05b7415b044896b3be42d82b092ae",
+    "tests/campaign/cases/insert-wide-link.case": "10b4fb626aa01c4f04c92f06fbfee2cac483e353228ae0ed3a1fbfc906c4e88c",
+    "tests/campaign/cases/wide-delete.case": "c2364f630fb4a6454850f9844d4c16e8f493cb8538a74c3194d3e58b40010b66",
+    "tests/campaign/cases/combining-resize.case": "18b62adc0c6841bc7b8b9230e7ab759dfbd588e61d4671c4ad7412650acd4386"
+  },
+  "outcome": "COMPLETE_WITH_OMISSIONS"
+}

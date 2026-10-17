@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 1 test
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples has been running for over 60 seconds
+COMPLETE braille triples count=16777216 elapsed=60.916806026s
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 104 filtered out; finished in 60.92s
+

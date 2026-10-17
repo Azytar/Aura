@@ -1,0 +1,8 @@
+== launching aura on :99
+   window 0x400000 (found through _NET_WM_PID)
+   child shell pid 50539
+   keyboard -> pty -> bash -> parser -> title: OK
+   interactive bash session: OK
+   framebuffer 1080x544 with 545 distinct colours: OK
+   no orphaned child process: OK
+== PASS: keyboard, real shell, parser round trip, rendering, clean exit

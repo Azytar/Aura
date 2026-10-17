@@ -1,0 +1,6 @@
+PASS: real interactive bash line editing with Left and Ctrl+E
+PASS: actual bash read -s receives the password without echo
+PASS: real clear produces a blank framebuffer and returns to bash
+PASS: real reset produces a blank framebuffer and returns to bash
+PASS: real vi insert/save/quit and live resize
+PASS: real less paging/search/resize/quit

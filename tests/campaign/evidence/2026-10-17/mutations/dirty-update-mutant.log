@@ -1,0 +1,11 @@
+DEBUG keyboard device=3 kc24=0x71 kc31=0x69 kc33=0x70 kc54=0x63
+
+DEBUG keyboard device=3 kc24=0x71 kc31=0x69 kc33=0x70 kc54=0x63
+
+Traceback (most recent call last):
+  File "/workspace/Aura/tests/x11_campaign.py", line 171, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/workspace/Aura/tests/x11_campaign.py", line 115, in main
+    raise AssertionError("native reference missing required blue background")
+AssertionError: native reference missing required blue background

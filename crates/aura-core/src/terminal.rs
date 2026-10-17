@@ -105,6 +105,7 @@ impl Default for Rendition {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 struct SavedCursor {
     cursor: Cursor,
     rendition: Rendition,
@@ -112,6 +113,7 @@ struct SavedCursor {
 }
 
 /// Terminal semantics layered over the independent main and alternate grids.
+#[cfg_attr(test, derive(Clone, Debug, PartialEq, Eq))]
 pub struct Terminal {
     grid: TerminalGrid,
     parser: Parser,
@@ -646,6 +648,33 @@ impl Terminal {
         self.top_margin = 0;
         self.bottom_margin = height - 1;
         self.pending_wrap = !alternate && main_wrap;
+        // Resize is not a VT control and must not detach the next combining
+        // scalar. Reflow moved the last printed grapheme along with the cursor.
+        if self.last_printed.is_some() {
+            let cursor = self.cursor();
+            let position = if alternate {
+                self.last_printed.map(|(_, row, column)| (row, column))
+            } else if self.pending_wrap {
+                Some((cursor.row, cursor.column))
+            } else if cursor.column != 0 {
+                Some((cursor.row, cursor.column - 1))
+            } else if cursor.row != 0 {
+                Some((cursor.row - 1, width - 1))
+            } else {
+                None
+            };
+            self.last_printed = position.and_then(|(row, column)| {
+                let cell = self.active_grid().cell(row, column)?;
+                let column = if cell.flags().contains(CellFlags::WIDE_SPACER) {
+                    column.checked_sub(1)?
+                } else if cell.content == 0 {
+                    return None;
+                } else {
+                    column
+                };
+                Some((self.grid.active_screen(), row, column))
+            });
+        }
         Ok(())
     }
 
@@ -1618,6 +1647,29 @@ fn dec_graphic(ch: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn insert_mode_keeps_existing_wide_hyperlink_ownership() {
+        let mut t = terminal(3, 1);
+        feed(
+            &mut t,
+            "\x1b]8;;https://example.org\x1b\\\x1b[4h界A".as_bytes(),
+        );
+        assert_eq!(
+            t.active_grid().hyperlink(0, 0),
+            t.active_grid().hyperlink(0, 1)
+        );
+        assert!(t.active_grid().hyperlink(0, 1).is_some());
+    }
+
+    #[test]
+    fn combining_mark_after_resize_follows_its_reflowed_base() {
+        let mut t = terminal(12, 6);
+        feed(&mut t, b"aa");
+        t.resize(1, 6).unwrap();
+        feed(&mut t, "\u{301}".as_bytes());
+        assert_eq!(t.active_grid().grapheme(1, 0).as_deref(), Some("a\u{301}"));
+    }
+
     #[test]
     fn a_scrolled_view_keeps_its_logical_anchor_when_width_changes() {
         let mut t = terminal(4, 2);
@@ -2758,3 +2810,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "terminal/campaign.rs"]
+mod campaign;

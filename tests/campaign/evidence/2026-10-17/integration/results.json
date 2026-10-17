@@ -1,0 +1,51 @@
+[
+  {
+    "command": [
+      "./tests/e2e_shell_smoke.sh",
+      "target/release/aura"
+    ],
+    "exit": 0,
+    "seconds": 7.562010128996917,
+    "omissions": []
+  },
+  {
+    "command": [
+      "python3",
+      "tests/x11_daily_use.py",
+      "target/release/aura"
+    ],
+    "exit": 0,
+    "seconds": 5.639725048997207,
+    "omissions": []
+  },
+  {
+    "command": [
+      "python3",
+      "tests/x11_input_regressions.py",
+      "target/release/aura"
+    ],
+    "exit": 0,
+    "seconds": 3.980033068000921,
+    "omissions": []
+  },
+  {
+    "command": [
+      "python3",
+      "tests/x11_shell_workflows.py",
+      "target/release/aura"
+    ],
+    "exit": 0,
+    "seconds": 10.816375243004586,
+    "omissions": []
+  },
+  {
+    "command": [
+      "python3",
+      "tests/x11_resize.py",
+      "target/release/aura"
+    ],
+    "exit": 0,
+    "seconds": 0.9669153930008179,
+    "omissions": []
+  }
+]

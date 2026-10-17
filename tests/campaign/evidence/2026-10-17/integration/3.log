@@ -1,0 +1,2 @@
+PASS: cancelled/restarted Compose, Ctrl cancellation, modifiers and held/repeated keys
+PASS: screen/mouse tracking transitions cancel local dragging; alternate shortcuts reach the PTY
