@@ -185,3 +185,20 @@ python3 tests/x11_daily_use.py target/release/aura
 See [the reproducible test campaign](docs/TEST_CAMPAIGN.md) for seeded
 properties, concrete replay, braille enumeration, GPU checks and instrumented
 nightly fuzzing, including measured budgets and validation limits.
+
+## Optional diagnostics
+
+Diagnostics are silent by default. `AURA_DEBUG_KEYBOARD=1` enables map, reload
+and key-event traces only in debug builds; release builds omit those traces.
+`AURA_PERF=1` independently enables bounded host timing reports in debug or
+release. Both variables accept only `0` (off) or `1` (on), with invalid values
+rejected before X11 or PTY startup. Keyboard traces may include key identities;
+performance reports include neither keys nor PTY contents.
+
+Performance reports appear about every five seconds while the event loop
+acts. Each stage retains its latest 256 samples: `n` counts all interval
+samples, `retained` counts stored samples, p50/p95/p99 use nearest rank, and
+`max` covers the entire interval. Unreached stages produce no samples.
+`render_calls/s` counts calls, not confirmed presented frames. These are host
+intervals without extra GPU waits; `present_call` returning does not establish
+when the image reached the screen.

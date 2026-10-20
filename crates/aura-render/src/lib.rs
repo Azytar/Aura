@@ -176,6 +176,19 @@ struct FrameDraw {
     readback: Option<vk::Buffer>,
 }
 
+/// Optional host intervals. Missing stages were not reached by this call.
+/// queue_present returning does not confirm on-screen presentation.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderTimings {
+    pub prepare: Option<std::time::Duration>,
+    pub fence_wait: Option<std::time::Duration>,
+    pub acquire: Option<std::time::Duration>,
+    pub upload: Option<std::time::Duration>,
+    pub record_submit: Option<std::time::Duration>,
+    pub present_call: Option<std::time::Duration>,
+    pub surface_rebuild: Option<std::time::Duration>,
+}
+
 /// Owns the surface-bound Vulkan device and all frame-in-flight resources.
 pub struct Renderer {
     _entry: Entry,
@@ -848,6 +861,20 @@ impl Renderer {
         font: &mut Font,
         cursor_blink_on: bool,
     ) -> Result<(), String> {
+        self.render_with_timings(terminal, font, cursor_blink_on, false)
+            .map(|_| ())
+    }
+
+    /// Measures only when requested, without adding GPU synchronization.
+    pub fn render_with_timings(
+        &mut self,
+        terminal: &mut Terminal,
+        font: &mut Font,
+        cursor_blink_on: bool,
+        measure: bool,
+    ) -> Result<RenderTimings, String> {
+        let mut timings = RenderTimings::default();
+        let started = measure.then(std::time::Instant::now);
         let (width, height) = {
             let grid = terminal.active_grid();
             (grid.width(), grid.height())
@@ -859,26 +886,36 @@ impl Renderer {
             ));
         }
         self.prepare_grid(terminal, font, width, height, count)?;
+        timings.prepare = started.map(|start| start.elapsed());
+        let started = measure.then(std::time::Instant::now);
         let frame_index = self.frame_index;
         let fence = self.frames[frame_index].fence;
         let image_available = self.frames[frame_index].image_available;
         unsafe { self.device.wait_for_fences(&[fence], true, u64::MAX) }
             .map_err(vk_error("wait frame fence"))?;
-        let (image_index, suboptimal) = match unsafe {
+        timings.fence_wait = started.map(|start| start.elapsed());
+        let started = measure.then(std::time::Instant::now);
+        let acquired = unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
                 u64::MAX,
                 image_available,
                 vk::Fence::null(),
             )
-        } {
+        };
+        timings.acquire = started.map(|start| start.elapsed());
+        let (image_index, suboptimal) = match acquired {
             Ok(result) => result,
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                self.recreate_swapchain(self.extent.width, self.extent.height, true)?;
-                return Ok(());
+                let started = measure.then(std::time::Instant::now);
+                let rebuilt =
+                    self.recreate_swapchain(self.extent.width, self.extent.height, true)?;
+                timings.surface_rebuild = started.filter(|_| rebuilt).map(|start| start.elapsed());
+                return Ok(timings);
             }
             Err(error) => return Err(format!("acquire swapchain image: {error:?}")),
         };
+        let started = measure.then(std::time::Instant::now);
         if self.glyphs_dirty {
             for frame in &mut self.frames {
                 frame.glyphs_dirty = true;
@@ -953,6 +990,8 @@ impl Renderer {
             };
             frame.glyphs_dirty = false;
         }
+        timings.upload = started.map(|start| start.elapsed());
+        let started = measure.then(std::time::Instant::now);
         let selection_color = pack_rgb(self.palette.selection);
         let push = PushGrid {
             cols: width as u32,
@@ -1018,22 +1057,28 @@ impl Renderer {
             .signal_semaphore_infos(&signal)];
         unsafe { self.device.queue_submit2(self.queue, &submit, frame.fence) }
             .map_err(vk_error("submit frame"))?;
+        timings.record_submit = started.map(|start| start.elapsed());
         let swaps = [self.swapchain];
         let indices = [image_index];
         let present = vk::PresentInfoKHR::default()
             .wait_semaphores(std::slice::from_ref(&present_semaphore))
             .swapchains(&swaps)
             .image_indices(&indices);
+        let started = measure.then(std::time::Instant::now);
         let present_status = unsafe { self.swapchain_loader.queue_present(self.queue, &present) };
+        timings.present_call = started.map(|start| start.elapsed());
         self.frame_index = (self.frame_index + 1) % FRAMES;
         match present_status {
             Ok(present_suboptimal) if !suboptimal && !present_suboptimal => {}
             Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR | vk::Result::SUBOPTIMAL_KHR) => {
-                self.recreate_swapchain(self.extent.width, self.extent.height, true)?;
+                let started = measure.then(std::time::Instant::now);
+                let rebuilt =
+                    self.recreate_swapchain(self.extent.width, self.extent.height, true)?;
+                timings.surface_rebuild = started.filter(|_| rebuilt).map(|start| start.elapsed());
             }
             Err(error) => return Err(format!("present frame: {error:?}")),
         }
-        Ok(())
+        Ok(timings)
     }
 
     /// Requests a full upload without forgetting the Vulkan image layout.
@@ -1086,6 +1131,18 @@ impl Renderer {
     /// surface query and no Vulkan work.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         self.recreate_swapchain(width, height, false).map(|_| ())
+    }
+
+    /// Returns a host interval only if surface resources were actually rebuilt.
+    pub fn resize_with_timings(
+        &mut self,
+        width: u32,
+        height: u32,
+        measure: bool,
+    ) -> Result<Option<std::time::Duration>, String> {
+        let started = measure.then(std::time::Instant::now);
+        let rebuilt = self.recreate_swapchain(width, height, false)?;
+        Ok(started.filter(|_| rebuilt).map(|start| start.elapsed()))
     }
 
     /// Recreates the swapchain when the surface no longer matches it.

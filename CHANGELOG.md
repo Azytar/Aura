@@ -23,6 +23,17 @@ per commit.
 
 ### Fixed
 
+- Keyboard traces are opt-in and compiled only in debug builds. Host timing
+  reports are independently opt-in, retain bounded stage samples and omit
+  stages not reached; ordinary rendering no longer samples frame clocks.
+- Native rendering comparisons wait for presented witness pixels and actual
+  PTY zoom/reset geometry rather than treating OSC titles as frame completion.
+
+- Reflow walks borrowed cells one logical line at a time, reusing only row
+  lengths as scratch storage even for a single very long wrapped paragraph.
+  Unicode graphemes, wide links, blank lines and viewport/cursor mapping
+  retain the previous resize behavior.
+
 - Empty row metadata no longer reserves full-width grapheme/link tables.
   Cell shifts move owned graphemes, and fitting independent rows retain
   their cell buffers when only the terminal height changes.

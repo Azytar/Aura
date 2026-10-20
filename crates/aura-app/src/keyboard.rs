@@ -6,13 +6,18 @@ use x11rb::xcb_ffi::XCBConnection;
 use xkbcommon::xkb::{self as keymap, x11};
 
 pub struct Keyboard {
+    #[cfg(debug_assertions)]
+    debug: bool,
     context: keymap::Context,
     state: keymap::State,
     compose: Option<keymap::compose::State>,
 }
 
 impl Keyboard {
-    pub fn new(connection: &XCBConnection) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        connection: &XCBConnection,
+        _debug: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (mut major, mut minor, mut event, mut error) = (0, 0, 0, 0);
         if !x11::setup_xkb_extension(
             connection,
@@ -31,14 +36,17 @@ impl Keyboard {
             return Err(io::Error::other("cannot create XKB context").into());
         }
         let state = device_state(&context, connection)?;
-        eprintln!(
-            "DEBUG keyboard device={} kc24=0x{:x} kc31=0x{:x} kc33=0x{:x} kc54=0x{:x}",
-            x11::get_core_keyboard_device_id(connection),
-            state.key_get_one_sym(keymap::Keycode::new(24)).raw(),
-            state.key_get_one_sym(keymap::Keycode::new(31)).raw(),
-            state.key_get_one_sym(keymap::Keycode::new(33)).raw(),
-            state.key_get_one_sym(keymap::Keycode::new(54)).raw(),
-        );
+        #[cfg(debug_assertions)]
+        if _debug {
+            eprintln!(
+                "DEBUG keyboard device={} kc24=0x{:x} kc31=0x{:x} kc33=0x{:x} kc54=0x{:x}",
+                x11::get_core_keyboard_device_id(connection),
+                state.key_get_one_sym(keymap::Keycode::new(24)).raw(),
+                state.key_get_one_sym(keymap::Keycode::new(31)).raw(),
+                state.key_get_one_sym(keymap::Keycode::new(33)).raw(),
+                state.key_get_one_sym(keymap::Keycode::new(54)).raw(),
+            );
+        }
         // Types and virtual modifiers are part of a layout, not just its symbols.
         xkb::select_events(
             connection,
@@ -72,6 +80,8 @@ impl Keyboard {
             .map(|table| keymap::compose::State::new(&table, keymap::compose::STATE_NO_FLAGS))
             .filter(|state| !state.get_raw_ptr().is_null());
         Ok(Self {
+            #[cfg(debug_assertions)]
+            debug: _debug,
             context,
             state,
             compose,
@@ -80,12 +90,15 @@ impl Keyboard {
 
     pub fn reload(&mut self, connection: &XCBConnection) -> Result<(), io::Error> {
         self.state = device_state(&self.context, connection)?;
-        eprintln!(
-            "DEBUG reload: kc24=0x{:x} kc31=0x{:x} kc54=0x{:x}",
-            self.state.key_get_one_sym(keymap::Keycode::new(24)).raw(),
-            self.state.key_get_one_sym(keymap::Keycode::new(31)).raw(),
-            self.state.key_get_one_sym(keymap::Keycode::new(54)).raw(),
-        );
+        #[cfg(debug_assertions)]
+        if self.debug {
+            eprintln!(
+                "DEBUG reload: kc24=0x{:x} kc31=0x{:x} kc54=0x{:x}",
+                self.state.key_get_one_sym(keymap::Keycode::new(24)).raw(),
+                self.state.key_get_one_sym(keymap::Keycode::new(31)).raw(),
+                self.state.key_get_one_sym(keymap::Keycode::new(54)).raw(),
+            );
+        }
         if let Some(compose) = &mut self.compose {
             compose.reset();
         }
@@ -107,10 +120,13 @@ impl Keyboard {
         );
         let keycode = keymap::Keycode::new(u32::from(event.detail));
         let sym = self.state.key_get_one_sym(keycode).raw();
-        eprintln!(
-            "DEBUG key event: keycode={} sym=0x{:x} state=0x{:x}",
-            event.detail, sym, mask
-        );
+        #[cfg(debug_assertions)]
+        if self.debug {
+            eprintln!(
+                "DEBUG key event: keycode={} sym=0x{:x} state=0x{:x}",
+                event.detail, sym, mask
+            );
+        }
         let consumed = self.state.key_get_consumed_mods(keycode) as u16;
         // AltGr can consume Control/Alt on some layouts; those modifiers must
         // not turn its printable character into an application shortcut.
@@ -363,6 +379,8 @@ mod tests {
         )
         .unwrap();
         let mut keyboard = Keyboard {
+            #[cfg(debug_assertions)]
+            debug: false,
             state: keymap::State::new(&map),
             compose: None,
             context,
@@ -414,6 +432,8 @@ mod tests {
         )
         .unwrap();
         let mut keyboard = Keyboard {
+            #[cfg(debug_assertions)]
+            debug: false,
             state: keymap::State::new(&map),
             compose: Some(keymap::compose::State::new(
                 &table,
@@ -453,6 +473,8 @@ mod tests {
         )
         .unwrap();
         let mut keyboard = Keyboard {
+            #[cfg(debug_assertions)]
+            debug: false,
             state: keymap::State::new(&map),
             compose: Some(keymap::compose::State::new(
                 &table,
@@ -510,6 +532,8 @@ mod tests {
         )
         .unwrap();
         let mut keyboard = Keyboard {
+            #[cfg(debug_assertions)]
+            debug: false,
             state: keymap::State::new(&map),
             compose: Some(keymap::compose::State::new(
                 &table,

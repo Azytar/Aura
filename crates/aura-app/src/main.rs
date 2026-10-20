@@ -1,5 +1,6 @@
 mod input;
 mod keyboard;
+mod perf;
 mod signals;
 
 use keyboard::{FontSizeAction, Keyboard, font_size_action};
@@ -41,6 +42,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Validate both flags before opening X11 or spawning a child.
+    let debug_keyboard = perf::flag("AURA_DEBUG_KEYBOARD")?;
+    let mut stats = perf::Perf::new(perf::flag("AURA_PERF")?);
     let termination = signals::Termination::new()?;
     let config = AppConfig::load_from_path(None)?;
     let mut font_sizes = RuntimeFontSize::new(config.font.size);
@@ -215,7 +219,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
     let mut input = input::Input::default();
     let mut watching_write = false;
-    let mut keyboard = Keyboard::new(&connection)?;
+    let mut keyboard = Keyboard::new(&connection, debug_keyboard)?;
     let mut running = true;
     let mut invalidated = false;
     let mut font_resize_pending = false;
@@ -228,7 +232,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
     let mut buffer = [0u8; 16 * 1024];
-    let mut stats = RenderStats::new();
 
     while running {
         let mut pending_resize = None;
@@ -588,8 +591,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         match pty.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(length) => {
-                                stats.add_pty_bytes(length as u64);
+                                let started = stats.start();
                                 let replies = terminal.process(&buffer[..length]);
+                                stats.finish("parse", started);
                                 for request in terminal.take_clipboard_requests() {
                                     // A read request (`?`) is never honoured: the
                                     // terminal already refuses to emit one, so a
@@ -698,6 +702,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if running && font_resize_pending {
+            let started = stats.start();
             resize_font(
                 &config,
                 &font_sizes,
@@ -708,13 +713,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &connection,
                 window,
                 &mut renderer,
+                &mut stats,
                 pending_resize
                     .take()
                     .map(|event| (event.width, event.height)),
             )?;
+            stats.finish("font_resize", started);
             font_resize_pending = false;
         }
         if running && let Some(event) = pending_resize {
+            let started = stats.start();
             let metrics = configured_metrics(&font, &config);
             resize(
                 &mut terminal,
@@ -724,7 +732,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 (metrics.width, metrics.height),
                 (config.window.padding_x, config.window.padding_y),
                 event,
+                &mut stats,
             )?;
+            stats.finish("window_resize", started);
         }
         if running {
             input.flush(|bytes| pty.write(bytes))?;
@@ -751,11 +761,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             invalidated = true;
         }
         if invalidated {
-            let frame_start = std::time::Instant::now();
-            renderer
-                .render(&mut terminal, &mut font, cursor_blink_on)
+            let started = stats.start();
+            let timings = renderer
+                .render_with_timings(&mut terminal, &mut font, cursor_blink_on, stats.enabled())
                 .map_err(io::Error::other)?;
-            stats.add_frame(frame_start.elapsed());
+            stats.finish("frame_total", started);
+            stats.renderer(timings);
             invalidated = false;
         }
         stats.maybe_report();
@@ -765,51 +776,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     pty.close()?;
     Ok(())
-}
-
-/// Lightweight render counters reported to stderr every few seconds while
-/// frames are produced. No per-event logging; idle terminals stay silent.
-struct RenderStats {
-    window_start: std::time::Instant,
-    frames: u64,
-    pty_bytes: u64,
-    render_nanos: u128,
-}
-
-impl RenderStats {
-    fn new() -> Self {
-        Self {
-            window_start: std::time::Instant::now(),
-            frames: 0,
-            pty_bytes: 0,
-            render_nanos: 0,
-        }
-    }
-
-    fn add_pty_bytes(&mut self, bytes: u64) {
-        self.pty_bytes = self.pty_bytes.saturating_add(bytes);
-    }
-
-    fn add_frame(&mut self, elapsed: std::time::Duration) {
-        self.frames += 1;
-        self.render_nanos += elapsed.as_nanos();
-    }
-
-    fn maybe_report(&mut self) {
-        if self.window_start.elapsed() < std::time::Duration::from_secs(5) {
-            return;
-        }
-        if self.frames > 0 {
-            let seconds = self.window_start.elapsed().as_secs_f64().max(0.001);
-            eprintln!(
-                "aura perf: {:.0} frames/s {:.0} KiB/s PTY {:.2} ms/frame",
-                self.frames as f64 / seconds,
-                self.pty_bytes as f64 / 1024.0 / seconds,
-                self.render_nanos as f64 / self.frames as f64 / 1_000_000.0,
-            );
-        }
-        *self = Self::new();
-    }
 }
 
 /// Parsed launch options; `None` means a flag like `--help` already ran.
@@ -1389,6 +1355,7 @@ impl Clipboard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resize(
     terminal: &mut Terminal,
     pty: &mut Pty,
@@ -1397,6 +1364,7 @@ fn resize(
     metrics: (u32, u32),
     padding: (u32, u32),
     event: ConfigureNotifyEvent,
+    stats: &mut perf::Perf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (cell_width, cell_height) = metrics;
     let (padding_x, padding_y) = padding;
@@ -1419,12 +1387,14 @@ fn resize(
         pty.resize(winsize)?;
         *last_winsize = winsize;
     }
-    renderer
-        .resize(
+    let surface_rebuild = renderer
+        .resize_with_timings(
             u32::from(event.width).max(1),
             u32::from(event.height).max(1),
+            stats.enabled(),
         )
         .map_err(io::Error::other)?;
+    stats.surface_rebuild(surface_rebuild);
     Ok(())
 }
 
@@ -1442,6 +1412,7 @@ fn resize_font(
     connection: &XCBConnection,
     window: u32,
     renderer: &mut Renderer,
+    stats: &mut perf::Perf,
     extent: Option<(u16, u16)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (pixel_width, pixel_height) =
@@ -1466,9 +1437,11 @@ fn resize_font(
         config.window.padding_y,
         config.font.glyph_offsets(),
     );
+    let started = stats.start();
     terminal
         .resize(columns, rows)
         .map_err(|error| io::Error::other(format!("terminal resize: {error:?}")))?;
+    stats.finish("zoom_reflow", started);
     let mut winsize = PtySize::new(columns, rows)?;
     winsize.pixel_width = pixel_width;
     winsize.pixel_height = pixel_height;
@@ -1485,12 +1458,14 @@ fn resize_font(
     }
     // Cell metrics changed, so the resize increments and minimum size move too.
     set_size_hints(connection, window, &geometry)?;
-    renderer
-        .resize(
+    let surface_rebuild = renderer
+        .resize_with_timings(
             u32::from(last_winsize.pixel_width),
             u32::from(last_winsize.pixel_height),
+            stats.enabled(),
         )
         .map_err(io::Error::other)?;
+    stats.surface_rebuild(surface_rebuild);
     Ok(())
 }
 
