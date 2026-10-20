@@ -144,6 +144,39 @@ fn main() {
         }
     }
 
+    // Fill outside the timer and leave headroom for the narrower geometry.
+    // CRLF fixes the insertion point before round trips, including the single
+    // continuous paragraph case; no history may be lost or added on restore.
+    for history in [1_000, 10_000] {
+        for continuous in [false, true] {
+            let mut terminal = Terminal::new(80, 25).unwrap();
+            terminal.set_scrollback_limit(history * 2 + 64);
+            if continuous {
+                for _ in 0..history + 24 {
+                    terminal.process(&[b'x'; 80]);
+                }
+                terminal.process(b"\r\n");
+            } else {
+                for _ in 0..(history + 24) / 2 {
+                    terminal.process(&[b'x'; 160]);
+                    terminal.process(b"\r\n");
+                }
+            }
+            let retained = terminal.active_grid().scrollback_len();
+            assert_eq!(retained, history);
+            measure(
+                &format!("wrapped history round trip ({history} rows, continuous={continuous})"),
+                8,
+                || {
+                    terminal.resize(73, 22).unwrap();
+                    terminal.resize(80, 25).unwrap();
+                    assert_eq!(terminal.active_grid().scrollback_len(), retained);
+                    black_box(&terminal);
+                },
+            );
+        }
+    }
+
     // Font-size-to-geometry conversion must stay cheap because it runs on
     // every startup and any future font-change path.
     let sizes = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];

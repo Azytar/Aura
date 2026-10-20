@@ -3,7 +3,6 @@ use std::ops::Range;
 
 /// Rows kept above the visible screen when nothing else is requested.
 pub const DEFAULT_SCROLLBACK_ROWS: usize = 10_000;
-type ReflowCell<'a> = (Cell, Option<&'a str>, Option<u32>);
 
 /// Bit flags describing terminal-cell presentation and wide-cell structure.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1030,84 +1029,88 @@ impl Grid {
         {
             source.pop();
         }
-        let mut logical_lines: Vec<Vec<ReflowCell<'_>>> = Vec::new();
-        let mut cursor_position = None;
-        let mut viewport_position = None;
         let viewport_source_row = self.scrollback.len().saturating_sub(old_viewport_offset);
-        let mut source_line = 0;
-        for (index, row) in source.iter().enumerate() {
-            let source_offset;
-            if logical_lines.is_empty() || !row.wrapped {
-                logical_lines.push(Vec::new());
-                source_line = logical_lines.len() - 1;
-                source_offset = 0;
-            } else {
-                source_offset = logical_lines[source_line].len();
-            }
-            if old_viewport_offset != 0 && index == viewport_source_row {
-                viewport_position = Some((source_line, source_offset));
-            }
-            if index == cursor_source_row {
-                cursor_position = Some((source_line, source_offset + self.cursor.column));
-            }
-            let continues = source.get(index + 1).is_some_and(|next| next.wrapped);
-            let mut used = if continues {
-                self.width
-            } else {
-                row.cells
-                    .iter()
-                    .rposition(|cell| cell.content != 0)
-                    .map_or(0, |last| last + 1)
-            };
-            if index == cursor_source_row {
-                used = used.max(self.cursor.column + 1);
-            }
-            // A wide glyph can wrap with one unused column left behind.
-            // That structural padding is not a space in the logical line.
-            if continues
-                && used == self.width
-                && row.cells[used - 1] == Cell::EMPTY
-                && source
-                    .get(index + 1)
-                    .is_some_and(|next| next.cells[0].is_wide_leading())
-            {
-                used -= 1;
-            }
-            if used > 0 && row.cells[used - 1].is_wide_leading() {
-                used = (used + 1).min(self.width);
-            }
-            logical_lines[source_line].extend((0..used).map(|column| {
-                (
-                    row.cells[column],
-                    row.graphemes.get(column).map(String::as_str),
-                    row.hyperlinks.get(column).copied(),
-                )
-            }));
-        }
-
         let mut reflowed = Vec::new();
         let mut new_cursor = None;
         let mut new_viewport_row = None;
-        for (line_index, line) in logical_lines.iter().enumerate() {
+        // Retain only used lengths, not a second copy of every cell and its
+        // borrowed metadata. Reuse this scratch allocation across logical lines.
+        let mut lengths = Vec::new();
+        let mut group_start = 0;
+        while group_start < source.len() {
+            let mut group_end = group_start + 1;
+            while group_end < source.len() && source[group_end].wrapped {
+                group_end += 1;
+            }
+            lengths.clear();
+            let mut logical_len = 0;
+            let mut cursor_position = None;
+            let mut viewport_position = None;
+            for (index, row) in source.iter().enumerate().take(group_end).skip(group_start) {
+                if old_viewport_offset != 0 && index == viewport_source_row {
+                    viewport_position = Some(logical_len);
+                }
+                if index == cursor_source_row {
+                    cursor_position = Some(logical_len + self.cursor.column);
+                }
+                let continues = index + 1 < group_end;
+                let mut used = if continues {
+                    self.width
+                } else {
+                    row.cells
+                        .iter()
+                        .rposition(|cell| cell.content != 0)
+                        .map_or(0, |last| last + 1)
+                };
+                if index == cursor_source_row {
+                    used = used.max(self.cursor.column + 1);
+                }
+                // Structural padding before a wrapped wide cell is not text.
+                if continues
+                    && used == self.width
+                    && row.cells[used - 1] == Cell::EMPTY
+                    && source[index + 1].cells[0].is_wide_leading()
+                {
+                    used -= 1;
+                }
+                if used > 0 && row.cells[used - 1].is_wide_leading() {
+                    used = (used + 1).min(self.width);
+                }
+                lengths.push(used);
+                logical_len += used;
+            }
+            let mut line = source[group_start..group_end]
+                .iter()
+                .zip(&lengths)
+                .flat_map(|(row, &used)| {
+                    (0..used).map(move |column| {
+                        (
+                            row.cells[column],
+                            row.graphemes.get(column).map(String::as_str),
+                            row.hyperlinks.get(column).copied(),
+                        )
+                    })
+                })
+                .peekable();
             let mut offset = 0;
             let mut continuation = false;
-            if line.is_empty() {
+            if logical_len == 0 {
                 reflowed.push(Row::new(new_width));
-                if viewport_position == Some((line_index, 0)) {
+                if viewport_position == Some(0) {
                     new_viewport_row = Some(reflowed.len() - 1);
                 }
-                if cursor_position == Some((line_index, 0)) {
+                if cursor_position == Some(0) {
                     new_cursor = Some((reflowed.len() - 1, 0));
                 }
             }
-            while offset < line.len() {
+            while offset < logical_len {
                 let row_start = offset;
                 let mut row = Row::new(new_width);
                 row.wrapped = continuation;
                 let row_index = reflowed.len();
                 let mut column = 0;
-                while offset < line.len() && column < new_width {
-                    let (cell, grapheme, hyperlink) = &line[offset];
+                while offset < logical_len && column < new_width {
+                    let (cell, grapheme, hyperlink) = *line.peek().expect("remaining logical cell");
                     if cell.is_wide_leading() {
                         if new_width == 1 {
                             row.cells[0] = Cell::new(
@@ -1117,11 +1120,13 @@ impl Grid {
                                 cell.flags().without_wide(),
                             );
                             row.graphemes.set(0, Some("\u{fffd}".to_owned()));
-                            if cursor_position.is_some_and(|(line, pos)| {
-                                line == line_index && (offset..offset + 2).contains(&pos)
-                            }) {
+                            if cursor_position
+                                .is_some_and(|pos| (offset..offset + 2).contains(&pos))
+                            {
                                 new_cursor = Some((row_index, 0));
                             }
+                            line.next();
+                            line.next();
                             offset += 2;
                             column = 1;
                             continue;
@@ -1129,15 +1134,15 @@ impl Grid {
                         if column + 1 >= new_width {
                             break;
                         }
-                        row.cells[column] = *cell;
+                        row.cells[column] = cell;
                         row.graphemes.set(column, grapheme.map(str::to_owned));
-                        row.hyperlinks.set(column, *hyperlink);
-                        if let Some((spacer, _, spacer_link)) = line.get(offset + 1) {
-                            row.cells[column + 1] = *spacer;
-                            row.hyperlinks.set(column + 1, *spacer_link);
+                        row.hyperlinks.set(column, hyperlink);
+                        line.next();
+                        if let Some((spacer, _, spacer_link)) = line.next() {
+                            row.cells[column + 1] = spacer;
+                            row.hyperlinks.set(column + 1, spacer_link);
                         }
-                        if let Some((line, pos)) = cursor_position
-                            && line == line_index
+                        if let Some(pos) = cursor_position
                             && (offset..offset + 2).contains(&pos)
                         {
                             new_cursor = Some((row_index, column + pos - offset));
@@ -1145,31 +1150,32 @@ impl Grid {
                         offset += 2;
                         column += 2;
                     } else {
-                        row.cells[column] = *cell;
+                        row.cells[column] = cell;
                         row.graphemes.set(column, grapheme.map(str::to_owned));
-                        row.hyperlinks.set(column, *hyperlink);
-                        if cursor_position == Some((line_index, offset)) {
+                        row.hyperlinks.set(column, hyperlink);
+                        if cursor_position == Some(offset) {
                             new_cursor = Some((row_index, column));
                         }
+                        line.next();
                         offset += 1;
                         column += 1;
                     }
                 }
-                if offset < line.len() && column == 0 {
-                    let (cell, grapheme, hyperlink) = &line[offset];
-                    row.cells[0] = *cell;
+                if offset < logical_len && column == 0 {
+                    let (cell, grapheme, hyperlink) = *line.peek().expect("remaining logical cell");
+                    row.cells[0] = cell;
                     row.graphemes.set(0, grapheme.map(str::to_owned));
-                    row.hyperlinks.set(0, *hyperlink);
+                    row.hyperlinks.set(0, hyperlink);
+                    line.next();
                     offset += 1;
                 }
-                if viewport_position.is_some_and(|(line, pos)| {
-                    line == line_index && (row_start..offset).contains(&pos)
-                }) {
+                if viewport_position.is_some_and(|pos| (row_start..offset).contains(&pos)) {
                     new_viewport_row = Some(row_index);
                 }
                 reflowed.push(row);
                 continuation = true;
             }
+            group_start = group_end;
         }
         let desired_start = reflowed.len().saturating_sub(new_height);
         let start = new_cursor.map_or(desired_start, |(row, _)| desired_start.min(row));
@@ -1433,6 +1439,86 @@ impl TerminalGrid {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logical_line_reflow_preserves_blank_lines_cursor_and_viewport() {
+        let mut terminal = crate::Terminal::new(6, 3).unwrap();
+        terminal.set_scrollback_limit(64);
+        terminal.process(b"abcdefgh\r\n\r\nijklmnop\r\nqrstuvwx");
+        terminal.scroll_view_up(3);
+        terminal.resize(4, 3).unwrap();
+        fn rows(grid: &Grid) -> (Vec<String>, Vec<bool>) {
+            let all = grid
+                .scrollback
+                .iter()
+                .chain((0..grid.height).map(|i| grid.row(i).unwrap()));
+            all.map(|row| {
+                (
+                    (0..row.cells.len())
+                        .filter_map(|i| row.grapheme_at(i))
+                        .collect(),
+                    row.wrapped,
+                )
+            })
+            .unzip()
+        }
+        assert_eq!(
+            rows(terminal.active_grid()),
+            (
+                ["abcd", "efgh", "", "ijkl", "mnop", "qrst", "uvwx", ""]
+                    .map(String::from)
+                    .to_vec(),
+                vec![false, true, false, false, true, false, true, true]
+            )
+        );
+        assert_eq!(terminal.cursor(), Cursor { column: 0, row: 2 });
+        assert_eq!(terminal.viewport_offset(), 4);
+        terminal.resize(10, 4).unwrap();
+        assert_eq!(
+            rows(terminal.active_grid()).0,
+            ["abcdefgh", "", "ijklmnop", "qrstuvwx"]
+        );
+        assert_eq!(terminal.cursor(), Cursor { column: 8, row: 3 });
+        assert_eq!(terminal.viewport_offset(), 0);
+        assert!(terminal.active_grid().scrollback.is_empty());
+    }
+
+    #[test]
+    fn continuous_logical_line_keeps_graphemes_and_wide_links() {
+        let mut terminal = crate::Terminal::new(8, 3).unwrap();
+        terminal.set_scrollback_limit(128);
+        let input = "ab界e\u{301}".repeat(40);
+        terminal.process(b"\x1b]8;;https://example.org\x1b\\");
+        terminal.process(input.as_bytes());
+        let link = terminal.active_grid().hyperlink(0, 0).unwrap();
+        for width in [8, 5, 7, 3, 11, 8] {
+            terminal.resize(width, 3).unwrap();
+            let grid = terminal.active_grid();
+            let mut text = String::new();
+            for row in grid
+                .scrollback
+                .iter()
+                .chain((0..grid.height).map(|i| grid.row(i).unwrap()))
+            {
+                for (column, cell) in row.cells.iter().enumerate() {
+                    if cell.content != 0 || cell.is_wide_spacer() {
+                        assert_eq!(row.hyperlinks.get(column), Some(&link));
+                    }
+                    if cell.is_wide_leading() {
+                        assert!(row.cells[column + 1].is_wide_spacer());
+                        assert_eq!(row.hyperlinks.get(column + 1), Some(&link));
+                    }
+                    if cell.is_wide_spacer() {
+                        assert!(column > 0 && row.cells[column - 1].is_wide_leading());
+                    }
+                    if let Some(grapheme) = row.grapheme_at(column) {
+                        text.push_str(&grapheme);
+                    }
+                }
+            }
+            assert_eq!(text, input, "width={width}");
+        }
+    }
+
     #[test]
     fn ascii_history_has_no_sidecar_allocations() {
         let mut terminal = crate::Terminal::new(8, 4).unwrap();

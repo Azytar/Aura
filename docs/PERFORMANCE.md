@@ -192,3 +192,13 @@ property), X11 resize, daily-use and cached/fresh native GPU suites. Four
 optional FiraCode tests still skip because that font is unavailable; those
 assertions were not validated. Physical GPUs, other compositors/drivers and
 input-to-present latency remain unmeasured.
+
+### Wrapped-history resize methodology
+
+The core benchmark also fills retained history outside the timer, using either
+separate 160-column paragraphs or a single continuous paragraph built from
+80-character blocks. Each workload ends with CRLF to fix the insertion point.
+For 1,000 and 10,000 retained rows, capacity is `history * 2 + 64`; eight
+round trips run from 80x25 through 73x22 and back, asserting unchanged
+restored history length. These are host-side core resize timings, not GPU
+presentation or input latency measurements.
