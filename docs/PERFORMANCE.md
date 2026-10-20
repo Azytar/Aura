@@ -1,14 +1,14 @@
 # Performance
 
-Every number below was produced on this machine by the benchmark binaries in
-this repository:
+The original table below records an earlier run of the benchmark binaries.
+The resize follow-up at the end records a separate environment and comparison:
 
 ```sh
 cargo bench --offline -p aura-core -p aura-text
 ```
 
-Hardware: AMD Radeon Vega 3 Graphics (RADV RAVEN2), Mesa 26.2.4, Linux 7.2.7,
-x86-64, `rustc 1.99.0` release profile. Numbers are from the current
+Original environment: AMD Radeon Vega 3 Graphics (RADV RAVEN2), Mesa 26.2.4, Linux 7.2.7,
+x86-64, `rustc 1.99.0` release profile. Numbers are from that earlier run of the
 benchmarks, single run, no statistical treatment — they are a floor to compare
 against after a change, not a certified measurement.
 
@@ -74,8 +74,9 @@ they need a live display and a stable comparison harness:
 - **Rasterization is per glyph per size, and the cache is keyed on it.** Two
   cache hits at 100-200 ns is what keeps a full screen repaint affordable:
   glyph work is paid once per size, not once per frame.
-- **Resize reflows the logical lines once.** The reflow cost shows up in the
-  resize figures; after it, only dirty rows are repainted.
+- **Resize reflows logical lines when required.** Independent rows that still
+  fit can reuse their buffers; full reflow borrows its source data. Afterward,
+  only dirty rows are repainted.
 
 ## Reproducing
 
@@ -86,3 +87,108 @@ cargo bench --offline -p aura-core -p aura-text
 
 `cargo bench` also runs the crates' unit tests, so the output includes the test
 summary; the timing lines are the ones starting with a benchmark name.
+
+## Resize and long-history zoom follow-up (2026-10-19)
+
+This comparison used Intel Xeon Platinum 8370C, Linux x86_64, Rust 1.96.0,
+DejaVu Sans Mono, dedicated Xvfb `:99` and software Vulkan llvmpipe (Mesa
+25.0.7, LLVM 19.1.7). It is a separate environment from the original table.
+The baseline was commit `29c9056`; the final code is the working-tree fix.
+Raw logs, compiler/environment details and binary/source checksums are in
+[`tests/performance/evidence/2026-10-19`](../tests/performance/evidence/2026-10-19).
+
+The old reflow cloned all physical rows, then copied their owned graphemes
+into logical lines, then copied them again into output rows. The new full
+path borrows old rows and grapheme slices until the replacement owns them.
+For width-only changes, independent unwrapped rows that still fit can resize
+their buffers in place, preserving their owned graphemes and links. Wrapped
+lines, clipping, changed row counts, decorated tails and cases needing
+viewport redistribution retain the full path. No history limit was reduced,
+no content was dropped to improve timings, and no background threads or
+new dependencies were introduced.
+
+### Core workload
+
+The added benchmark populates tree-like UTF-8 lines **outside** the timer,
+then measures 20 resize/restore pairs on the same terminal. Each line contains
+a combining mark and a wide scalar. Unlike the older resize workloads, these
+figures exclude terminal construction and initial output parsing.
+
+| History rows | Round trip | Before | After |
+| ---: | --- | ---: | ---: |
+| 0 | 80×25 → 79×25 → 80×25 | 0.135 ms | 0.096 ms |
+| 1,000 | 80×25 → 79×25 → 80×25 | 5.068 ms | 1.299 ms |
+| 10,000 | 80×25 → 79×25 → 80×25 | 91.911 ms | 19.860 ms |
+| 10,000 | 80×25 → 80×24 → 80×25 | 99.552 ms | 65.252 ms |
+
+These are means from individual runs, not statistically stable guarantees.
+The height-change case still needs full redistribution and benefits only
+from avoiding deep copies. Work is still proportional to stored history;
+this does not promise constant-time resizing of arbitrarily large buffers.
+
+### Native key delivery through resize
+
+`tests/x11_zoom_latency.py` generates the history, waits for readiness, then
+alternates Ctrl+Plus/Ctrl+Minus eight times, measuring the elapsed time until
+the child receives SIGWINCH with its new PTY dimensions. The outer window
+stays at 640×425; the column counts alternate between 80 and 71. Each operation
+finishes before the next key is sent. History generation is not timed.
+
+| History rows | Median before | Median after | Max before | Max after |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 7.290 ms | 5.878 ms | 11.930 ms | 11.077 ms |
+| 1,000 | 14.020 ms | 6.343 ms | 17.725 ms | 8.875 ms |
+| 10,000 | 57.628 ms | 19.298 ms | 99.712 ms | 24.440 ms |
+
+This measures X11 key delivery, font metrics, terminal resize and PTY
+notification. It **excludes GPU completion/presentation** and is not a
+full input-to-photon measurement. The samples are few, scheduler/driver
+variation remains, and no absolute timing threshold is used as a test.
+The final pair ran sequentially without our other builds/tests running.
+
+A preliminary native comparison accidentally shared a Cargo target directory
+with the baseline and executed the old binary. It was discarded. The final
+comparison verified distinct binary hashes and passed the resize-frame
+regression before measurement. Reproduce with separate target directories:
+
+```sh
+# Use a dedicated X11 display with Vulkan and DejaVu available.
+git worktree add --detach /tmp/aura-resize-baseline 29c9056
+CARGO_TARGET_DIR=/tmp/aura-resize-baseline-target cargo build --release --locked \
+  --manifest-path /tmp/aura-resize-baseline/Cargo.toml
+cargo build --release --locked
+python3 tests/x11_zoom_latency.py /tmp/aura-resize-baseline-target/release/aura
+python3 tests/x11_zoom_latency.py target/release/aura
+cargo bench --offline -p aura-core --bench workloads
+```
+
+### Flicker and correctness
+
+The resize flash was separately reproduced: X11's default ForgetGravity
+cleared the old window image, and the window background was always black.
+Aura now requests NorthWest bit gravity and resolves the configured background
+through the X11 colormap. X11 preserves the overlapping old frame and paints
+new strips in the configured color until Vulkan presents the new geometry.
+
+The X11 regression pauses **only Aura**, resizes the still-running X server's
+window, and compares the intermediate pixels. Both expansion and shrinking
+preserve their overlap; exposed strips have the expected configured color.
+It then resumes Aura and verifies zoom reset and ordinary resize bursts.
+Failures retain XWD captures under `AURA_ARTIFACTS` or `target/resize-evidence`.
+This checks the otherwise brief intermediate erase rather than only the final
+settled image. It passed with the fix and fails against the baseline.
+
+The new core differential test checks 3,000 geometry/content/history cases
+against full reflow, including Unicode, links, colored erasure, wrapped lines,
+viewport offsets and spare rows. The identical-size no-op is outside this
+comparison because it intentionally preserves state rather than reflowing.
+A 10,000-row regression separately checks logical rows, graphemes, hyperlinks,
+cursor and viewport after a width round trip that needs no eviction. Physical
+ring order can change legitimately and is not a content invariant.
+
+The ordered workspace fmt/check/Clippy (`-D warnings`)/test/release sequence
+passed, as did the core exhaustive profile (4,096 cases per generated
+property), X11 resize, daily-use and cached/fresh native GPU suites. Four
+optional FiraCode tests still skip because that font is unavailable; those
+assertions were not validated. Physical GPUs, other compositors/drivers and
+input-to-present latency remain unmeasured.

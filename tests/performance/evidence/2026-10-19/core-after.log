@@ -1,0 +1,22 @@
+   Compiling aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Finished `bench` profile [optimized] target(s) in 1.73s
+     Running benches/workloads.rs (target/release/deps/workloads-81c77f4d11b8d007)
+ASCII parser (4 KiB): 2191.4 ns/iteration
+CSI cursor movement (9 KiB): 140023.0 ns/iteration
+UTF-8 terminal (4 KiB): 670031.1 ns/iteration
+SGR terminal (3 KiB): 80029.7 ns/iteration
+terminal output (250 KiB): 23405194.2 ns/iteration
+grid writes (4,800 cells): 97847.2 ns/iteration
+full-grid ring scroll (1,000 rows): 386481.7 ns/iteration
+resize and reflow (80x25 to 100x30): 799933.0 ns/iteration
+resize and reflow with wide cells (80x25 to 200x60): 1381094.5 ns/iteration
+resize and reflow with combining marks (200x60 to 80x25): 2796720.8 ns/iteration
+scrollback traversal (10k lines, page walk): 78234741.8 ns/iteration
+history resize round trip (0 rows, 80x25 to 79x25): 95711.1 ns/iteration
+history resize round trip (0 rows, 80x25 to 80x24): 107617.2 ns/iteration
+history resize round trip (1000 rows, 80x25 to 79x25): 1298639.0 ns/iteration
+history resize round trip (1000 rows, 80x25 to 80x24): 2993215.8 ns/iteration
+history resize round trip (10000 rows, 80x25 to 79x25): 19860355.6 ns/iteration
+history resize round trip (10000 rows, 80x25 to 80x24): 65251557.8 ns/iteration
+font metrics to cell/pixel geometry: 9091624.1 ns/iteration

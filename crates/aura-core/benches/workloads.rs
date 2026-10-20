@@ -120,6 +120,30 @@ fn main() {
         }
     });
 
+    // Populate outside the timer: interactive zoom pays for resize, not for
+    // printing the history again. Short tree-like lines avoid eviction when
+    // the width changes, so repeated round trips keep the same working set.
+    for history in [0, 1_000, 10_000] {
+        for (width, height) in [(79, 25), (80, 24)] {
+            let mut terminal = Terminal::new(80, 25).expect("fixed dimensions are valid");
+            terminal.set_scrollback_limit(history);
+            for line in 0..history + 25 {
+                terminal.process(format!("├── directory-{line:05}/file-e\u{301}界\r\n").as_bytes());
+            }
+            measure(
+                &format!("history resize round trip ({history} rows, 80x25 to {width}x{height})"),
+                20,
+                || {
+                    terminal
+                        .resize(width, height)
+                        .expect("valid resized dimensions");
+                    terminal.resize(80, 25).expect("valid restored dimensions");
+                    black_box(&terminal);
+                },
+            );
+        }
+    }
+
     // Font-size-to-geometry conversion must stay cheap because it runs on
     // every startup and any future font-change path.
     let sizes = [10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0];

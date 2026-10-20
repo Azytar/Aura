@@ -1,0 +1,38 @@
+   Compiling libc v0.2.190
+   Compiling zerocopy v0.8.63
+   Compiling autocfg v1.5.1
+   Compiling bitflags v2.13.2
+   Compiling rustybuzz v0.20.1
+   Compiling num-traits v0.2.19
+   Compiling getrandom v0.2.17
+   Compiling rand_core v0.6.4
+   Compiling lazy_static v1.5.1
+   Compiling regex-syntax v0.8.11
+   Compiling rand_xorshift v0.3.0
+   Compiling unarray v0.1.4
+   Compiling aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.8
+   Compiling proptest v1.6.0
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Finished `bench` profile [optimized] target(s) in 13.51s
+     Running benches/workloads.rs (target/release/deps/workloads-81c77f4d11b8d007)
+ASCII parser (4 KiB): 2293.3 ns/iteration
+CSI cursor movement (9 KiB): 116992.4 ns/iteration
+UTF-8 terminal (4 KiB): 504161.5 ns/iteration
+SGR terminal (3 KiB): 63595.2 ns/iteration
+terminal output (250 KiB): 16844215.2 ns/iteration
+grid writes (4,800 cells): 67811.8 ns/iteration
+full-grid ring scroll (1,000 rows): 281040.8 ns/iteration
+resize and reflow (80x25 to 100x30): 974191.0 ns/iteration
+resize and reflow with wide cells (80x25 to 200x60): 1812026.8 ns/iteration
+resize and reflow with combining marks (200x60 to 80x25): 3015595.5 ns/iteration
+scrollback traversal (10k lines, page walk): 60017348.0 ns/iteration
+history resize round trip (0 rows, 80x25 to 79x25): 135253.9 ns/iteration
+history resize round trip (0 rows, 80x25 to 80x24): 133175.9 ns/iteration
+history resize round trip (1000 rows, 80x25 to 79x25): 5067736.0 ns/iteration
+history resize round trip (1000 rows, 80x25 to 80x24): 4875942.5 ns/iteration
+history resize round trip (10000 rows, 80x25 to 79x25): 91910528.7 ns/iteration
+history resize round trip (10000 rows, 80x25 to 80x24): 99552188.2 ns/iteration
+font metrics to cell/pixel geometry: 6886085.1 ns/iteration

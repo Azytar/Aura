@@ -26,6 +26,9 @@ per commit.
 - X11 window resizing preserves the previous frame in the overlapping area
   until Vulkan presents the replacement. Newly exposed strips use the
   configured background instead of flashing black.
+- Resize and font zoom avoid deep copies of scrollback during reflow. Width
+  changes reuse independent rows that still fit, preserving their graphemes,
+  hyperlinks and viewport without rebuilding the complete history.
 
 - Combining marks arriving after a main-screen resize stay attached to the
   reflowed base cell instead of using its old coordinates.

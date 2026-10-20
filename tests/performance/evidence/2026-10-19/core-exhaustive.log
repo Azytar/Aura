@@ -1,0 +1,129 @@
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.81s
+     Running unittests src/lib.rs (target/debug/deps/aura_core-aa840f377c16df4e)
+
+running 107 tests
+test grid::tests::cell_insertion_and_deletion_preserve_wide_pair_invariants ... ok
+test grid::tests::clear_operations_preserve_cursor_and_repair_wide_pairs ... ok
+test grid::tests::clear_range_and_rect_clip_at_grid_edges ... ok
+test grid::tests::cursor_motion_dirties_the_old_and_new_cursor_rows ... ok
+test grid::tests::cursor_moves_and_clamps_to_valid_coordinates ... ok
+test grid::tests::dirty_tracking_is_row_scoped_and_consumed_in_visible_order ... ok
+test grid::tests::construction_rejects_zero_dimensions_and_initializes_rows_dirty ... ok
+test grid::tests::logical_to_physical_mapping_wraps_and_full_scroll_recycles_rows ... ok
+test grid::tests::main_and_alternate_screens_keep_independent_state ... ok
+test grid::tests::overwriting_one_wide_half_repairs_the_pair ... ok
+test grid::tests::reads_and_writes_cells_and_clips_ranges ... ok
+test grid::tests::resize_reflows_logical_rows_and_keeps_cursor_in_bounds ... ok
+test grid::tests::resize_rejects_zero_without_changing_grid ... ok
+test grid::tests::resize_respects_the_configured_scrollback_limit ... ok
+test grid::tests::resizing_truncates_incomplete_wide_cells ... ok
+test grid::tests::row_insertion_and_deletion_are_region_bounded ... ok
+test grid::tests::row_reordering_marks_every_affected_visible_row_dirty ... ok
+test grid::tests::scroll_by_zero_is_a_valid_noop_for_valid_region ... ok
+test grid::tests::scroll_supports_partial_regions_and_counts_larger_than_region ... ok
+test grid::tests::grapheme_storage_moves_with_cells_and_wide_pair_clears_atomically ... ok
+test grid::tests::full_scroll_handles_small_4_by_3_and_5_by_4_grids ... ok
+test grid::tests::scrollback_limit_is_configurable_and_trims_immediately ... ok
+test grid::tests::wide_cells_are_atomic_and_clearing_either_half_clears_both ... ok
+test grid::tests::wrapped_metadata_tracks_logical_line_continuation ... ok
+test grid::tests::valid_operation_sequence_keeps_all_visible_rows_and_cursor_in_bounds ... ok
+test parser::tests::c1_csi_restarts_each_incomplete_namespace_across_every_split ... ok
+test parser::tests::can_sub_and_escape_cancel_partial_sequences ... ok
+test parser::tests::controls_execute_inside_csi_and_escape_recovers_from_malformed_input ... ok
+test parser::tests::csi_parameter_and_byte_limits_ignore_until_final ... ok
+test parser::tests::emits_ascii_and_incremental_utf8 ... ok
+test parser::tests::ignored_control_strings_do_not_leak_payload_into_printable_text ... ok
+test parser::tests::malformed_utf8_replaces_then_processes_control_byte ... ok
+test parser::tests::dcs_is_bounded_and_terminated_without_events ... ok
+test parser::tests::parses_csi_parameters_and_private_modes ... ok
+test parser::tests::utf8_continuations_in_control_strings_are_not_c1_terminators ... ok
+test parser::tests::parses_osc_terminators_and_discards_overlong_strings ... ok
+test terminal::campaign::all_short_partitions_and_directed_limits ... ok
+campaign property=combining profile=exhaustive settings=Settings { profile: "exhaustive", seed: 1096110657, algorithm: ChaCha, cases: 4096, actions: 128, width: 32, height: 16, history: 256, shrink: 8192 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+test grid::tests::fitting_row_resize_matches_full_reflow ... ok
+campaign property=model profile=exhaustive settings=Settings { profile: "exhaustive", seed: 1096110657, algorithm: ChaCha, cases: 4096, actions: 128, width: 32, height: 16, history: 256, shrink: 8192 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+test parser::tests::bounded_arbitrary_byte_streams_are_deterministic_across_chunking ... ok
+campaign property=state profile=exhaustive settings=Settings { profile: "exhaustive", seed: 1096110657, algorithm: ChaCha, cases: 4096, actions: 128, width: 32, height: 16, history: 256, shrink: 8192 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE braille pairs count=65536 elapsed=242.458955ms
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... ok
+test terminal::campaign::replay_cases ... ok
+test terminal::tests::a_scrolled_view_keeps_its_logical_anchor_when_width_changes ... ok
+test terminal::tests::alternate_resize_preserves_coordinates_and_the_reflowed_main_cursor ... ok
+test terminal::tests::alternate_screen_1049_keeps_main_cells_and_cursor_isolated ... ok
+test terminal::tests::alternate_screen_scrolling_never_adds_to_main_scrollback ... ok
+test terminal::tests::alternate_switch_does_not_reuse_main_pending_wrap_state ... ok
+test terminal::tests::c1_interrupts_unfinished_escape_sequences_without_losing_text ... ok
+test terminal::tests::c1_reverse_index_matches_escape_at_the_scroll_margin ... ok
+test terminal::tests::c1_single_byte_controls_match_their_escape_spellings ... ok
+test terminal::tests::carriage_return_line_feed_and_backspace_have_distinct_semantics ... ok
+test terminal::tests::clear_removes_wide_cells_links_and_graphemes_and_homes_the_cursor ... ok
+test terminal::tests::combining_and_zwj_sequences_remain_single_semantic_cells ... ok
+test terminal::tests::combining_mark_after_resize_follows_its_reflowed_base ... ok
+test terminal::tests::configured_modes_are_seeded_then_application_wins ... ok
+test terminal::tests::csi_can_be_split_across_reads_and_deca_wm_disables_wrapping ... ok
+test terminal::tests::cursor_csi_and_erase_sequences_obey_bounds ... ok
+test terminal::tests::cursor_style_follows_decscusr_and_survives_screen_switches ... ok
+test terminal::tests::dec_modes_mouse_bracketed_paste_and_cursor_visibility_are_observable ... ok
+test terminal::tests::dec_special_graphics_and_control_strings_work ... ok
+test terminal::tests::editor_multiplexer_and_monitor_redraw_sequences_smoke ... ok
+test terminal::tests::extended_color_components_are_fully_consumed ... ok
+test terminal::tests::font_size_resize_preserves_state_without_clearing ... ok
+test terminal::tests::full_screen_output_builds_scrollback_and_viewport_does_not_move_live_cursor ... ok
+test terminal::tests::grapheme_storage_has_a_fixed_per_cell_byte_limit ... ok
+test terminal::tests::hostile_output_keeps_terminal_invariants ... ok
+test terminal::tests::ich_dch_il_dl_and_erase_line_mutate_only_requested_regions ... ok
+test terminal::tests::incomplete_extended_color_does_not_become_unrelated_sgr_attributes ... ok
+test terminal::tests::insert_mode_keeps_existing_wide_hyperlink_ownership ... ok
+test terminal::tests::leaving_alternate_screen_discards_its_selection ... ok
+test terminal::tests::long_history_resize_preserves_unicode_links_and_viewport ... ok
+test terminal::tests::malformed_and_unknown_sequences_are_ignored_safely ... ok
+test terminal::tests::mixed_tui_updates_resize_and_chunking_preserve_wide_cell_ownership ... ok
+test terminal::tests::narrow_grids_count_terminal_cell_widths_not_characters ... ok
+test terminal::tests::ncurses_erasure_and_insert_delete_keep_the_active_background ... ok
+test terminal::tests::ncurses_repeat_scroll_and_tabs_obey_terminal_geometry ... ok
+test terminal::tests::origin_mode_and_scroll_margins_bound_cursor_and_scrolling ... ok
+test terminal::tests::osc133_emits_bounded_shell_integration_markers ... ok
+test terminal::tests::osc52_allows_bounded_writes_but_never_clipboard_reads ... ok
+test terminal::tests::osc8_links_are_cell_semantics_and_close_for_following_text ... ok
+test terminal::tests::osc_title_da_dsr_and_cpr_produce_expected_state_and_replies ... ok
+test terminal::tests::paste_bytes_follow_bracketed_paste_mode ... ok
+test terminal::tests::printable_text_utf8_controls_and_wide_grid_state ... ok
+test terminal::tests::reflow_does_not_insert_a_space_before_a_wrapped_wide_character ... ok
+test terminal::tests::regional_indicator_skin_tone_and_hangul_clusters_stay_atomic ... ok
+test terminal::tests::reset_shows_the_cleared_live_screen_instead_of_old_scrollback ... ok
+test terminal::tests::resize_does_not_join_independent_rows_and_reflows_wrapped_text ... ok
+test terminal::tests::resize_drops_the_selection_instead_of_keeping_stale_cells ... ok
+test terminal::tests::resize_while_alternate_preserves_main_pending_wrap ... ok
+test terminal::tests::right_margin_delays_wrap_until_next_printable ... ok
+test terminal::tests::save_restore_cursor_preserves_position_and_rendition ... ok
+test terminal::tests::scrollback_limit_follows_configuration_and_alternate_screen_is_unaffected ... ok
+test terminal::tests::scrollback_line_and_home_end_controls_clamp_to_available_history ... ok
+test terminal::tests::selection_cell_range_returns_only_the_visible_intersection ... ok
+test terminal::tests::selection_is_external_to_cells_and_extracts_graphemes_and_logical_lines ... ok
+test terminal::tests::selection_keeps_naming_the_same_lines_while_the_viewport_scrolls ... ok
+test terminal::tests::sgr_supports_attributes_ansi_256_and_truecolor ... ok
+test terminal::tests::shaping_context_stays_with_the_same_unbroken_text_run ... ok
+test terminal::tests::shrinking_unused_rows_keeps_the_prompt_and_cursor_in_place ... ok
+test terminal::tests::trimming_scrollback_clamps_or_drops_an_anchored_selection ... ok
+test terminal::tests::unsupported_csi_prefixes_do_not_change_rendition_or_cursor ... ok
+test terminal::tests::wide_character_wraps_before_last_column_and_preserves_pair_invariant ... ok
+test terminal::tests::wide_glyph_at_right_margin_reports_and_moves_from_the_last_column ... ok
+test terminal::tests::widening_a_full_line_preserves_the_insertion_point ... ok
+test terminal::tests::word_and_line_selection_extend_endpoints_over_the_buffer ... ok
+COMPLETE property=combining cases=4096 elapsed=7.554388689s
+test terminal::campaign::generated_combining_resize ... ok
+COMPLETE property=state cases=4096 elapsed=35.219701283s
+test terminal::campaign::generated_state_and_fragmentation ... ok
+test terminal::campaign::generated_independent_ascii_model has been running for over 60 seconds
+COMPLETE property=model cases=4096 elapsed=67.161729836s
+test terminal::campaign::generated_independent_ascii_model ... ok
+
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 67.29s
+
+   Doc-tests aura_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

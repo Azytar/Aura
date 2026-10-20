@@ -1,0 +1,9 @@
+PASS: Caps Lock, Shift, Ctrl+Left, backtab, F6 through the real PTY
+PASS: live layout change and AltGr
+PASS: real XKB dead key composition
+PASS: individual i glyphs, colors, spacing, padding and fractional-cell resize
+PASS: sudo/pacman protocol fixture, uppercase S, no-echo input, CR progress and UTF-8 OSC
+PASS: all 256 Braille patterns, continuous borders/full blocks and fractional resize through the native swapchain
+PASS: SIGTERM closes the PTY and reaps its shell
+PASS: real htop, setup screen, resize, font zoom and clean exit
+PASS: Ctrl+C remains responsive during continuous yes output

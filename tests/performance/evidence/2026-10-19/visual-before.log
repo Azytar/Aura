@@ -1,0 +1,11 @@
+DEBUG keyboard device=3 kc24=0x71 kc31=0x69 kc33=0x70 kc54=0x63
+
+PASS: invalid configuration produces actionable startup errors
+Traceback (most recent call last):
+  File "/workspace/Aura/tests/x11_resize.py", line 146, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/workspace/Aura/tests/x11_resize.py", line 102, in main
+    assert crop(intermediate, 0, 0, width, height) == before[2], "X11 erased the previous frame during resize"
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: X11 erased the previous frame during resize

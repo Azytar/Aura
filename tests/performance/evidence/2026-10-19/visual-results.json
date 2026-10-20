@@ -1,0 +1,22 @@
+[
+  {
+    "command": [
+      "python3",
+      "tests/x11_resize.py",
+      "/workspace/aura-history-baseline"
+    ],
+    "exit": 1,
+    "expected": 1,
+    "AURA_ARTIFACTS": "/workspace/aura-resize-history-visual-proof/baseline"
+  },
+  {
+    "command": [
+      "python3",
+      "tests/x11_resize.py",
+      "target/release/aura"
+    ],
+    "exit": 0,
+    "expected": 0,
+    "AURA_ARTIFACTS": "/workspace/aura-resize-history-visual-proof/fixed"
+  }
+]

@@ -3,7 +3,7 @@ use std::ops::Range;
 
 /// Rows kept above the visible screen when nothing else is requested.
 pub const DEFAULT_SCROLLBACK_ROWS: usize = 10_000;
-type ReflowCell = (Cell, Option<String>, Option<u32>);
+type ReflowCell<'a> = (Cell, Option<&'a str>, Option<u32>);
 
 /// Bit flags describing terminal-cell presentation and wide-cell structure.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -853,10 +853,61 @@ impl Grid {
         }
         validate_dimensions(new_width, new_height)?;
 
+        if new_height == self.height && self.resize_fitting_rows(new_width) {
+            return Ok(());
+        }
+        self.resize_reflow(new_width, new_height)
+    }
+
+    // A width change does not rewrap independent lines that already fit.
+    // Resize their existing buffers and keep owned graphemes instead of
+    // rebuilding the history. Any wrap, clipping or viewport redistribution uses reflow.
+    fn resize_fitting_rows(&mut self, width: usize) -> bool {
+        if self.cursor.column >= width
+            || (!self.scrollback.is_empty()
+                && self.cursor.row + 1 < self.height
+                && self.row(self.height - 1).is_some_and(|row| {
+                    !row.wrapped && row.cells.iter().all(|cell| *cell == Cell::EMPTY)
+                }))
+        {
+            return false;
+        }
+        if !self.scrollback.iter().chain(&self.rows).all(|row| {
+            let mut used = row
+                .cells
+                .iter()
+                .rposition(|cell| cell.content != 0)
+                .map_or(0, |last| last + 1);
+            if used > 0 && row.cells[used - 1].is_wide_leading() {
+                used = (used + 1).min(self.width);
+            }
+            !row.wrapped
+                && used <= width
+                && row.cells[used..].iter().all(|cell| *cell == Cell::EMPTY)
+                && row.graphemes[used..].iter().all(Option::is_none)
+                && row.hyperlinks[used..].iter().all(Option::is_none)
+        }) {
+            return false;
+        }
+        for row in self.scrollback.iter_mut().chain(&mut self.rows) {
+            let mut cells = std::mem::take(&mut row.cells).into_vec();
+            cells.resize(width, Cell::EMPTY);
+            row.cells = cells.into_boxed_slice();
+            row.graphemes.resize_with(width, || None);
+            row.hyperlinks.resize(width, None);
+            row.dirty = true;
+        }
+        self.width = width;
+        true
+    }
+
+    fn resize_reflow(&mut self, new_width: usize, new_height: usize) -> Result<(), GridError> {
         let old_viewport_offset = self.viewport_offset;
         let old_cursor_row = self.cursor.row;
-        let mut source: Vec<Row> = self.scrollback.iter().cloned().collect();
-        source.extend((0..self.height).map(|row| self.row(row).expect("visible row").clone()));
+        // Borrow the old rows until the replacement is complete. Cloning the
+        // history here duplicates every cell buffer and grapheme per zoom.
+        let mut source: Vec<&Row> = self.scrollback.iter().collect();
+        source.extend((0..self.height).map(|row| self.row(row).expect("visible row")));
         let cursor_source_row = self.scrollback.len() + old_cursor_row;
         // Empty rows below the cursor are spare screen space, not history.
         // Drop them before choosing the new viewport so shrinking a mostly
@@ -868,7 +919,7 @@ impl Grid {
         {
             source.pop();
         }
-        let mut logical_lines: Vec<Vec<ReflowCell>> = Vec::new();
+        let mut logical_lines: Vec<Vec<ReflowCell<'_>>> = Vec::new();
         let mut cursor_position = None;
         let mut viewport_position = None;
         let viewport_source_row = self.scrollback.len().saturating_sub(old_viewport_offset);
@@ -917,7 +968,7 @@ impl Grid {
             logical_lines[source_line].extend((0..used).map(|column| {
                 (
                     row.cells[column],
-                    row.graphemes[column].clone(),
+                    row.graphemes[column].as_deref(),
                     row.hyperlinks[column],
                 )
             }));
@@ -968,7 +1019,7 @@ impl Grid {
                             break;
                         }
                         row.cells[column] = *cell;
-                        row.graphemes[column] = grapheme.clone();
+                        row.graphemes[column] = grapheme.map(str::to_owned);
                         row.hyperlinks[column] = *hyperlink;
                         if let Some((spacer, _, spacer_link)) = line.get(offset + 1) {
                             row.cells[column + 1] = *spacer;
@@ -984,7 +1035,7 @@ impl Grid {
                         column += 2;
                     } else {
                         row.cells[column] = *cell;
-                        row.graphemes[column] = grapheme.clone();
+                        row.graphemes[column] = grapheme.map(str::to_owned);
                         row.hyperlinks[column] = *hyperlink;
                         if cursor_position == Some((line_index, offset)) {
                             new_cursor = Some((row_index, column));
@@ -996,7 +1047,7 @@ impl Grid {
                 if offset < line.len() && column == 0 {
                     let (cell, grapheme, hyperlink) = &line[offset];
                     row.cells[0] = *cell;
-                    row.graphemes[0] = grapheme.clone();
+                    row.graphemes[0] = grapheme.map(str::to_owned);
                     row.hyperlinks[0] = *hyperlink;
                     offset += 1;
                 }
@@ -1269,6 +1320,55 @@ impl TerminalGrid {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fitting_row_resize_matches_full_reflow() {
+        let samples = [
+            "a\r\nb\r\n",
+            "e\u{301}界\r\n",
+            "\x1b[44mabc\x1b[K\r\n",
+            "long logical line that wraps ",
+            "\x1b]8;;https://example.org\x1b\\界e\u{301}\r\n",
+        ];
+        for width in [1, 2, 3, 8, 80] {
+            for height in [1, 3] {
+                for history in [0, 4] {
+                    for sample in samples {
+                        for clear_below in [false, true] {
+                            let mut terminal = crate::Terminal::new(width, height).unwrap();
+                            terminal.set_scrollback_limit(history);
+                            terminal.process(sample.repeat(10).as_bytes());
+                            if clear_below {
+                                terminal.process(b"\x1b[1;1H\x1b[J");
+                            }
+                            terminal.scroll_view_up(2);
+                            for new_width in [1, 2, 3, 7, 8, 79, 80, 90] {
+                                for new_height in [height, height + 1] {
+                                    // Identical geometry intentionally preserves
+                                    // pending wrap and is not a reflow operation.
+                                    if (new_width, new_height) == (width, height) {
+                                        continue;
+                                    }
+                                    let mut actual = terminal.active_grid().clone();
+                                    let mut reference = actual.clone();
+                                    // The full path canonicalizes circular rows.
+                                    // Compare logical storage, not its ring origin.
+                                    actual.resize(new_width, new_height).unwrap();
+                                    reference.resize_reflow(new_width, new_height).unwrap();
+                                    actual.rows.rotate_left(actual.base_row);
+                                    actual.base_row = 0;
+                                    assert_eq!(
+                                        actual, reference,
+                                        "{width}x{height} -> {new_width}x{new_height}, history={history}, clear={clear_below}, sample={sample:?}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     use super::*;
 
     fn grid(width: usize, height: usize) -> Grid {

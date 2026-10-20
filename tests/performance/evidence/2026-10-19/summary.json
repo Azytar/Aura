@@ -1,0 +1,76 @@
+{
+  "baseline_commit": "29c9056ee408987fd5905d9a98deb06d91435af6",
+  "rustc": "rustc 1.96.0 (ac68faa20 2026-05-25)\nbinary: rustc\ncommit-hash: ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96\ncommit-date: 2026-05-25\nhost: x86_64-unknown-linux-gnu\nrelease: 1.96.0\nLLVM version: 22.1.2\n",
+  "environment": "Intel Xeon Platinum 8370C, dedicated Xvfb :99, Mesa 25.0.7 llvmpipe LLVM 19.1.7; no validation layers",
+  "commands": {
+    "core-benchmark": [
+      "cargo",
+      "bench",
+      "--offline",
+      "-p",
+      "aura-core",
+      "--bench",
+      "workloads"
+    ],
+    "core-exhaustive": {
+      "AURA_PROFILE": "exhaustive",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "aura-core",
+        "--locked",
+        "--",
+        "--nocapture"
+      ]
+    },
+    "msrv": [
+      "cargo",
+      "+1.88.0",
+      "check",
+      "--workspace",
+      "--all-targets",
+      "--all-features",
+      "--locked"
+    ],
+    "fuzz": [
+      "cargo",
+      "+nightly-2026-10-10",
+      "fuzz",
+      "run",
+      "--fuzz-dir",
+      "crates/aura-core/fuzz",
+      "vt_parser",
+      "/workspace/aura-resize-history-fuzz-corpus",
+      "--",
+      "-runs=10000",
+      "-max_len=8192",
+      "-timeout=5",
+      "-seed=1096110657"
+    ]
+  },
+  "native_samples": 8,
+  "font": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+  "font_sha256": "54bf827eb99404e8f430c330ad30f063334f637eba0109b6a18d4f566a8e9dd8",
+  "binary_sha256": {
+    "baseline": "36b21ae29959305a3c1b4c7cf0cad533e1221f4670b61b8a045b7ebf172c03f3",
+    "fixed": "cf803f27765756033ce82069df3e02e38b138b4045e823fb20713c45ce12bcd8"
+  },
+  "sources_sha256": {
+    "crates/aura-app/src/main.rs": "e6da6c218dfe427a1eee9bc75abd5b78dc3f2ec7dac64117aba03fbb0a93e774",
+    "crates/aura-core/src/grid.rs": "2d1ecc87fe3a4fd68d51b22de76ca73022efac749d3c61a847ff81cb96736162",
+    "crates/aura-core/src/terminal.rs": "e70c39344e1bb52bcc08b1e4784e32f4e0df24d7aeedf8587557f2555c153f5f",
+    "crates/aura-core/benches/workloads.rs": "fa205326ca987b7d4e8e7c458ccbbcaa95d2b14328005ebb02385f728bcf98eb",
+    "tests/x11_resize.py": "f0d19623d1855c35c4e8d51ccf1964489acfa438bd3d14a50584570a5c0f48e2",
+    "tests/x11_zoom_latency.py": "b23d2ff270def4b62806a896749fc869fd44ba76513fb982443733eac5fb0c44"
+  },
+  "omissions": [
+    "four optional FiraCode assertions",
+    "physical GPUs and other compositors",
+    "GPU presentation/input-to-photon latency"
+  ],
+  "notes": [
+    "Preliminary shared-target native comparison discarded; final binary identities were checked and fixed binary passed visual regression before final measurement.",
+    "Core timings are means per round trip; native timings end at SIGWINCH and exclude GPU presentation."
+  ]
+}

@@ -1648,6 +1648,38 @@ fn dec_graphic(ch: char) -> char {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn long_history_resize_preserves_unicode_links_and_viewport() {
+        let mut t = terminal(80, 25);
+        t.set_scrollback_limit(10_000);
+        feed(&mut t, b"\x1b]8;;https://example.org\x1b\\");
+        for line in 0..10_025 {
+            feed(&mut t, format!("├── {line:05}/ e\u{301}界\r\n").as_bytes());
+        }
+        feed(&mut t, b"\x1b]8;;\x1b\\");
+        t.scroll_view_up(5_000);
+        let before = t.grid.clone();
+        let cursor = t.cursor();
+        // These lines fit both widths, so no extra row or history eviction is
+        // needed. A round trip must preserve sidecars and the viewport anchor.
+        t.resize(79, 25).unwrap();
+        t.resize(80, 25).unwrap();
+        for screen in [ActiveScreen::Main, ActiveScreen::Alternate] {
+            let actual = t.grid.screen(screen);
+            let expected = before.screen(screen);
+            assert_eq!(actual.first_line(), expected.first_line());
+            assert_eq!(actual.last_line(), expected.last_line());
+            assert_eq!(actual.viewport_offset(), expected.viewport_offset());
+            for line in expected.first_line()..=expected.last_line() {
+                assert!(
+                    actual.row_at_line(line) == expected.row_at_line(line),
+                    "history resize changed row or sidecars at {line}"
+                );
+            }
+        }
+        assert_eq!(t.cursor(), cursor);
+    }
+
+    #[test]
     fn insert_mode_keeps_existing_wide_hyperlink_ownership() {
         let mut t = terminal(3, 1);
         feed(
