@@ -6,7 +6,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from x11_daily_use import capture, run, wait_for, window_for
 
 
@@ -60,8 +59,12 @@ blink = false
                 descriptors.append(descriptor)
                 helper = home / "shell"
                 helper.write_text(f'''#!{sys.executable}
-import os, select, tty
+import os, select, tty, signal
 tty.setraw(0)
+def size_changed(*_):
+    size = os.get_terminal_size(0)
+    os.write(1, f"\\x1b]0;SIZE:{{size.columns}}x{{size.lines}}\\a".encode())
+signal.signal(signal.SIGWINCH, size_changed)
 fd = os.open({str(fifo)!r}, os.O_RDONLY | os.O_NONBLOCK)
 os.write(1, {data!r} + b"\\x1b]0;READY\\a")
 pending = b""
@@ -89,18 +92,34 @@ while True:
             def emit(window, descriptor, data):
                 os.write(descriptor, (data + b"\x1b]0;UPDATED\a").hex().encode() + b"\n")
                 wait_for(lambda: run("xdotool", "getwindowname", window).strip() == b"UPDATED", "updated frame not ready")
-                time.sleep(0.1)
+
+            def presented(window, path, updated):
+                # OSC titles acknowledge parser progress, not presentation.
+                # This independent cell-corner witness changes with the content.
+                def ready():
+                    image = capture(window, path)
+                    cw, ch = (image[0] - 8) // 12, (image[1] - 10) // 8
+                    if updated:
+                        x, y, color = 4 + 6 * cw, 5, bytes.fromhex("d8d8d8")
+                    else:
+                        x, y, color = 4 + 3 * cw, 5 + 2 * ch - 1, bytes.fromhex("0000ee")
+                    at = (y * image[0] + x) * 3
+                    return image if image[2][at:at+3] == color else None
+                return wait_for(ready, "presented content witness did not arrive")
+
+            def pty_size(window):
+                title = run("xdotool", "getwindowname", window).strip()
+                if not title.startswith(b"SIZE:"): return None
+                return tuple(map(int, title[5:].split(b"x")))
 
             for size in sizes:
                 cached, window, control = launch(f"cached-{size}", size, initial)
-                time.sleep(0.1)
-                capture(window, root / "initial.xwd")
+                presented(window, root / "initial.xwd", False)
                 emit(window, control, updates)
-                actual = capture(window, root / "actual.xwd")
+                actual = presented(window, root / "actual.xwd", True)
                 fresh, reference_window, _ = launch(f"fresh-{size}", size, initial + updates)
                 run("xdotool", "windowraise", reference_window)
-                time.sleep(0.15)
-                expected = capture(reference_window, root / "expected.xwd")
+                expected = presented(reference_window, root / "expected.xwd", True)
                 # A fresh renderer can share a defect with the cached path.
                 # Independently require the erased cell's ANSI-blue background
                 # before using its text pixels as a differential reference.
@@ -136,10 +155,10 @@ while True:
                 run("xdotool", "windowraise", window)
                 run("xdotool", "windowfocus", "--sync", window)
                 run("xdotool", "key", "ctrl+plus")
-                time.sleep(0.1)
+                wait_for(lambda: pty_size(window) not in [None, (12, 8)], "zoom did not change PTY geometry")
                 run("xdotool", "key", "ctrl+0")
-                time.sleep(0.15)
-                compare(capture(window, root / "zoom.xwd"), "zoom")
+                wait_for(lambda: pty_size(window) == (12, 8), "reset did not restore PTY geometry")
+                compare(presented(window, root / "zoom.xwd", True), "zoom")
                 cached.terminate()
                 fresh.terminate()
                 assert cached.wait(timeout=8) == 0 and fresh.wait(timeout=8) == 0
