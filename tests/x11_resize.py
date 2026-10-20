@@ -6,12 +6,13 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 
-from x11_daily_use import capture, run, wait_for, window_for
+from x11_daily_use import capture, crop, run, wait_for, window_for
 
 
 def main():
@@ -90,6 +91,25 @@ while os.read(0, 4096): pass
                 time.sleep(0.15)
                 before = capture(window, root / "before.xwd")
                 assert before[2][:3] == bytes.fromhex("123456")
+                # Pause only Aura: X11 still resizes the drawable. This makes
+                # the otherwise brief server-side erase visible deterministically.
+                app.send_signal(signal.SIGSTOP)
+                try:
+                    width, height = original
+                    run("xdotool", "windowsize", window, str(width + 40), str(height + 40))
+                    intermediate = capture(window, root / "resize-paused.xwd")
+                    assert intermediate[:2] == (width + 40, height + 40), "X11 did not apply the test resize"
+                    assert crop(intermediate, 0, 0, width, height) == before[2], "X11 erased the previous frame during resize"
+                    assert intermediate[2][-3:] == bytes.fromhex("123456"), "newly exposed pixels flash a different background"
+                    run("xdotool", "windowsize", window, str(width - 40), str(height - 40))
+                    smaller = capture(window, root / "resize-paused-smaller.xwd")
+                    assert smaller[:2] == (width - 40, height - 40)
+                    assert smaller[2] == crop(before, 0, 0, width - 40, height - 40), "shrinking erased or shifted the preserved frame"
+                    run("xdotool", "windowsize", window, str(width), str(height))
+                finally:
+                    app.send_signal(signal.SIGCONT)
+                wait_for(synchronized, "paused resize left inconsistent dimensions")
+                print("PASS: resize preserves the previous frame and fills exposed pixels with the configured background")
                 original_metrics = metrics()
                 run("xdotool", "key", "ctrl+plus")
                 wait_for(lambda: metrics() != original_metrics, "zoom did not change font metrics")
@@ -108,6 +128,10 @@ while os.read(0, 4096): pass
                 assert capture(window, root / "restored.xwd") == before, "resize round trip changed the logical text or left residue"
                 print("PASS: resize bursts settle on matching window/grid/PTY dimensions without text or pixel residue")
             except Exception:
+                artifacts = Path(os.environ.get("AURA_ARTIFACTS", "target/resize-evidence"))
+                artifacts.mkdir(parents=True, exist_ok=True)
+                for image in root.glob("*.xwd"):
+                    shutil.copy2(image, artifacts / image.name)
                 log.flush()
                 print((root / "app.log").read_text(errors="replace"), file=sys.stderr)
                 raise

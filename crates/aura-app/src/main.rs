@@ -18,7 +18,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     AtomEnum, ConfigureNotifyEvent, ConnectionExt as XprotoExt, CreateWindowAux, EventMask,
-    KeyButMask, PropMode, SelectionNotifyEvent, WindowClass,
+    Gravity, KeyButMask, PropMode, SelectionNotifyEvent, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::xcb_ffi::XCBConnection;
@@ -86,6 +86,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .intern_atom(false, b"WM_DELETE_WINDOW")?
         .reply()?
         .atom;
+    let background = config.colors.palette().background;
+    let background_pixel = connection
+        .alloc_color(
+            screen.default_colormap,
+            ((background >> 16) & 0xff) as u16 * 257,
+            ((background >> 8) & 0xff) as u16 * 257,
+            (background & 0xff) as u16 * 257,
+        )?
+        .reply()?
+        .pixel;
     connection.create_window(
         screen.root_depth,
         window,
@@ -98,7 +108,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         WindowClass::INPUT_OUTPUT,
         screen.root_visual,
         &CreateWindowAux::new()
-            .background_pixel(screen.black_pixel)
+            // Preserve the overlap until Vulkan presents the resized frame.
+            // New strips must use the palette background, not flash black.
+            .bit_gravity(Gravity::NORTH_WEST)
+            .background_pixel(background_pixel)
             .event_mask(
                 EventMask::EXPOSURE
                     | EventMask::STRUCTURE_NOTIFY

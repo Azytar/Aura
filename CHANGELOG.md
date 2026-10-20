@@ -23,6 +23,10 @@ per commit.
 
 ### Fixed
 
+- X11 window resizing preserves the previous frame in the overlapping area
+  until Vulkan presents the replacement. Newly exposed strips use the
+  configured background instead of flashing black.
+
 - Combining marks arriving after a main-screen resize stay attached to the
   reflowed base cell instead of using its old coordinates.
 - Insert-mode cell shifts retain hyperlink ownership on valid wide-cell
