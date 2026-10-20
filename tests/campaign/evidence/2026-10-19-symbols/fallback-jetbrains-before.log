@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/aura_text-25d07e2b7b0a36ab)
+
+running 1 test
+
+thread 'tests::return_arrow_uses_a_real_fallback_when_the_primary_face_lacks_it' (211698) panicked at crates/aura-text/src/lib.rs:1066:9:
+assertion `left != right` failed: Return arrow fell back to the primary .notdef glyph
+  left: 0
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test tests::return_arrow_uses_a_real_fallback_when_the_primary_face_lacks_it ... FAILED
+
+failures:
+
+failures:
+    tests::return_arrow_uses_a_real_fallback_when_the_primary_face_lacks_it
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p aura-text --lib`

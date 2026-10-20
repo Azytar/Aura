@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/google/fonts",
+  "commit": "47d54ca1ebb14fd864695f1d39dc734f39017c33",
+  "fonts": [
+    {
+      "family": "FiraCode",
+      "sha256": "9335b082b3c7850d98a64b584f3417f65355f3471278bb5eeb8c6c0e8657aeeb",
+      "path": "/workspace/aura-font-reference/FiraCode.ttf"
+    },
+    {
+      "family": "JetBrainsMono",
+      "sha256": "48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda",
+      "path": "/workspace/aura-font-reference/JetBrainsMono.ttf"
+    }
+  ]
+}

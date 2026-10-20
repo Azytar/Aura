@@ -12,7 +12,7 @@ from x11_daily_use import capture, run, wait_for, window_for
 
 def main():
     required = os.environ.get("AURA_REQUIRE_GPU") == "1"
-    font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
+    font = Path(os.environ.get("AURA_TEST_SYMBOL_FONT", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"))
     missing = [tool for tool in ["xdotool", "xdpyinfo", "xwd", "magick", "vulkaninfo"] if not shutil.which(tool)]
     if missing or not font.exists():
         if required:
@@ -28,7 +28,7 @@ def main():
     profile = os.environ.get("AURA_PROFILE", "quick")
     sizes = {"quick": [17, 18], "extended": [12, 17, 18, 23], "exhaustive": [9, 12, 17, 18, 23, 36]}[profile]
     initial = b"\x1b[?25l\x1b[31mABCD\r\n\x1b[44m12345678"
-    updates = "\x1b[1;2H界\x1b[2;3H\x1b[3X\x1b[0m\x1b[3;1H⣇█╬i\x1b[1;7H\x1b[4;7mX\x1b[0m".encode()
+    updates = "\x1b[1;2H界\x1b[2;3H\x1b[3X\x1b[0m\x1b[3;1H⣇█╬i⏎↵😀↩\ufe0f\x1b[1;7H\x1b[4;7mX\x1b[0m".encode()
     output = Path(os.environ.get("AURA_ARTIFACTS", "target/campaign"))
     with tempfile.TemporaryDirectory(prefix="aura-dirty-") as directory:
         root = Path(directory)

@@ -868,7 +868,7 @@ fn complete_emoji_clusters_reach_the_color_shader_and_preserve_cell_ownership() 
         return;
     }
     let (cw, ch) = (font.metrics().width, font.metrics().height);
-    for text in ["👩\u{200d}💻", "👍🏽", "🇪🇸", "❤\u{fe0f}"] {
+    for text in ["😀", "👩\u{200d}💻", "👍🏽", "🇪🇸", "❤\u{fe0f}", "↩\u{fe0f}"] {
         let mut terminal = Terminal::new(3, 1).unwrap();
         terminal.process(b"\x1b[?25l");
         terminal.process(text.as_bytes());
@@ -930,4 +930,94 @@ fn overwriting_a_wide_right_margin_pair_removes_its_spacer_pixels() {
         overwritten == fresh,
         "wide glyph or spacer pixels survived overwriting the pair"
     );
+}
+
+#[test]
+fn return_symbols_remain_visible_without_painting_neighbor_cells() {
+    if !require_gpu() {
+        assert!(
+            std::env::var("AURA_REQUIRE_GPU").as_deref() != Ok("1"),
+            "required Vulkan unavailable for Return-symbol regression"
+        );
+        eprintln!("SKIP Vulkan unavailable for Return symbols");
+        return;
+    }
+    let configured = std::env::var_os("AURA_TEST_SYMBOL_FONT");
+    let samples: &[&str] = if configured.is_some() {
+        &["↵"]
+    } else {
+        &["⏎", "↵", "↩", "↩\u{fe0e}"]
+    };
+    let path = configured
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf".into());
+    for size in [12.0, 18.0, 24.0] {
+        let Ok(mut font) = Font::load(Some(&path), size) else {
+            assert!(
+                std::env::var("AURA_REQUIRE_GPU").as_deref() != Ok("1"),
+                "required controlled DejaVu font unavailable"
+            );
+            eprintln!("SKIP controlled Return-symbol font unavailable");
+            return;
+        };
+        let metrics = font.metrics();
+        let (cw, ch) = (metrics.width, metrics.height);
+        let width = cw * 3;
+        let mut renderer = OffscreenRenderer::new(width, ch).unwrap();
+        // An independent Font supplies the oracle without consuming the
+        // incremental uploads owned by the renderer's Font.
+        let mut reference_font = Font::load(Some(&path), size).unwrap();
+        for &text in samples {
+            let mut terminal = Terminal::new(3, 1).unwrap();
+            terminal.process(b"\x1b[?25l");
+            terminal.process(text.as_bytes());
+            terminal.process(b"\x1b[44m ");
+            assert_eq!(terminal.viewport_grapheme(0, 0).as_deref(), Some(text));
+            assert_eq!(terminal.cursor().column, 2);
+            let (_, glyph, upload) = reference_font.glyph_text(text, false, false).unwrap();
+            let upload = upload.expect("fresh Return glyph raster");
+            let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+            let left = glyph.bearing[0] as i32;
+            let top = metrics.ascent - glyph.bearing[1] as i32;
+            let mut ink = false;
+            for y in 0..ch {
+                for x in 0..cw {
+                    let (gx, gy) = (x as i32 - left, y as i32 - top);
+                    let alpha = if gx >= 0
+                        && gy >= 0
+                        && (gx as u32) < upload.width
+                        && (gy as u32) < upload.height
+                    {
+                        upload.pixels[gy as usize * upload.width as usize + gx as usize]
+                    } else {
+                        0
+                    };
+                    ink |= alpha != 0;
+                    // The actual font bitmap defines visibility. Small Return
+                    // marks can have no fully opaque pixels after hinting.
+                    let expected =
+                        ((216u32 * u32::from(alpha) + 24 * (255 - u32::from(alpha)) + 127) / 255)
+                            as u8;
+                    let offset = ((y * width + x) * 4) as usize;
+                    for channel in &pixels[offset..offset + 3] {
+                        assert!(
+                            channel.abs_diff(expected) <= 1,
+                            "{text:?} bitmap differs at {size}px ({x},{y}): got {channel}, expected {expected}"
+                        );
+                    }
+                }
+            }
+            assert!(ink, "{text:?} has no visible font raster at {size}px");
+            for y in 0..ch {
+                for x in cw..cw * 2 {
+                    let offset = ((y * width + x) * 4) as usize;
+                    assert_eq!(
+                        &pixels[offset..offset + 4],
+                        [0, 0, 238, 255],
+                        "{text:?} painted the neighboring cell at {size}px"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -1,0 +1,399 @@
+   Compiling aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+   Compiling aura-config v0.1.0 (/workspace/Aura/crates/aura-config)
+   Compiling aura-render v0.1.0 (/workspace/Aura/crates/aura-render)
+   Compiling aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+   Compiling aura-app v0.1.0 (/workspace/Aura/crates/aura-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.04s
+     Running unittests src/main.rs (target/debug/deps/aura-04fd07ab8afbfb90)
+
+running 18 tests
+test input::tests::partial_writes_and_backpressure_preserve_every_byte_in_order ... ok
+aura: PTY input buffer full; input ignored
+test input::tests::fatal_write_errors_preserve_only_the_unaccepted_suffix ... ok
+test input::tests::input_is_bounded_and_zero_writes_are_errors ... ok
+test input::tests::repeated_interruptions_yield_without_dropping_input ... ok
+test keyboard::tests::application_keypad_retains_physical_key_identity ... ok
+test input::tests::tiny_successful_writes_also_yield_and_resume_in_order ... ok
+test keyboard::tests::a_dead_key_cancelling_compose_can_start_a_new_sequence ... ok
+test keyboard::tests::compose_and_dead_keys_emit_only_complete_utf8 ... ok
+test keyboard::tests::navigation_modifiers_backtab_and_control_bytes_match_xterm ... ok
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x41 state=0x1
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x4
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=38 sym=0x61 state=0x8
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=24 sym=0x40 state=0x2080
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=29 sym=0x7a state=0x2000
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+DEBUG key event: keycode=38 sym=0x61 state=0x0
+test keyboard::tests::repeated_keypress_snapshots_do_not_accumulate_modifiers_or_groups ... ok
+test keyboard::tests::zoom_uses_only_the_selected_level ... ok
+test signals::tests::the_shell_does_not_inherit_the_event_loops_blocked_signals ... ok
+test keyboard::tests::cancelled_compose_still_emits_the_cancelling_key ... ok
+test tests::mouse_reports_follow_tracking_and_sgr_modes ... ok
+test tests::osc52_payload_decode_accepts_bounded_padded_and_unpadded_data ... ok
+test tests::clipboard_pastes_obey_the_configured_limit_without_partial_utf8 ... ok
+test keyboard::tests::caps_lock_shift_and_layout_levels_follow_xkb_types ... ok
+test input::tests::a_real_nonblocking_pty_keeps_a_large_utf8_paste_under_backpressure ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+     Running tests/version_consistency.rs (target/debug/deps/version_consistency-cf19e5f4c600cc68)
+
+running 1 test
+test workspace_versions_changelog_and_binary_agree ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aura_config-d524df4371cad26d)
+
+running 31 tests
+test tests::a_configuration_without_a_font_section_loads_with_defaults ... ok
+test tests::cursor_colour_defaults_to_the_foreground ... ok
+test tests::colour_parsing_accepts_the_common_notations_and_rejects_junk ... ok
+test tests::defaults_are_valid ... ok
+test tests::font_geometry_is_single_source_of_truth ... ok
+test tests::cursor_and_scrollback_bounds_are_enforced ... ok
+test tests::integer_font_sizes_are_honoured ... ok
+test tests::every_section_is_optional ... ok
+test tests::invalid_columns_rejected ... ok
+test tests::invalid_size_rejected ... ok
+test tests::invalid_toml_is_reported_as_parse_error ... ok
+test tests::missing_config_uses_defaults ... ok
+test tests::oversized_integers_cannot_wrap_into_valid_geometry ... ok
+test tests::invalid_types_and_misspelled_keys_are_reported ... ok
+test tests::parse_full_config ... ok
+test tests::parse_minimal_config ... ok
+test tests::missing_family_falls_back_to_the_default_family ... ok
+test tests::large_windows_and_invalid_config_respect_the_gpu_grid_budget ... ok
+test tests::paste_limit_fits_the_input_queue_and_geometry_saturates_without_wrapping ... ok
+test tests::resize_inner_dimensions_subtract_padding ... ok
+test tests::runtime_font_size_respects_minimum_and_maximum ... ok
+test tests::runtime_font_size_tracks_configured_and_current ... ok
+test tests::security_defaults_refuse_everything_unsafe ... ok
+test tests::shared_grid_dimensions_agree_with_geometry ... ok
+test tests::theme_and_overrides_resolve_into_a_complete_palette ... ok
+test tests::pty_winsize_matches_terminal_grid_from_geometry ... ok
+test tests::style_faces_are_parsed_from_config ... ok
+test tests::theme_names_are_case_insensitive_and_validated ... ok
+test tests::window_geometry_uses_complete_cells ... ok
+test tests::window_geometry_accounts_for_padding ... ok
+test tests::shipped_example_config_parses ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/aura_core-5d63815e644de08b)
+
+running 107 tests
+test grid::tests::construction_rejects_zero_dimensions_and_initializes_rows_dirty ... ok
+test grid::tests::cursor_motion_dirties_the_old_and_new_cursor_rows ... ok
+test grid::tests::cell_insertion_and_deletion_preserve_wide_pair_invariants ... ok
+test grid::tests::clear_operations_preserve_cursor_and_repair_wide_pairs ... ok
+test grid::tests::clear_range_and_rect_clip_at_grid_edges ... ok
+test grid::tests::cursor_moves_and_clamps_to_valid_coordinates ... ok
+test grid::tests::dirty_tracking_is_row_scoped_and_consumed_in_visible_order ... ok
+test grid::tests::grapheme_storage_moves_with_cells_and_wide_pair_clears_atomically ... ok
+test grid::tests::full_scroll_handles_small_4_by_3_and_5_by_4_grids ... ok
+test grid::tests::logical_to_physical_mapping_wraps_and_full_scroll_recycles_rows ... ok
+test grid::tests::overwriting_one_wide_half_repairs_the_pair ... ok
+test grid::tests::reads_and_writes_cells_and_clips_ranges ... ok
+test grid::tests::main_and_alternate_screens_keep_independent_state ... ok
+test grid::tests::resize_reflows_logical_rows_and_keeps_cursor_in_bounds ... ok
+test grid::tests::resize_rejects_zero_without_changing_grid ... ok
+test grid::tests::resizing_truncates_incomplete_wide_cells ... ok
+test grid::tests::resize_respects_the_configured_scrollback_limit ... ok
+test grid::tests::row_insertion_and_deletion_are_region_bounded ... ok
+test grid::tests::scroll_supports_partial_regions_and_counts_larger_than_region ... ok
+test grid::tests::scroll_by_zero_is_a_valid_noop_for_valid_region ... ok
+test grid::tests::row_reordering_marks_every_affected_visible_row_dirty ... ok
+test grid::tests::wide_cells_are_atomic_and_clearing_either_half_clears_both ... ok
+test grid::tests::scrollback_limit_is_configurable_and_trims_immediately ... ok
+test grid::tests::wrapped_metadata_tracks_logical_line_continuation ... ok
+test parser::tests::c1_csi_restarts_each_incomplete_namespace_across_every_split ... ok
+test grid::tests::valid_operation_sequence_keeps_all_visible_rows_and_cursor_in_bounds ... ok
+test parser::tests::can_sub_and_escape_cancel_partial_sequences ... ok
+test parser::tests::csi_parameter_and_byte_limits_ignore_until_final ... ok
+test parser::tests::dcs_is_bounded_and_terminated_without_events ... ok
+test parser::tests::emits_ascii_and_incremental_utf8 ... ok
+test parser::tests::ignored_control_strings_do_not_leak_payload_into_printable_text ... ok
+test parser::tests::controls_execute_inside_csi_and_escape_recovers_from_malformed_input ... ok
+test parser::tests::parses_csi_parameters_and_private_modes ... ok
+test parser::tests::malformed_utf8_replaces_then_processes_control_byte ... ok
+test parser::tests::utf8_continuations_in_control_strings_are_not_c1_terminators ... ok
+test parser::tests::parses_osc_terminators_and_discards_overlong_strings ... ok
+test terminal::campaign::all_short_partitions_and_directed_limits ... ok
+campaign property=combining profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=combining cases=64 elapsed=73.458229ms
+test terminal::campaign::generated_combining_resize ... ok
+campaign property=model profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+test parser::tests::bounded_arbitrary_byte_streams_are_deterministic_across_chunking ... ok
+campaign property=state profile=quick settings=Settings { profile: "quick", seed: 1096110657, algorithm: ChaCha, cases: 64, actions: 32, width: 12, height: 6, history: 32, shrink: 1024 } unicode-width=(17, 0, 0) segmentation=(17, 0, 0)
+COMPLETE property=model cases=64 elapsed=188.218717ms
+test terminal::campaign::generated_independent_ascii_model ... ok
+test terminal::campaign::replay_cases ... ok
+test terminal::tests::a_scrolled_view_keeps_its_logical_anchor_when_width_changes ... ok
+test terminal::tests::alternate_resize_preserves_coordinates_and_the_reflowed_main_cursor ... ok
+test terminal::tests::alternate_screen_1049_keeps_main_cells_and_cursor_isolated ... ok
+test terminal::tests::alternate_screen_scrolling_never_adds_to_main_scrollback ... ok
+test terminal::tests::alternate_switch_does_not_reuse_main_pending_wrap_state ... ok
+test terminal::tests::c1_interrupts_unfinished_escape_sequences_without_losing_text ... ok
+test terminal::tests::c1_reverse_index_matches_escape_at_the_scroll_margin ... ok
+test terminal::tests::c1_single_byte_controls_match_their_escape_spellings ... ok
+test terminal::tests::carriage_return_line_feed_and_backspace_have_distinct_semantics ... ok
+test terminal::tests::clear_removes_wide_cells_links_and_graphemes_and_homes_the_cursor ... ok
+test terminal::tests::combining_and_zwj_sequences_remain_single_semantic_cells ... ok
+test terminal::tests::combining_mark_after_resize_follows_its_reflowed_base ... ok
+test terminal::tests::configured_modes_are_seeded_then_application_wins ... ok
+test terminal::tests::csi_can_be_split_across_reads_and_deca_wm_disables_wrapping ... ok
+test terminal::tests::cursor_csi_and_erase_sequences_obey_bounds ... ok
+test terminal::tests::cursor_style_follows_decscusr_and_survives_screen_switches ... ok
+test terminal::tests::dec_modes_mouse_bracketed_paste_and_cursor_visibility_are_observable ... ok
+test terminal::tests::dec_special_graphics_and_control_strings_work ... ok
+test terminal::tests::editor_multiplexer_and_monitor_redraw_sequences_smoke ... ok
+test terminal::tests::extended_color_components_are_fully_consumed ... ok
+test terminal::tests::font_size_resize_preserves_state_without_clearing ... ok
+test terminal::tests::full_screen_output_builds_scrollback_and_viewport_does_not_move_live_cursor ... ok
+test terminal::tests::grapheme_storage_has_a_fixed_per_cell_byte_limit ... ok
+test terminal::tests::hostile_output_keeps_terminal_invariants ... ok
+test terminal::tests::ich_dch_il_dl_and_erase_line_mutate_only_requested_regions ... ok
+test terminal::tests::incomplete_extended_color_does_not_become_unrelated_sgr_attributes ... ok
+test terminal::tests::insert_mode_keeps_existing_wide_hyperlink_ownership ... ok
+test terminal::tests::leaving_alternate_screen_discards_its_selection ... ok
+COMPLETE braille pairs count=65536 elapsed=396.929522ms
+test terminal::campaign::enumerate_braille_pairs_and_optional_triples ... ok
+test terminal::tests::malformed_and_unknown_sequences_are_ignored_safely ... ok
+test grid::tests::fitting_row_resize_matches_full_reflow ... ok
+test terminal::tests::narrow_grids_count_terminal_cell_widths_not_characters ... ok
+test terminal::tests::ncurses_erasure_and_insert_delete_keep_the_active_background ... ok
+test terminal::tests::ncurses_repeat_scroll_and_tabs_obey_terminal_geometry ... ok
+test terminal::tests::origin_mode_and_scroll_margins_bound_cursor_and_scrolling ... ok
+test terminal::tests::osc133_emits_bounded_shell_integration_markers ... ok
+test terminal::tests::osc52_allows_bounded_writes_but_never_clipboard_reads ... ok
+test terminal::tests::osc8_links_are_cell_semantics_and_close_for_following_text ... ok
+test terminal::tests::osc_title_da_dsr_and_cpr_produce_expected_state_and_replies ... ok
+test terminal::tests::paste_bytes_follow_bracketed_paste_mode ... ok
+test terminal::tests::printable_text_utf8_controls_and_wide_grid_state ... ok
+test terminal::tests::reflow_does_not_insert_a_space_before_a_wrapped_wide_character ... ok
+test terminal::tests::regional_indicator_skin_tone_and_hangul_clusters_stay_atomic ... ok
+test terminal::tests::reset_shows_the_cleared_live_screen_instead_of_old_scrollback ... ok
+test terminal::tests::resize_does_not_join_independent_rows_and_reflows_wrapped_text ... ok
+test terminal::tests::resize_drops_the_selection_instead_of_keeping_stale_cells ... ok
+test terminal::tests::resize_while_alternate_preserves_main_pending_wrap ... ok
+test terminal::tests::right_margin_delays_wrap_until_next_printable ... ok
+test terminal::tests::save_restore_cursor_preserves_position_and_rendition ... ok
+test terminal::tests::scrollback_limit_follows_configuration_and_alternate_screen_is_unaffected ... ok
+test terminal::tests::scrollback_line_and_home_end_controls_clamp_to_available_history ... ok
+test terminal::tests::selection_cell_range_returns_only_the_visible_intersection ... ok
+test terminal::tests::selection_is_external_to_cells_and_extracts_graphemes_and_logical_lines ... ok
+test terminal::tests::selection_keeps_naming_the_same_lines_while_the_viewport_scrolls ... ok
+test terminal::tests::sgr_supports_attributes_ansi_256_and_truecolor ... ok
+test terminal::tests::shaping_context_stays_with_the_same_unbroken_text_run ... ok
+test terminal::tests::shrinking_unused_rows_keeps_the_prompt_and_cursor_in_place ... ok
+test terminal::tests::trimming_scrollback_clamps_or_drops_an_anchored_selection ... ok
+test terminal::tests::unsupported_csi_prefixes_do_not_change_rendition_or_cursor ... ok
+test terminal::tests::wide_character_wraps_before_last_column_and_preserves_pair_invariant ... ok
+test terminal::tests::wide_glyph_at_right_margin_reports_and_moves_from_the_last_column ... ok
+test terminal::tests::widening_a_full_line_preserves_the_insertion_point ... ok
+test terminal::tests::word_and_line_selection_extend_endpoints_over_the_buffer ... ok
+COMPLETE property=state cases=64 elapsed=216.691526ms
+test terminal::campaign::generated_state_and_fragmentation ... ok
+test terminal::tests::mixed_tui_updates_resize_and_chunking_preserve_wide_cell_ownership ... ok
+test terminal::tests::long_history_resize_preserves_unicode_links_and_viewport ... ok
+
+test result: ok. 107 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.08s
+
+     Running benches/workloads.rs (target/debug/deps/workloads-b7f955261da53f0a)
+ASCII parser (4 KiB): 153832.9 ns/iteration
+CSI cursor movement (9 KiB): 1032657.2 ns/iteration
+UTF-8 terminal (4 KiB): 7296755.3 ns/iteration
+SGR terminal (3 KiB): 721478.0 ns/iteration
+terminal output (250 KiB): 164427527.8 ns/iteration
+grid writes (4,800 cells): 1024425.4 ns/iteration
+full-grid ring scroll (1,000 rows): 5509215.5 ns/iteration
+resize and reflow (80x25 to 100x30): 12226689.3 ns/iteration
+resize and reflow with wide cells (80x25 to 200x60): 14680859.6 ns/iteration
+resize and reflow with combining marks (200x60 to 80x25): 26840234.7 ns/iteration
+scrollback traversal (10k lines, page walk): 542372775.4 ns/iteration
+history resize round trip (0 rows, 80x25 to 79x25): 835297.3 ns/iteration
+history resize round trip (0 rows, 80x25 to 80x24): 1058928.6 ns/iteration
+history resize round trip (1000 rows, 80x25 to 79x25): 7265396.8 ns/iteration
+history resize round trip (1000 rows, 80x25 to 80x24): 19972037.0 ns/iteration
+history resize round trip (10000 rows, 80x25 to 79x25): 101953163.5 ns/iteration
+history resize round trip (10000 rows, 80x25 to 80x24): 210239463.4 ns/iteration
+font metrics to cell/pixel geometry: 24473248.3 ns/iteration
+     Running unittests examples/vt_replay.rs (target/debug/examples/vt_replay-6aafd989965bcbe9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/aura_pty-1dd1f666939c6705)
+
+running 1 test
+test tests::pty_size_rejects_zero_and_values_outside_linux_winsize ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/pty_terminal.rs (target/debug/deps/pty_terminal-a9b7d11f7b976dad)
+
+running 1 test
+test real_pty_output_and_input_reach_terminal_state ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/aura_render-dfeeb25ab7367982)
+
+running 11 tests
+test tests::ansi_color_words_convert_to_shader_channel_order ... ok
+test tests::decoration_geometry_matches_shader_formulas ... ok
+test tests::every_changing_surface_parameter_forces_a_recreation ... ok
+test tests::fresh_cell_cache_rebuilds_every_row ... ok
+test tests::gpu_cell_matches_four_word_storage_layout ... ok
+test tests::identical_surface_parameters_reuse_the_live_swapchain ... ok
+test tests::intact_cell_cache_only_rebuilds_dirty_rows ... ok
+test tests::redundant_configure_notice_sequence_makes_no_progress ... ok
+test tests::zero_area_surfaces_never_reuse_or_recreate ... ok
+test tests::stale_cached_extent_still_recreates_when_the_surface_moved ... ok
+test tests::atlas_invalidation_resets_upload_flags ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/campaign_gpu.rs (target/debug/deps/campaign_gpu-f0822c2e91dade88)
+
+running 2 tests
+COMPLETE GPU atlas cached/fresh comparisons: 2 controlled-font sizes
+test cached_atlas_render_matches_a_new_renderer_and_font ... ok
+COMPLETE GPU Unicode witnesses: 256 patterns x 9 cell/spacing/offset configurations
+test unicode_named_braille_witnesses_and_components ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+
+     Running tests/cell_graphics_gpu.rs (target/debug/deps/cell_graphics_gpu-cd616c921a94e0ec)
+
+running 8 tests
+test blocks_cover_full_strides_and_fractional_halves_are_complementary ... ok
+test every_box_drawing_character_paints_and_quadrants_keep_their_area ... ok
+test braille_centers_form_one_uniform_grid_across_cell_boundaries ... ok
+test graphical_cells_survive_zoom_and_selection_preserves_original_text ... ok
+test graphics_ignore_font_style_but_keep_sgr_colors_and_inverse ... ok
+test light_heavy_and_double_lines_join_without_dim_center_pixels ... ok
+test every_braille_pattern_keeps_unicode_dot_order_across_sizes_and_spacing ... ok
+test double_corners_preserve_two_separate_connected_strokes ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.76s
+
+     Running tests/offscreen_gpu.rs (target/debug/deps/offscreen_gpu-671c212e22f46716)
+
+running 18 tests
+test color_emoji_samples_the_color_atlas ... ok
+test cursor_shapes_invert_expected_regions ... ok
+test font_resize_keeps_combining_grapheme_in_one_cell ... ok
+test font_resize_repaints_ascii_cells_with_fresh_rasterization ... ok
+test complete_emoji_clusters_reach_the_color_shader_and_preserve_cell_ownership ... ok
+test a_long_sessions_full_atlas_is_rebuilt_for_visible_glyphs ... ok
+test font_resize_repaints_color_emoji_from_fresh_color_atlas ... ok
+test glyph_cache_hits_keep_later_table_entries ... ok
+test inverse_and_truecolor_cells_use_deterministic_colors ... ok
+test mixed_fallback_frame_renders_all_atlases ... ok
+test overwriting_a_wide_right_margin_pair_removes_its_spacer_pixels ... ok
+test font_resize_rerasterizes_wide_cells_with_terminal_cell_ownership ... ok
+test narrow_glyph_pixels_and_backgrounds_survive_padding_spacing_and_residue ... ok
+test renders_terminal_cells_and_reads_back_expected_colors ... ok
+test selection_uses_the_configured_palette_colour ... ok
+test underline_and_strikethrough_paint_foreground_rows ... ok
+test thin_cursors_preserve_the_glyph_outside_the_cursor_stripe ... ok
+test return_symbols_remain_visible_without_painting_neighbor_cells ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.54s
+
+     Running unittests src/lib.rs (target/debug/deps/aura_text-6d28967172a79f30)
+
+running 31 tests
+test tests::clamp_font_size_never_leaks_nonpositive_sizes ... ok
+test tests::a_full_atlas_does_not_poison_glyph_or_cluster_cache ... ok
+test tests::colr_pixels_are_converted_from_premultiplied_to_straight_alpha ... ok
+test tests::color_emoji_resolves_to_rgba_uploads_when_present ... ok
+test tests::complete_devanagari_cluster_and_joining_context_use_configured_fallback ... ok
+test tests::contextual_script_shaping_is_enabled_without_shaping_latin_grid_runs ... ok
+test tests::color_cluster_cache_pressure_is_recoverable ... ok
+test tests::configured_fallbacks_are_lazy_bounded_and_take_priority ... ok
+test tests::fallback_faces_cover_cjk_and_symbols_without_touching_primary_metrics ... ok
+test tests::family_name_matching_handles_spaces_and_punctuation ... ok
+test tests::family_search_prefers_regular_across_directories ... ok
+test tests::invalidate_atlas_clears_glyphs_and_resets_shelves ... ok
+test tests::load_with_family_resolves_existing_path ... ok
+test tests::explicit_style_faces_invalidate_cache_and_missing_faces_leave_it_intact ... ok
+FiraCode Nerd Font not installed; skipping
+test tests::nerd_font_atlas_rebuilds_on_size_change ... ok
+FiraCode Nerd Font not installed; skipping
+test tests::nerd_font_renders_ascii_unicode_cjk_and_nerd_glyphs ... ok
+FiraCode Nerd Font not installed; skipping
+test tests::nerd_font_resolves_and_has_valid_metrics ... ok
+FiraCode Nerd Font not installed; skipping
+test tests::nerd_font_runtime_scaling_produces_different_glyph_sizes ... ok
+test tests::overlapping_masks_and_color_layers_use_alpha_composition ... ok
+test tests::metrics_change_with_font_size ... ok
+test tests::return_arrow_uses_a_real_fallback_when_the_primary_face_lacks_it ... ok
+test tests::emoji_clusters_select_one_color_face_and_preserve_ligatures ... ok
+test tests::set_size_is_clamped_to_supported_range ... ok
+test tests::set_size_rerasterizes_and_clears_stale_cache ... ok
+test tests::shaped_grapheme_uses_one_composited_cached_atlas_entry ... ok
+test tests::size_aware_cache_key_prevents_cross_size_hits ... ok
+test tests::system_font_metrics_and_glyph_cache_are_stable ... ok
+test tests::real_styles_match_native_faces_without_double_synthetic_styling ... ok
+test tests::return_symbols_have_real_glyphs_and_survive_font_size_changes ... ok
+test tests::unicode_and_fallback_survive_size_round_trip ... ok
+COMPLETE text profile=quick cases=64 seed=1096110657 algorithm=ChaCha shrink=1024 elapsed=307.542129ms
+test campaign::generated_shaping_and_cache_contract ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running benches/glyph_workloads.rs (target/debug/deps/glyph_workloads-5cd2cfab62ee66c1)
+glyph cache hit: 5.4 us/iteration
+shaped grapheme cache hit: 6.0 us/iteration
+rasterize 94 distinct ASCII glyphs: 143721.5 us/iteration
+shape and rasterize Arabic grapheme: 3271.3 us/iteration
+load and rasterize A at each tested size: 16956.4 us/iteration
+font metrics computation per size: 7553.9 us/iteration
+font resize 12->24 with ASCII warmup: 43078.1 us/iteration
+font resize 24->12 with ASCII warmup: 41880.7 us/iteration
+atlas growth across ASCII range at 14pt: 116949.4 us/iteration

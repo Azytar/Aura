@@ -1,0 +1,5 @@
+   Compiling aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+   Compiling aura-config v0.1.0 (/workspace/Aura/crates/aura-config)
+   Compiling aura-render v0.1.0 (/workspace/Aura/crates/aura-render)
+   Compiling aura-app v0.1.0 (/workspace/Aura/crates/aura-app)
+    Finished `release` profile [optimized] target(s) in 8.00s

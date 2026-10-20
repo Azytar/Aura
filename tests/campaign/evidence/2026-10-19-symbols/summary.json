@@ -1,0 +1,27 @@
+{
+  "base_commit": "29c9056ee408987fd5905d9a98deb06d91435af6",
+  "license": "GPL-3.0-only",
+  "fixed": "U+21B5 fallback coverage for primary fonts missing the arrow",
+  "font_fixtures": "Reference fonts fetched outside the repository; not installed or vendored",
+  "gpu_oracle": "Independent Font, actual hinted alpha bitmap, one UNORM channel unit rounding tolerance; blue neighbor unchanged",
+  "native_sizes": [
+    9,
+    12,
+    17,
+    18,
+    23,
+    36
+  ],
+  "required_mode": true,
+  "omissions": [
+    "four optional FiraCode Nerd Font assertions; reference Fira Code is not a Nerd Font installation",
+    "Alacritty unavailable; no live side-by-side comparison",
+    "physical GPU and user-specific font version not tested"
+  ],
+  "source_sha256": {
+    "crates/aura-text/src/lib.rs": "088d146f369424e9039abba3d152bdc3c2036134ca91dc719d1f8f2a14b7c6eb",
+    "crates/aura-render/tests/offscreen_gpu.rs": "db881a45d2d2f1511a0a56e88f1e6f1279738d6e960d5d989a4f9f7cc327c3f5",
+    "tests/x11_campaign.py": "555b69880ee29c6c26b393ead263cb181d001bc4a104f2142237125fe2f22123"
+  },
+  "binary_sha256": "8c53a3c14756a96aa36c4865830d88344c488d3494719c9fb5a5ee48f67954a0"
+}

@@ -29,6 +29,9 @@ per commit.
 - Resize and font zoom avoid deep copies of scrollback during reflow. Width
   changes reuse independent rows that still fit, preserving their graphemes,
   hyperlinks and viewport without rebuilding the complete history.
+- Fonts missing common Return arrows such as `↵` can use an available
+  DejaVu symbol fallback instead of displaying the primary missing-glyph box.
+  Enter/Return marks and emoji presentation now have explicit pixel coverage.
 
 - Combining marks arriving after a main-screen resize stay attached to the
   reflowed base cell instead of using its old coordinates.

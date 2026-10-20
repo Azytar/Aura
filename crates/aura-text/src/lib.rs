@@ -57,6 +57,12 @@ const FALLBACK_CANDIDATES: &[&[&str]] = &[
         "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
     ],
+    &[
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    ],
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1041,6 +1047,75 @@ fn load_fallbacks(configured: &[PathBuf]) -> Vec<FaceData> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn return_arrow_uses_a_real_fallback_when_the_primary_face_lacks_it() {
+        let primary = std::env::var_os("AURA_TEST_SYMBOL_FONT")
+            .map(PathBuf::from)
+            .or_else(|| Font::resolve_family_path("Liberation Mono"));
+        let (Some(primary), Some(_fallback)) = (primary, Font::resolve_family_path("DejaVu Sans"))
+        else {
+            assert!(
+                std::env::var("AURA_REQUIRE_GPU").as_deref() != Ok("1"),
+                "required Liberation/DejaVu fallback fixtures unavailable"
+            );
+            eprintln!("SKIP Liberation/DejaVu Return-arrow fallback fixtures unavailable");
+            return;
+        };
+        let mut font = Font::load(Some(&primary), 18.0).unwrap();
+        assert_eq!(
+            font.face(0).unwrap().charmap().map('↵'),
+            0,
+            "the primary fixture must exercise a missing-glyph fallback"
+        );
+        let metrics = font.metrics();
+        let face = font.resolve_text_face("↵", false, false);
+        assert_ne!(
+            face, 0,
+            "Return arrow fell back to the primary .notdef glyph"
+        );
+        assert!(faces::covers(font.face(face).unwrap(), "↵"));
+        let (_, info, upload) = font.glyph_text("↵", false, false).unwrap();
+        assert!(!info.color && info.size.iter().all(|value| *value > 0.0));
+        assert!(upload.unwrap().pixels.iter().any(|alpha| *alpha != 0));
+        assert_eq!(
+            font.metrics(),
+            metrics,
+            "fallback changed terminal cell metrics"
+        );
+    }
+
+    #[test]
+    fn return_symbols_have_real_glyphs_and_survive_font_size_changes() {
+        let path = Path::new("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf");
+        let Ok(mut font) = Font::load(Some(path), 12.0) else {
+            assert!(
+                std::env::var("AURA_REQUIRE_GPU").as_deref() != Ok("1"),
+                "required controlled DejaVu font unavailable"
+            );
+            eprintln!("SKIP controlled Return-symbol font unavailable");
+            return;
+        };
+        for size in [12.0, 18.0, 24.0, 12.0] {
+            font.set_size(size).unwrap();
+            for text in ["⏎", "↵", "↩", "↩\u{fe0e}"] {
+                let face = font.resolve_text_face(text, false, false);
+                // Visible ink alone can be .notdef. Require actual cmap
+                // coverage before checking the raster and cached lookup.
+                assert!(
+                    faces::covers(font.face(face).unwrap(), text),
+                    "missing Return glyph {text:?}"
+                );
+                let (id, info, upload) = font.glyph_text(text, false, false).unwrap();
+                assert!(!info.color && info.size.iter().all(|value| *value > 0.0));
+                let upload = upload.expect("new size produces a fresh Return raster");
+                assert!(upload.pixels.iter().any(|alpha| *alpha != 0));
+                let cached = font.glyph_text(text, false, false).unwrap();
+                assert_eq!((cached.0, cached.1), (id, info));
+                assert!(cached.2.is_none());
+            }
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1157,6 +1232,7 @@ mod tests {
             "👍🏽",
             "🇪🇸",
             "❤\u{fe0f}",
+            "↩\u{fe0f}",
         ] {
             let face_id = font.resolve_text_face(text, false, false);
             let selected = font.face(face_id).unwrap();
@@ -1206,6 +1282,11 @@ mod tests {
             }
             assert!(font.glyph_text(text, false, false).unwrap().2.is_none());
         }
+        assert_eq!(
+            font.resolve_text_face("↩\u{fe0e}", false, false),
+            0,
+            "Return text presentation must retain the primary face"
+        );
         let text_face = font.resolve_text_face("❤\u{fe0e}", false, false);
         assert_eq!(
             text_face, 0,

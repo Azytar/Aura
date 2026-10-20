@@ -1,0 +1,6 @@
+    Checking aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+    Checking aura-config v0.1.0 (/workspace/Aura/crates/aura-config)
+    Checking aura-core v0.1.0 (/workspace/Aura/crates/aura-core)
+    Checking aura-render v0.1.0 (/workspace/Aura/crates/aura-render)
+    Checking aura-app v0.1.0 (/workspace/Aura/crates/aura-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.09s

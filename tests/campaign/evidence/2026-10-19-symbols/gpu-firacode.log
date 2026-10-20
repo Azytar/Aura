@@ -1,0 +1,11 @@
+   Compiling aura-text v0.1.0 (/workspace/Aura/crates/aura-text)
+   Compiling aura-config v0.1.0 (/workspace/Aura/crates/aura-config)
+   Compiling aura-render v0.1.0 (/workspace/Aura/crates/aura-render)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.90s
+     Running tests/offscreen_gpu.rs (target/debug/deps/offscreen_gpu-13041dd37b794272)
+
+running 1 test
+test return_symbols_remain_visible_without_painting_neighbor_cells ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.60s
+
