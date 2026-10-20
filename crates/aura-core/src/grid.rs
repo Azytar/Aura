@@ -89,12 +89,90 @@ pub struct Cursor {
     pub row: usize,
 }
 
+/// Canonical metadata prefix: trailing empty entries never retain storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Sidecar<T>(Vec<Option<T>>);
+
+impl<T> Sidecar<T> {
+    fn new() -> Self {
+        Self(Vec::new())
+    }
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn get(&self, column: usize) -> Option<&T> {
+        self.0.get(column).and_then(Option::as_ref)
+    }
+    fn set(&mut self, column: usize, value: Option<T>) {
+        if value.is_some() && column >= self.0.len() {
+            self.0.resize_with(column + 1, || None);
+        }
+        if let Some(slot) = self.0.get_mut(column) {
+            *slot = value;
+        }
+        self.trim();
+    }
+    fn clear(&mut self) {
+        self.0 = Vec::new();
+    }
+    fn trim(&mut self) {
+        while self.0.last().is_some_and(Option::is_none) {
+            self.0.pop();
+        }
+        if self.is_empty() {
+            self.clear();
+        }
+    }
+    fn clear_range(&mut self, range: Range<usize>) {
+        let end = range.end.min(self.0.len());
+        if range.start < end {
+            for slot in &mut self.0[range.start..end] {
+                *slot = None;
+            }
+            self.trim();
+        }
+    }
+    fn is_clear_from(&self, column: usize) -> bool {
+        column >= self.0.len()
+    }
+    fn truncate(&mut self, width: usize) {
+        self.0.truncate(width);
+        self.trim();
+    }
+    fn insert(&mut self, at: usize, amount: usize, width: usize) {
+        self.truncate(width.saturating_sub(amount));
+        if at < self.0.len() && amount != 0 {
+            let old_len = self.0.len();
+            self.0.resize_with(old_len + amount, || None);
+            for index in (at..old_len).rev() {
+                self.0[index + amount] = self.0[index].take();
+            }
+        }
+        self.trim();
+    }
+    fn delete(&mut self, at: usize, amount: usize) {
+        if at < self.0.len() {
+            let end = at.saturating_add(amount).min(self.0.len());
+            self.0.drain(at..end);
+            self.trim();
+        }
+    }
+    fn clone_prefix(&self, width: usize) -> Self
+    where
+        T: Clone,
+    {
+        let mut result = Self(self.0.iter().take(width).cloned().collect());
+        result.trim();
+        result
+    }
+}
+
 /// One physical row and the metadata that links it to a logical line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     cells: Box<[Cell]>,
-    graphemes: Vec<Option<String>>,
-    hyperlinks: Vec<Option<u32>>,
+    graphemes: Sidecar<String>,
+    hyperlinks: Sidecar<u32>,
     wrapped: bool,
     dirty: bool,
 }
@@ -103,8 +181,8 @@ impl Row {
     fn new(width: usize) -> Self {
         Self {
             cells: vec![Cell::EMPTY; width].into_boxed_slice(),
-            graphemes: vec![None; width],
-            hyperlinks: vec![None; width],
+            graphemes: Sidecar::new(),
+            hyperlinks: Sidecar::new(),
             wrapped: false,
             dirty: true,
         }
@@ -122,13 +200,14 @@ impl Row {
         if cell.content == 0 {
             return None;
         }
-        self.graphemes[column]
-            .clone()
+        self.graphemes
+            .get(column)
+            .cloned()
             .or_else(|| char::from_u32(cell.content).map(|ch| ch.to_string()))
     }
 
     pub fn stored_grapheme_at(&self, column: usize) -> Option<&str> {
-        self.graphemes.get(column)?.as_deref()
+        self.graphemes.get(column).map(String::as_str)
     }
 
     /// Whether this row continues the logical line from its preceding row.
@@ -381,18 +460,18 @@ impl Grid {
             return None;
         }
         let row = self.row(row)?;
-        if let Some(text) = row.graphemes[column].as_ref() {
+        if let Some(text) = row.graphemes.get(column) {
             return Some(text.clone());
         }
         char::from_u32(cell.content).map(|ch| ch.to_string())
     }
 
     pub fn stored_grapheme(&self, row: usize, column: usize) -> Option<&str> {
-        self.row(row)?.graphemes.get(column)?.as_deref()
+        self.row(row)?.graphemes.get(column).map(String::as_str)
     }
 
     pub fn hyperlink(&self, row: usize, column: usize) -> Option<u32> {
-        self.row(row)?.hyperlinks.get(column).copied().flatten()
+        self.row(row)?.hyperlinks.get(column).copied()
     }
 
     pub fn set_hyperlink(&mut self, row: usize, column: usize, link: Option<u32>) -> bool {
@@ -403,9 +482,9 @@ impl Grid {
         if target.cells[column].content == 0 {
             return false;
         }
-        target.hyperlinks[column] = link;
+        target.hyperlinks.set(column, link);
         if target.cells[column].is_wide_leading() {
-            target.hyperlinks[column + 1] = link;
+            target.hyperlinks.set(column + 1, link);
         }
         target.dirty = true;
         true
@@ -430,8 +509,8 @@ impl Grid {
             flags: cell.flags().without_wide().bits(),
             ..cell
         };
-        target.graphemes[column] = multi_scalar_grapheme(text);
-        target.hyperlinks[column] = None;
+        target.graphemes.set(column, multi_scalar_grapheme(text));
+        target.hyperlinks.set(column, None);
         target.dirty = true;
         true
     }
@@ -451,8 +530,8 @@ impl Grid {
             flags: cell.flags().without_wide().bits(),
             ..cell
         };
-        target.graphemes[column] = None;
-        target.hyperlinks[column] = None;
+        target.graphemes.set(column, None);
+        target.hyperlinks.set(column, None);
         target.dirty = true;
         true
     }
@@ -495,10 +574,10 @@ impl Grid {
         let target = self.row_mut(row).expect("validated row");
         target.cells[column] = leading;
         target.cells[column + 1] = spacer;
-        target.graphemes[column] = grapheme;
-        target.graphemes[column + 1] = None;
-        target.hyperlinks[column] = None;
-        target.hyperlinks[column + 1] = None;
+        target.graphemes.set(column, grapheme);
+        target.graphemes.set(column + 1, None);
+        target.hyperlinks.set(column, None);
+        target.hyperlinks.set(column + 1, None);
         target.dirty = true;
         true
     }
@@ -523,16 +602,16 @@ impl Grid {
         let target = self.row_mut(row).expect("validated row");
         if target.cells[column] != Cell::EMPTY {
             target.cells[column] = Cell::EMPTY;
-            target.graphemes[column] = None;
-            target.hyperlinks[column] = None;
+            target.graphemes.set(column, None);
+            target.hyperlinks.set(column, None);
             target.dirty = true;
         }
         if let Some(partner) = partner
             && target.cells[partner] != Cell::EMPTY
         {
             target.cells[partner] = Cell::EMPTY;
-            target.graphemes[partner] = None;
-            target.hyperlinks[partner] = None;
+            target.graphemes.set(partner, None);
+            target.hyperlinks.set(partner, None);
             target.dirty = true;
         }
     }
@@ -566,13 +645,9 @@ impl Grid {
         let width = self.width;
         let target = self.row_mut(row).expect("validated row");
         target.cells.copy_within(at..width - amount, at + amount);
-        let shifted = target.graphemes[at..width - amount].to_vec();
-        target.graphemes[at + amount..width].clone_from_slice(&shifted);
         target.cells[at..at + amount].fill(Cell::EMPTY);
-        target.graphemes[at..at + amount].fill(None);
-        let shifted_links = target.hyperlinks[at..width - amount].to_vec();
-        target.hyperlinks[at + amount..width].clone_from_slice(&shifted_links);
-        target.hyperlinks[at..at + amount].fill(None);
+        target.graphemes.insert(at, amount, width);
+        target.hyperlinks.insert(at, amount, width);
         repair_wide_pairs(&mut target.cells);
         clear_orphan_graphemes(&target.cells, &mut target.graphemes);
         clear_orphan_hyperlinks(&target.cells, &mut target.hyperlinks);
@@ -593,13 +668,9 @@ impl Grid {
         let width = self.width;
         let target = self.row_mut(row).expect("validated row");
         target.cells.copy_within(at + amount..width, at);
-        let shifted = target.graphemes[at + amount..width].to_vec();
-        target.graphemes[at..width - amount].clone_from_slice(&shifted);
         target.cells[width - amount..].fill(Cell::EMPTY);
-        target.graphemes[width - amount..].fill(None);
-        let shifted_links = target.hyperlinks[at + amount..width].to_vec();
-        target.hyperlinks[at..width - amount].clone_from_slice(&shifted_links);
-        target.hyperlinks[width - amount..].fill(None);
+        target.graphemes.delete(at, amount);
+        target.hyperlinks.delete(at, amount);
         repair_wide_pairs(&mut target.cells);
         clear_orphan_graphemes(&target.cells, &mut target.graphemes);
         clear_orphan_hyperlinks(&target.cells, &mut target.hyperlinks);
@@ -612,8 +683,8 @@ impl Grid {
             return false;
         };
         target.cells.fill(Cell::EMPTY);
-        target.graphemes.fill(None);
-        target.hyperlinks.fill(None);
+        target.graphemes.clear();
+        target.hyperlinks.clear();
         target.wrapped = false;
         target.dirty = true;
         true
@@ -657,8 +728,8 @@ impl Grid {
         blank.content = 0;
         blank.flags = 0;
         target.cells[start..end].fill(blank);
-        target.graphemes[start..end].fill(None);
-        target.hyperlinks[start..end].fill(None);
+        target.graphemes.clear_range(start..end);
+        target.hyperlinks.clear_range(start..end);
         if start == 0 && end == width {
             target.wrapped = false;
         }
@@ -691,8 +762,8 @@ impl Grid {
     pub fn clear_all(&mut self) {
         for row in &mut self.rows {
             row.cells.fill(Cell::EMPTY);
-            row.graphemes.fill(None);
-            row.hyperlinks.fill(None);
+            row.graphemes.clear();
+            row.hyperlinks.clear();
             row.wrapped = false;
             row.dirty = true;
         }
@@ -782,8 +853,8 @@ impl Grid {
     fn reset_row(&mut self, logical_row: usize) {
         let row = self.row_mut(logical_row).expect("valid row");
         row.cells.fill(Cell::EMPTY);
-        row.graphemes.fill(None);
-        row.hyperlinks.fill(None);
+        row.graphemes.clear();
+        row.hyperlinks.clear();
         row.wrapped = false;
         row.dirty = true;
     }
@@ -853,51 +924,91 @@ impl Grid {
         }
         validate_dimensions(new_width, new_height)?;
 
-        if new_height == self.height && self.resize_fitting_rows(new_width) {
+        if self.resize_fitting_rows(new_width, new_height) {
             return Ok(());
         }
         self.resize_reflow(new_width, new_height)
     }
 
-    // A width change does not rewrap independent lines that already fit.
-    // Resize their existing buffers and keep owned graphemes instead of
-    // rebuilding the history. Any wrap, clipping or viewport redistribution uses reflow.
-    fn resize_fitting_rows(&mut self, width: usize) -> bool {
+    // Independent lines that fit need no semantic reconstruction. Reject
+    // decorated tails as full reflow intentionally trims those differently.
+    fn resize_fitting_rows(&mut self, width: usize, height: usize) -> bool {
         if self.cursor.column >= width
-            || (!self.scrollback.is_empty()
-                && self.cursor.row + 1 < self.height
-                && self.row(self.height - 1).is_some_and(|row| {
-                    !row.wrapped && row.cells.iter().all(|cell| *cell == Cell::EMPTY)
-                }))
+            || !self.scrollback.iter().chain(&self.rows).all(|row| {
+                let mut used = row
+                    .cells
+                    .iter()
+                    .rposition(|cell| cell.content != 0)
+                    .map_or(0, |last| last + 1);
+                if used > 0 && row.cells[used - 1].is_wide_leading() {
+                    used = (used + 1).min(self.width);
+                }
+                !row.wrapped
+                    && used <= width
+                    && row.cells[used..].iter().all(|cell| *cell == Cell::EMPTY)
+                    && row.graphemes.is_clear_from(used)
+                    && row.hyperlinks.is_clear_from(used)
+            })
         {
             return false;
         }
-        if !self.scrollback.iter().chain(&self.rows).all(|row| {
-            let mut used = row
-                .cells
-                .iter()
-                .rposition(|cell| cell.content != 0)
-                .map_or(0, |last| last + 1);
-            if used > 0 && row.cells[used - 1].is_wide_leading() {
-                used = (used + 1).min(self.width);
+
+        let old_history = self.scrollback.len();
+        let cursor_index = old_history + self.cursor.row;
+        let mut retained = old_history + self.height;
+        while retained > cursor_index + 1 {
+            let row = self.row(retained - old_history - 1).expect("visible tail");
+            if row.cells.iter().any(|cell| *cell != Cell::EMPTY) {
+                break;
             }
-            !row.wrapped
-                && used <= width
-                && row.cells[used..].iter().all(|cell| *cell == Cell::EMPTY)
-                && row.graphemes[used..].iter().all(Option::is_none)
-                && row.hyperlinks[used..].iter().all(Option::is_none)
-        }) {
-            return false;
+            retained -= 1;
         }
-        for row in self.scrollback.iter_mut().chain(&mut self.rows) {
-            let mut cells = std::mem::take(&mut row.cells).into_vec();
-            cells.resize(width, Cell::EMPTY);
-            row.cells = cells.into_boxed_slice();
-            row.graphemes.resize_with(width, || None);
-            row.hyperlinks.resize(width, None);
+        let start = retained.saturating_sub(height).min(cursor_index);
+        let resize_row = |row: &mut Row| {
+            if row.cells.len() != width {
+                let mut cells = std::mem::take(&mut row.cells).into_vec();
+                cells.resize(width, Cell::EMPTY);
+                row.cells = cells.into_boxed_slice();
+                row.graphemes.truncate(width);
+                row.hyperlinks.truncate(width);
+            }
             row.dirty = true;
+        };
+        // Preserve the direct width-only traversal, including the ring origin.
+        if height == self.height && start == old_history && retained == old_history + self.height {
+            for row in self.scrollback.iter_mut().chain(&mut self.rows) {
+                resize_row(row);
+            }
+            self.width = width;
+            return true;
         }
+        self.rows.rotate_left(self.base_row);
+        let mut all: Vec<Row> = self
+            .scrollback
+            .drain(..)
+            .chain(self.rows.drain(..))
+            .take(retained)
+            .collect();
+        for row in &mut all {
+            resize_row(row);
+        }
+        let mut visible = all.split_off(start);
+        visible.truncate(height);
+        visible.resize_with(height, || Row::new(width));
+        let discarded = all.len().saturating_sub(self.scrollback_limit);
+        self.first_line += discarded as u64;
+        self.scrollback = all.into_iter().skip(discarded).collect();
+        let anchor = old_history.saturating_sub(self.viewport_offset);
+        self.viewport_offset = if self.viewport_offset == 0 {
+            0
+        } else {
+            start.saturating_sub(anchor).min(self.scrollback.len())
+        };
+        self.rows = visible;
+        self.base_row = 0;
         self.width = width;
+        self.height = height;
+        self.cursor.row = cursor_index.saturating_sub(start).min(height - 1);
         true
     }
 
@@ -968,8 +1079,8 @@ impl Grid {
             logical_lines[source_line].extend((0..used).map(|column| {
                 (
                     row.cells[column],
-                    row.graphemes[column].as_deref(),
-                    row.hyperlinks[column],
+                    row.graphemes.get(column).map(String::as_str),
+                    row.hyperlinks.get(column).copied(),
                 )
             }));
         }
@@ -1005,7 +1116,7 @@ impl Grid {
                                 cell.bg,
                                 cell.flags().without_wide(),
                             );
-                            row.graphemes[0] = Some("\u{fffd}".to_owned());
+                            row.graphemes.set(0, Some("\u{fffd}".to_owned()));
                             if cursor_position.is_some_and(|(line, pos)| {
                                 line == line_index && (offset..offset + 2).contains(&pos)
                             }) {
@@ -1019,11 +1130,11 @@ impl Grid {
                             break;
                         }
                         row.cells[column] = *cell;
-                        row.graphemes[column] = grapheme.map(str::to_owned);
-                        row.hyperlinks[column] = *hyperlink;
+                        row.graphemes.set(column, grapheme.map(str::to_owned));
+                        row.hyperlinks.set(column, *hyperlink);
                         if let Some((spacer, _, spacer_link)) = line.get(offset + 1) {
                             row.cells[column + 1] = *spacer;
-                            row.hyperlinks[column + 1] = *spacer_link;
+                            row.hyperlinks.set(column + 1, *spacer_link);
                         }
                         if let Some((line, pos)) = cursor_position
                             && line == line_index
@@ -1035,8 +1146,8 @@ impl Grid {
                         column += 2;
                     } else {
                         row.cells[column] = *cell;
-                        row.graphemes[column] = grapheme.map(str::to_owned);
-                        row.hyperlinks[column] = *hyperlink;
+                        row.graphemes.set(column, grapheme.map(str::to_owned));
+                        row.hyperlinks.set(column, *hyperlink);
                         if cursor_position == Some((line_index, offset)) {
                             new_cursor = Some((row_index, column));
                         }
@@ -1047,8 +1158,8 @@ impl Grid {
                 if offset < line.len() && column == 0 {
                     let (cell, grapheme, hyperlink) = &line[offset];
                     row.cells[0] = *cell;
-                    row.graphemes[0] = grapheme.map(str::to_owned);
-                    row.hyperlinks[0] = *hyperlink;
+                    row.graphemes.set(0, grapheme.map(str::to_owned));
+                    row.hyperlinks.set(0, *hyperlink);
                     offset += 1;
                 }
                 if viewport_position.is_some_and(|(line, pos)| {
@@ -1102,13 +1213,13 @@ impl Grid {
             let source = self.row(index).expect("existing visible row");
             let count = width.min(self.width);
             target.cells[..count].copy_from_slice(&source.cells[..count]);
-            target.graphemes[..count].clone_from_slice(&source.graphemes[..count]);
-            target.hyperlinks[..count].copy_from_slice(&source.hyperlinks[..count]);
+            target.graphemes = source.graphemes.clone_prefix(count);
+            target.hyperlinks = source.hyperlinks.clone_prefix(count);
             repair_wide_pairs(&mut target.cells);
             for column in 0..width {
                 if target.cells[column].content == 0 && !target.cells[column].is_wide_spacer() {
-                    target.graphemes[column] = None;
-                    target.hyperlinks[column] = None;
+                    target.graphemes.set(column, None);
+                    target.hyperlinks.set(column, None);
                 }
             }
         }
@@ -1128,16 +1239,16 @@ impl Grid {
         for row in self.rows.iter().chain(&self.scrollback) {
             for (column, cell) in row.cells.iter().enumerate() {
                 if cell.content == 0 && !cell.is_wide_spacer() {
-                    assert!(row.graphemes[column].is_none(), "orphan grapheme");
-                    assert!(row.hyperlinks[column].is_none(), "orphan hyperlink");
+                    assert!(row.graphemes.get(column).is_none(), "orphan grapheme");
+                    assert!(row.hyperlinks.get(column).is_none(), "orphan hyperlink");
                 }
-                if let Some(id) = row.hyperlinks[column] {
-                    assert!(links.contains_key(&id), "unknown hyperlink id");
+                if let Some(id) = row.hyperlinks.get(column) {
+                    assert!(links.contains_key(id), "unknown hyperlink id");
                 }
                 if cell.is_wide_leading() && column + 1 < self.width {
                     assert_eq!(
-                        row.hyperlinks[column],
-                        row.hyperlinks[column + 1],
+                        row.hyperlinks.get(column).copied(),
+                        row.hyperlinks.get(column + 1).copied(),
                         "split wide hyperlink"
                     );
                     assert_eq!(
@@ -1225,22 +1336,24 @@ fn repair_wide_pairs(cells: &mut [Cell]) {
     }
 }
 
-fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut [Option<String>]) {
-    for (cell, text) in cells.iter().zip(graphemes) {
+fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut Sidecar<String>) {
+    for (cell, text) in cells.iter().zip(&mut graphemes.0) {
         if cell.content == 0 {
             *text = None;
         }
     }
+    graphemes.trim();
 }
 
-fn clear_orphan_hyperlinks(cells: &[Cell], hyperlinks: &mut [Option<u32>]) {
-    for (cell, link) in cells.iter().zip(hyperlinks) {
+fn clear_orphan_hyperlinks(cells: &[Cell], hyperlinks: &mut Sidecar<u32>) {
+    for (cell, link) in cells.iter().zip(&mut hyperlinks.0) {
         // Wide spacers have no scalar but still belong to the leading
         // cell's hyperlink. Only a genuinely empty cell loses ownership.
         if cell.content == 0 && !cell.is_wide_spacer() {
             *link = None;
         }
     }
+    hyperlinks.trim();
 }
 
 fn multi_scalar_grapheme(text: &str) -> Option<String> {
@@ -1321,6 +1434,130 @@ impl TerminalGrid {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn ascii_history_has_no_sidecar_allocations() {
+        let mut terminal = crate::Terminal::new(8, 4).unwrap();
+        terminal.set_scrollback_limit(64);
+        terminal.process(b"abc\r\n".repeat(70).as_slice());
+        let grid = terminal.active_grid();
+        assert_eq!(grid.scrollback.len(), 64);
+        for row in grid.scrollback.iter().chain(&grid.rows) {
+            assert_eq!(row.graphemes.0.capacity(), 0);
+            assert_eq!(row.hyperlinks.0.capacity(), 0);
+        }
+    }
+
+    #[test]
+    fn sidecar_releases_last_value() {
+        let mut values = Sidecar::new();
+        values.set(7, Some(String::from("e\u{301}")));
+        values.set(7, None);
+        assert_eq!(values.0.capacity(), 0);
+        values.set(7, Some(String::from("x")));
+        values.truncate(7);
+        assert_eq!(values.0.capacity(), 0);
+        values.set(7, Some(String::from("x")));
+        values.clear_range(0..8);
+        assert_eq!(values.0.capacity(), 0);
+    }
+
+    #[test]
+    fn sidecar_operations_match_dense_model() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 1024,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[0xa7; 32]),
+        );
+        let operations =
+            proptest::collection::vec((0u8..7, 0usize..32, 0usize..33, any::<bool>()), 1..128);
+        runner
+            .run(&operations, |operations| {
+                let mut sparse = Sidecar::new();
+                let mut dense = vec![None; 32];
+                for (op, at, count, present) in operations {
+                    let amount = count.min(32 - at);
+                    match op {
+                        0 => {
+                            let v = present.then(|| format!("value-{at}"));
+                            sparse.set(at, v.clone());
+                            dense[at] = v;
+                        }
+                        1 => {
+                            sparse.clear_range(at..at + amount);
+                            dense[at..at + amount].fill(None);
+                        }
+                        2 => {
+                            sparse.insert(at, amount, 32);
+                            for i in (at..32 - amount).rev() {
+                                dense[i + amount] = dense[i].take();
+                            }
+                            dense[at..at + amount].fill(None);
+                        }
+                        3 => {
+                            sparse.delete(at, amount);
+                            dense.drain(at..at + amount);
+                            dense.resize(32, None);
+                        }
+                        4 => {
+                            sparse.truncate(at);
+                            dense[at..].fill(None);
+                        }
+                        5 => {
+                            sparse = sparse.clone_prefix(at);
+                            dense[at..].fill(None);
+                        }
+                        _ => {
+                            sparse.clear();
+                            dense.fill(None);
+                        }
+                    }
+                    for (i, value) in dense.iter().enumerate() {
+                        prop_assert_eq!(sparse.get(i), value.as_ref());
+                    }
+                    prop_assert!(sparse.0.last().is_none_or(Option::is_some));
+                    prop_assert_eq!(
+                        sparse.is_clear_from(at),
+                        dense[at..].iter().all(Option::is_none)
+                    );
+                    if dense.iter().all(Option::is_none) {
+                        prop_assert_eq!(sparse.0.capacity(), 0);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn fitting_height_resize_keeps_owned_row_buffers() {
+        let mut terminal = crate::Terminal::new(8, 4).unwrap();
+        terminal.set_scrollback_limit(64);
+        terminal.process(b"a\r\nb\r\nc\r\nd\r\ne\r\nf\r\n");
+        let grid = terminal.active_grid();
+        let buffers: Vec<_> = grid
+            .scrollback
+            .iter()
+            .chain((0..grid.height).map(|i| grid.row(i).unwrap()))
+            .filter(|row| row.cells.iter().any(|cell| *cell != Cell::EMPTY))
+            .map(|row| row.cells.as_ptr())
+            .collect();
+        terminal.resize(8, 3).unwrap();
+        let grid = terminal.active_grid();
+        let retained: Vec<_> = grid
+            .scrollback
+            .iter()
+            .chain(&grid.rows)
+            .filter(|row| row.cells.iter().any(|cell| *cell != Cell::EMPTY))
+            .map(|row| row.cells.as_ptr())
+            .collect();
+        assert_eq!(buffers, retained);
+    }
+
+    #[test]
     fn fitting_row_resize_matches_full_reflow() {
         let samples = [
             "a\r\nb\r\n",
@@ -1342,7 +1579,7 @@ mod tests {
                             }
                             terminal.scroll_view_up(2);
                             for new_width in [1, 2, 3, 7, 8, 79, 80, 90] {
-                                for new_height in [height, height + 1] {
+                                for new_height in [1, 2, 3, height, height + 1, height + 3] {
                                     // Identical geometry intentionally preserves
                                     // pending wrap and is not a reflow operation.
                                     if (new_width, new_height) == (width, height) {

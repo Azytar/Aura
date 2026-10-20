@@ -23,6 +23,10 @@ per commit.
 
 ### Fixed
 
+- Empty row metadata no longer reserves full-width grapheme/link tables.
+  Cell shifts move owned graphemes, and fitting independent rows retain
+  their cell buffers when only the terminal height changes.
+
 - X11 window resizing preserves the previous frame in the overlapping area
   until Vulkan presents the replacement. Newly exposed strips use the
   configured background instead of flashing black.
