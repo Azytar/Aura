@@ -349,7 +349,15 @@ impl Grid {
 
     /// Maps a visible row to its physical row in the circular allocation.
     fn physical_row(&self, logical_row: usize) -> Option<usize> {
-        (logical_row < self.height).then(|| (self.base_row + logical_row) % self.height)
+        if logical_row >= self.height {
+            return None;
+        }
+        let remaining = self.height - self.base_row;
+        Some(if logical_row >= remaining {
+            logical_row - remaining
+        } else {
+            self.base_row + logical_row
+        })
     }
 
     fn row(&self, logical_row: usize) -> Option<&Row> {

@@ -30,6 +30,8 @@ per commit.
 
 ### Fixed
 
+- Repeated cell access avoids division while preserving circular row order.
+
 - Benchmark startup distinguishes PTY readiness from an observed pixel witness
   and begins idle sampling after that witness. Resource scopes and exact core
   payload sizes are explicit; warm font-cache timings retain nanosecond precision
