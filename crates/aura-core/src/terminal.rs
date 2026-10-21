@@ -642,7 +642,22 @@ impl Terminal {
     pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
         let mut parser = std::mem::take(&mut self.parser);
-        parser.feed(bytes, |event| self.dispatch(event, &mut replies));
+        parser.feed_spans(bytes, |input| match input {
+            crate::parser::Input::Ascii(text) => self.put_ascii(text, &mut replies),
+            crate::parser::Input::Text(text) => {
+                let graphics = if self.use_g1 {
+                    self.g1_dec_graphics
+                } else {
+                    self.g0_dec_graphics
+                };
+                for ch in text.chars() {
+                    let ch = if graphics { dec_graphic(ch) } else { ch };
+                    self.put_char(ch);
+                    self.preceding_char = Some(ch);
+                }
+            }
+            crate::parser::Input::Event(event) => self.dispatch(event, &mut replies),
+        });
         self.parser = parser;
         replies
     }
@@ -1004,7 +1019,100 @@ impl Terminal {
         }
     }
 
+    fn put_ascii(&mut self, mut text: &[u8], replies: &mut Vec<u8>) {
+        if self.insert_mode
+            || if self.use_g1 {
+                self.g1_dec_graphics
+            } else {
+                self.g0_dec_graphics
+            }
+        {
+            for &byte in text {
+                self.dispatch(ParserEvent::Print(byte as char), replies);
+            }
+            return;
+        }
+        while let Some((&first, rest)) = text.split_first() {
+            // Resolve delayed wrap and the preceding Unicode cluster through
+            // the scalar path before writing an ordinary run in one row.
+            self.put_char(first as char);
+            self.preceding_char = Some(first as char);
+            text = rest;
+            if self.pending_wrap || text.is_empty() {
+                continue;
+            }
+            if let Some((_, row, column)) = self.last_printed
+                && self.active_grid().stored_grapheme(row, column).is_some()
+            {
+                continue;
+            }
+            let cursor = self.cursor();
+            let count = text.len().min(self.active_grid().width() - cursor.column);
+            let cell = Cell::new(
+                0,
+                self.rendition.fg,
+                self.rendition.bg,
+                CellFlags::from_bits_retain(self.rendition.flags),
+            );
+            let link = self.current_hyperlink;
+            let underline = (self.rendition.underline_color != DEFAULT_COLOR)
+                .then_some(self.rendition.underline_color);
+            self.active_grid_mut().write_ascii(
+                cursor.row,
+                cursor.column,
+                &text[..count],
+                cell,
+                link,
+                underline,
+            );
+            let end = cursor.column + count;
+            self.last_printed = Some((self.grid.active_screen(), cursor.row, end - 1));
+            self.preceding_char = Some(text[count - 1] as char);
+            self.set_cursor(end, cursor.row);
+            self.pending_wrap = self.modes.auto_wrap && end >= self.active_grid().width();
+            text = &text[count..];
+        }
+    }
+
     fn put_char(&mut self, ch: char) {
+        if ch.is_ascii() {
+            let previous = self.last_printed.and_then(|(screen, row, column)| {
+                (screen == self.grid.active_screen())
+                    .then(|| self.active_grid().stored_grapheme(row, column))
+                    .flatten()
+            });
+            if previous.is_some_and(|text| text.len() >= 256) {
+                return;
+            }
+            // ASCII starts a new cluster after an ordinary scalar or one of
+            // these extending marks; other stored clusters use the full rules.
+            if previous.is_none_or(|text| {
+                text.chars()
+                    .next_back()
+                    .is_some_and(|last| ('\u{300}'..='\u{36f}').contains(&last))
+            }) {
+                self.write_single(ch);
+                return;
+            }
+        }
+        // Combining Diacritical Marks extend an ASCII base without changing
+        // its width. Keep the owned cluster in place instead of allocating,
+        // segmenting and measuring a fresh copy for every appended accent.
+        if ('\u{300}'..='\u{36f}').contains(&ch)
+            && let Some((screen, row, column)) = self.last_printed
+            && screen == self.grid.active_screen()
+            && let Some(cell) = self.active_grid().cell(row, column)
+            && (0x20..=0x7e).contains(&cell.content)
+            && !cell.flags().contains(CellFlags::WIDE_LEADING)
+        {
+            self.active_grid_mut()
+                .append_ascii_diacritic(row, column, ch);
+            return;
+        }
+        self.put_char_scalar(ch);
+    }
+
+    fn put_char_scalar(&mut self, ch: char) {
         let scalar_width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if let Some((screen, row, column)) = self.last_printed
             && screen == self.grid.active_screen()
@@ -1031,25 +1139,16 @@ impl Terminal {
                     return;
                 }
                 if combined.graphemes(true).count() == 1 {
-                    let mut cell = self
+                    let cell = self
                         .active_grid()
                         .cell(row, column)
                         .expect("last cell remains visible");
                     let width = UnicodeWidthStr::width(combined.as_str());
-                    if width == 2 && cell.flags().contains(CellFlags::WIDE_LEADING) {
-                        let link = self.active_grid().hyperlink(row, column);
-                        let underline = self
-                            .active_grid()
-                            .row_at(row)
-                            .and_then(|row| row.underline_color_at(column));
+                    if (width == 2 && cell.flags().contains(CellFlags::WIDE_LEADING))
+                        || (width <= 1 && !cell.flags().contains(CellFlags::WIDE_LEADING))
+                    {
                         self.active_grid_mut()
-                            .set_wide_grapheme(row, column, &combined, cell);
-                        self.active_grid_mut()
-                            .set_underline_color(row, column, underline);
-                        if let Some(link) = link {
-                            self.active_grid_mut()
-                                .set_hyperlink(row, column, Some(link));
-                        }
+                            .extend_grapheme(row, column, combined);
                         return;
                     }
                     if width == 2 && column + 1 < self.active_grid().width() {
@@ -1069,23 +1168,6 @@ impl Terminal {
                         self.set_cursor(column + 2, row);
                         self.pending_wrap =
                             self.modes.auto_wrap && column + 2 >= self.active_grid().width();
-                        return;
-                    }
-                    if width <= 1 && !cell.flags().contains(CellFlags::WIDE_LEADING) {
-                        let link = self.active_grid().hyperlink(row, column);
-                        let underline = self
-                            .active_grid()
-                            .row_at(row)
-                            .and_then(|row| row.underline_color_at(column));
-                        cell.content = combined.chars().next().expect("nonempty grapheme") as u32;
-                        self.active_grid_mut()
-                            .set_grapheme(row, column, &combined, cell);
-                        self.active_grid_mut()
-                            .set_underline_color(row, column, underline);
-                        if let Some(link) = link {
-                            self.active_grid_mut()
-                                .set_hyperlink(row, column, Some(link));
-                        }
                         return;
                     }
                 }
@@ -1682,6 +1764,137 @@ fn dec_graphic(ch: char) -> char {
 
 #[cfg(test)]
 mod tests {
+    fn dispatch_scalar(terminal: &mut Terminal, event: ParserEvent, replies: &mut Vec<u8>) {
+        if let ParserEvent::Print(ch) = event {
+            let graphics = if terminal.use_g1 {
+                terminal.g1_dec_graphics
+            } else {
+                terminal.g0_dec_graphics
+            };
+            let ch = if graphics { dec_graphic(ch) } else { ch };
+            terminal.put_char_scalar(ch);
+            terminal.preceding_char = Some(ch);
+        } else {
+            terminal.dispatch(event, replies);
+        }
+    }
+
+    #[test]
+    fn ascii_diacritics_match_segmentation_and_width_rules() {
+        for base in b' '..=b'~' {
+            for mark in 0x300..=0x36f {
+                let mark = char::from_u32(mark).unwrap();
+                let input = format!("{}{}", base as char, mark);
+                let mut actual = terminal(4, 2);
+                actual.process(input.as_bytes());
+                let mut expected = terminal(4, 2);
+                Parser::new().feed(input.as_bytes(), |event| {
+                    dispatch_scalar(&mut expected, event, &mut Vec::new())
+                });
+                assert_eq!(actual, expected, "base={base}, mark={mark:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ascii_spans_match_scalar_dispatch_across_modes_and_metadata() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+
+        let operations: &[&[u8]] = &[
+            b"abcdefghijklmnopqrstuvwxyz0123456789",
+            b" ",
+            b"xyz",
+            b"\r\n",
+            b"\x08",
+            b"\t",
+            b"\x1b[H",
+            b"\x1b[2;3H",
+            b"\x1b[?7l",
+            b"\x1b[?7h",
+            b"\x1b[4h",
+            b"\x1b[4l",
+            b"\x1b(0lqkx\x1b(B",
+            b"\x1b)0\x0elqkx\x0f",
+            b"\x1b[2;3r",
+            b"\x1b[r",
+            b"\x1b[?1049h",
+            b"\x1b[?1049l",
+            b"\x1b[3b",
+            b"\x1b[38;2;12;34;56;48;5;4;4:3;58:5:2m",
+            b"\x1b[0m",
+            b"\x1b]8;;https://example.org\x1b\\",
+            b"\x1b]8;;\x1b\\",
+            "界e\u{301}❤\u{fe0f}🇵🇪👩‍💻".as_bytes(),
+            b"\x1b[2J",
+            b"\x1b[3J",
+            b"\x1b[6n",
+            b"\xf0\x9f",
+            b"\xa7\x91",
+            b"\xe2\x1b[31m",
+            b"\x1b[@",
+            b"\x1b[P",
+            b"\x1b[S",
+            b"\x1b[T",
+            b"\x1bc",
+        ];
+        let strategy = (
+            1usize..20,
+            1usize..6,
+            0usize..33,
+            prop::collection::vec((0usize..operations.len(), 1usize..40), 1..160),
+        );
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 512,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[0xa7; 32]),
+        );
+        runner
+            .run(&strategy, |(width, height, history, steps)| {
+                let mut spans = terminal(width, height);
+                spans.set_scrollback_limit(history);
+                let mut scalar = spans.clone();
+                for (index, chunk_size) in steps {
+                    for chunk in operations[index].chunks(chunk_size) {
+                        let actual = spans.process(chunk);
+                        let mut expected = Vec::new();
+                        let mut parser = std::mem::take(&mut scalar.parser);
+                        parser.feed(chunk, |event| {
+                            dispatch_scalar(&mut scalar, event, &mut expected)
+                        });
+                        scalar.parser = parser;
+                        prop_assert_eq!(actual, expected);
+                        prop_assert_eq!(&spans, &scalar);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn ascii_after_a_full_grapheme_preserves_scalar_limit_behavior() {
+        for cluster in [
+            format!("e{}", "\u{301}".repeat(127)),
+            format!("e{}\u{20dd}", "\u{301}".repeat(126)),
+        ] {
+            assert!((255..=256).contains(&cluster.len()));
+            let mut spans = terminal(8, 3);
+            let mut scalar = spans.clone();
+            let bytes = format!("{cluster}abcdefgh");
+            spans.process(bytes.as_bytes());
+            let mut parser = std::mem::take(&mut scalar.parser);
+            parser.feed(bytes.as_bytes(), |event| {
+                dispatch_scalar(&mut scalar, event, &mut Vec::new())
+            });
+            scalar.parser = parser;
+            assert_eq!(spans, scalar);
+        }
+    }
+
     #[test]
     fn long_history_resize_preserves_unicode_links_and_viewport() {
         let mut t = terminal(80, 25);

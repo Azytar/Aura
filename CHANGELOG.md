@@ -30,6 +30,12 @@ per commit.
 
 ### Fixed
 
+- Printable ASCII writes update row spans without repeating cell and metadata
+  cleanup for each byte. UTF-8 runs preserve scalar parser events and fragmented
+  input behavior; combining extensions retain existing cell metadata.
+- Full-screen recording scroll transfers rows into bounded history and reuses
+  evicted buffers, preserving content, viewport anchors and history limits.
+
 - Mouse coordinates stay within the terminal grid during out-of-window drags;
   synchronized-output deadlines round up to avoid a sub-millisecond busy loop.
 

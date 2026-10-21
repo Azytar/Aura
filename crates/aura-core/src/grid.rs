@@ -106,6 +106,9 @@ impl<T> Sidecar<T> {
     fn get(&self, column: usize) -> Option<&T> {
         self.0.get(column).and_then(Option::as_ref)
     }
+    fn get_mut(&mut self, column: usize) -> Option<&mut T> {
+        self.0.get_mut(column).and_then(Option::as_mut)
+    }
     fn set(&mut self, column: usize, value: Option<T>) {
         if value.is_none() && column >= self.0.len() {
             return;
@@ -185,6 +188,24 @@ pub struct Row {
 }
 
 impl Row {
+    /// Clear only the partners outside an overwritten range. Pairs wholly
+    /// inside it are replaced together by the caller.
+    fn clear_wide_edges(&mut self, start: usize, end: usize) {
+        let left = if self.cells[start].is_wide_spacer() {
+            start.checked_sub(1)
+        } else {
+            None
+        };
+        let right =
+            (self.cells[end - 1].is_wide_leading() && end < self.cells.len()).then_some(end);
+        for column in [left, right].into_iter().flatten() {
+            self.cells[column] = Cell::EMPTY;
+            self.graphemes.set(column, None);
+            self.hyperlinks.set(column, None);
+            self.underline_colors.set(column, None);
+        }
+    }
+
     pub fn underline_color_at(&self, column: usize) -> Option<u32> {
         self.underline_colors.get(column).copied()
     }
@@ -444,13 +465,22 @@ impl Grid {
             return true;
         }
         for row in 0..amount {
-            self.scrollback
-                .push_back(self.row(row).expect("visible row").clone());
-            if self.scrollback.len() > self.scrollback_limit {
-                self.scrollback.pop_front();
+            if self.scrollback_limit == 0 {
+                self.first_line += 1;
+                continue;
+            }
+            let replacement = if self.scrollback.len() == self.scrollback_limit {
                 self.first_line += 1;
                 self.viewport_offset = self.viewport_offset.saturating_sub(1);
-            }
+                self.scrollback.pop_front().expect("full nonempty history")
+            } else {
+                Row::new(self.width)
+            };
+            let physical = self.physical_row(row).expect("visible row");
+            // Transfer owned cells and metadata into history. Once full,
+            // recycle the evicted row instead of allocating and cloning it.
+            let retained = std::mem::replace(&mut self.rows[physical], replacement);
+            self.scrollback.push_back(retained);
         }
         if self.viewport_offset != 0 {
             self.viewport_offset = (self.viewport_offset + amount).min(self.scrollback.len());
@@ -480,6 +510,35 @@ impl Grid {
 
     pub fn stored_grapheme(&self, row: usize, column: usize) -> Option<&str> {
         self.row(row)?.graphemes.get(column).map(String::as_str)
+    }
+
+    /// Retains a validated extension whose leading scalar and cell width did
+    /// not change. Rendition and both halves' metadata remain owned in place.
+    pub(crate) fn extend_grapheme(&mut self, row: usize, column: usize, text: String) {
+        let target = self.row_mut(row).expect("last cell remains visible");
+        debug_assert_eq!(
+            text.chars().next().map(u32::from),
+            Some(target.cells[column].content)
+        );
+        target.graphemes.set(column, Some(text));
+        target.dirty = true;
+    }
+
+    pub(crate) fn append_ascii_diacritic(&mut self, row: usize, column: usize, ch: char) {
+        let target = self.row_mut(row).expect("last cell remains visible");
+        if let Some(text) = target.graphemes.get_mut(column) {
+            if text.len() + ch.len_utf8() <= 256 {
+                text.push(ch);
+                target.dirty = true;
+            }
+        } else {
+            let base = char::from_u32(target.cells[column].content).expect("ASCII base");
+            let mut text = String::with_capacity(base.len_utf8() + ch.len_utf8());
+            text.push(base);
+            text.push(ch);
+            target.graphemes.set(column, Some(text));
+            target.dirty = true;
+        }
     }
 
     /// Applies to a printed cell and both halves of a wide character.
@@ -531,8 +590,8 @@ impl Grid {
         {
             return false;
         }
-        self.clear_cell_pair(row, column);
         let target = self.row_mut(row).expect("validated row");
+        target.clear_wide_edges(column, column + 1);
         target.cells[column] = Cell {
             content: ch as u32,
             flags: cell.flags().without_wide().bits(),
@@ -554,8 +613,8 @@ impl Grid {
         {
             return false;
         }
-        self.clear_cell_pair(row, column);
         let target = self.row_mut(row).expect("validated row");
+        target.clear_wide_edges(column, column + 1);
         target.cells[column] = Cell {
             flags: cell.flags().without_wide().bits(),
             ..cell
@@ -593,8 +652,6 @@ impl Grid {
         if row >= self.height || column.checked_add(1).is_none_or(|end| end >= self.width) {
             return false;
         }
-        self.clear_cell_pair(row, column);
-        self.clear_cell_pair(row, column + 1);
         leading.flags = leading.flags().without_wide().bits() | CellFlags::WIDE_LEADING.bits();
         let spacer = Cell {
             content: 0,
@@ -603,6 +660,7 @@ impl Grid {
             flags: leading.flags().without_wide().bits() | CellFlags::WIDE_SPACER.bits(),
         };
         let target = self.row_mut(row).expect("validated row");
+        target.clear_wide_edges(column, column + 2);
         target.cells[column] = leading;
         target.cells[column + 1] = spacer;
         target.graphemes.set(column, grapheme);
@@ -649,6 +707,43 @@ impl Grid {
             target.underline_colors.set(partner, None);
             target.dirty = true;
         }
+    }
+
+    /// Writes a validated printable ASCII run, clearing wide pairs at its edges.
+    pub(crate) fn write_ascii(
+        &mut self,
+        row: usize,
+        start: usize,
+        bytes: &[u8],
+        cell: Cell,
+        link: Option<u32>,
+        underline: Option<u32>,
+    ) {
+        debug_assert!(!bytes.is_empty() && start + bytes.len() <= self.width);
+        debug_assert!(bytes.iter().all(|byte| (0x20..=0x7e).contains(byte)));
+        let end = start + bytes.len();
+        let target = self.row_mut(row).expect("validated row");
+        target.clear_wide_edges(start, end);
+        target.graphemes.clear_range(start..end);
+        target.hyperlinks.clear_range(start..end);
+        target.underline_colors.clear_range(start..end);
+        for (target, &byte) in target.cells[start..end].iter_mut().zip(bytes) {
+            *target = Cell {
+                content: u32::from(byte),
+                ..cell
+            };
+        }
+        if link.is_some() {
+            for column in start..end {
+                target.hyperlinks.set(column, link);
+            }
+        }
+        if underline.is_some() {
+            for column in start..end {
+                target.underline_colors.set(column, underline);
+            }
+        }
+        target.dirty = true;
     }
 
     /// Writes as many ordinary cells as fit, returning the number written.
@@ -1504,6 +1599,60 @@ impl TerminalGrid {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recording_scroll_moves_rows_and_matches_cloning_reference() {
+        for limit in [0, 1, 2, 4, 16] {
+            for amount in 0..=5 {
+                let mut grid = Grid::new(8, 4).unwrap();
+                grid.set_scrollback_limit(limit);
+                for round in 0..12 {
+                    for row in 0..4 {
+                        grid.set_grapheme(row, 1, "e\u{301}", Cell::EMPTY);
+                        grid.set_wide_cell(
+                            row,
+                            3,
+                            Cell::new('界' as u32, round, 4, CellFlags::default()),
+                        );
+                        grid.set_hyperlink(row, 3, Some(round));
+                        grid.set_underline_color(row, 3, Some(round));
+                    }
+                    grid.set_viewport_offset(round as usize);
+                    let retained = grid.row(0).unwrap().cells.as_ptr();
+                    let mut expected = grid.clone();
+                    let count = amount.min(expected.height);
+                    for row in 0..count {
+                        expected
+                            .scrollback
+                            .push_back(expected.row(row).unwrap().clone());
+                        if expected.scrollback.len() > limit {
+                            expected.scrollback.pop_front();
+                            expected.first_line += 1;
+                            expected.viewport_offset = expected.viewport_offset.saturating_sub(1);
+                        }
+                    }
+                    if expected.viewport_offset != 0 {
+                        expected.viewport_offset =
+                            (expected.viewport_offset + count).min(expected.scrollback.len());
+                    }
+                    expected.scroll_up(0, 3, count);
+                    grid.scroll_up_recording(amount);
+                    assert_eq!(
+                        grid, expected,
+                        "limit={limit}, amount={amount}, round={round}"
+                    );
+                    if count != 0 && count <= limit {
+                        assert_eq!(
+                            grid.scrollback[grid.scrollback.len() - count]
+                                .cells
+                                .as_ptr(),
+                            retained
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn logical_line_reflow_preserves_blank_lines_cursor_and_viewport() {
         let mut terminal = crate::Terminal::new(6, 3).unwrap();

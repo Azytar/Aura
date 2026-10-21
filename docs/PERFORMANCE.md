@@ -5,6 +5,22 @@ see [the multi-terminal harness](TERMINAL_BENCHMARKS.md). Its reproducible
 workloads generate private HTML/CSV/JSON/SVG artifacts outside Git checkouts.
 The tables below are historical internal benchmarks, distinct from that harness.
 
+Printable-output changes should be compared with separate baseline/candidate
+executables and recorded hashes, retaining unfavorable repetitions. The core
+workloads cover scalar parser output, terminal writes and bounded-history
+scrolling; they do not measure presentation. Printable spans retain the public
+scalar parser events. Differential tests compare spans with bytewise parsing and
+scalar terminal writes, including malformed UTF-8, wide pairs, combining marks,
+links, decoration, delayed wrap, character sets and insert mode. Recording scroll
+is also compared with the previous cloning algorithm and checks buffer ownership.
+
+The sustained core workloads write approximately 1 MiB of line-oriented ASCII,
+wide/combining Unicode or SGR text per iteration, eight times. Each terminal uses
+an 80x24 grid and either zero or 10,000 history rows, filled outside the timer.
+Payload construction is also outside the timer. Each iteration asserts that
+the configured history length remains retained. These cases isolate processing
+and recycling from PTY backpressure, font rasterization and GPU work.
+
 The original table below records an earlier run of the benchmark binaries.
 The resize follow-up at the end records a separate environment and comparison:
 

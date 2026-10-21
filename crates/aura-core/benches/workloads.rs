@@ -46,6 +46,40 @@ fn main() {
         black_box(terminal.process(black_box(&large_output)));
     });
 
+    // Match the native harness's line-oriented traffic without PTY or GPU
+    // work. Populate history before timing so steady-state row reuse is
+    // measured separately from terminal construction and initial allocation.
+    for history in [0, 10_000] {
+        for (name, block) in [
+            ("ASCII", format!("{}\r\n", "x".repeat(79))),
+            ("Unicode", format!("{}\r\n", "ab界e\u{301}".repeat(15))),
+            (
+                "SGR",
+                "\x1b[38;2;12;171;52mcolored\x1b[0m plain\r\n".to_owned(),
+            ),
+        ] {
+            let payload = block
+                .repeat((1usize << 20).div_ceil(block.len()))
+                .into_bytes();
+            let mut terminal = Terminal::new(80, 24).unwrap();
+            terminal.set_scrollback_limit(history);
+            for _ in 0..history + 24 {
+                terminal.process(b"prefill\r\n");
+            }
+            measure(
+                &format!(
+                    "sustained {name} terminal ({} bytes, history={history})",
+                    payload.len()
+                ),
+                8,
+                || {
+                    black_box(terminal.process(black_box(&payload)));
+                    assert_eq!(terminal.active_grid().scrollback_len(), history);
+                },
+            );
+        }
+    }
+
     let mut grid = Grid::new(120, 40).expect("fixed dimensions are valid");
     let cell = Cell {
         content: b'x' as u32,

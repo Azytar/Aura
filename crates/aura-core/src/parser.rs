@@ -94,6 +94,12 @@ impl Default for Parser {
     }
 }
 
+pub(crate) enum Input<'a> {
+    Ascii(&'a [u8]),
+    Text(&'a str),
+    Event(Event),
+}
+
 impl Parser {
     pub fn new() -> Self {
         Self::default()
@@ -101,7 +107,25 @@ impl Parser {
 
     /// Consumes a byte stream, retaining incomplete UTF-8 and VT sequences between calls.
     pub fn feed(&mut self, bytes: &[u8], mut emit: impl FnMut(Event)) {
+        self.feed_spans(bytes, |input| match input {
+            Input::Ascii(text) => {
+                for &byte in text {
+                    emit(Event::Print(byte as char));
+                }
+            }
+            Input::Event(event) => emit(event),
+            Input::Text(text) => {
+                for ch in text.chars() {
+                    emit(Event::Print(ch));
+                }
+            }
+        });
+    }
+
+    /// Borrows printable runs without changing the public scalar event stream.
+    pub(crate) fn feed_spans<'a>(&mut self, bytes: &'a [u8], mut emit: impl FnMut(Input<'a>)) {
         let mut offset = 0;
+        let mut printable_end = 0;
         while offset < bytes.len() {
             if self.state == State::Ground
                 && self.utf8_len == 0
@@ -111,17 +135,37 @@ impl Parser {
                 while offset < bytes.len() && (0x20..=0x7e).contains(&bytes[offset]) {
                     offset += 1;
                 }
-                for &byte in &bytes[start..offset] {
-                    emit(Event::Print(byte as char));
-                }
+                emit(Input::Ascii(&bytes[start..offset]));
                 continue;
+            }
+            if self.state == State::Ground && self.utf8_len == 0 && bytes[offset] >= 0xc2 {
+                if printable_end <= offset {
+                    printable_end = offset;
+                    while printable_end < bytes.len()
+                        && bytes[printable_end] >= 0x20
+                        && bytes[printable_end] != 0x7f
+                    {
+                        printable_end += 1;
+                    }
+                }
+                let candidate = &bytes[offset..printable_end];
+                let text = match std::str::from_utf8(candidate) {
+                    Ok(text) => text,
+                    Err(error) => std::str::from_utf8(&candidate[..error.valid_up_to()])
+                        .expect("validated UTF-8 prefix"),
+                };
+                if !text.is_empty() {
+                    emit(Input::Text(text));
+                    offset += text.len();
+                    continue;
+                }
             }
             let input = bytes[offset];
             offset += 1;
             let mut byte = input;
             loop {
                 if let Some(event) = self.advance_byte(byte) {
-                    emit(event);
+                    emit(Input::Event(event));
                 }
                 if let Some(replay) = self.replay_byte.take() {
                     byte = replay;
@@ -233,6 +277,7 @@ impl Parser {
         if !(0x80..=0xbf).contains(&byte) {
             self.utf8_len = 0;
             self.utf8_expected = 0;
+            self.utf8 = [0; 4];
             self.replay_byte = Some(byte);
             return Some(Event::Print('\u{fffd}'));
         }
@@ -247,6 +292,7 @@ impl Parser {
             .and_then(|value| value.chars().next());
         self.utf8_len = 0;
         self.utf8_expected = 0;
+        self.utf8 = [0; 4];
         Some(Event::Print(decoded.unwrap_or('\u{fffd}')))
     }
 
@@ -526,6 +572,44 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn printable_spans_match_bytewise_parser_on_arbitrary_input() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 1024,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[0xa7; 32]),
+        );
+        runner
+            .run(&prop::collection::vec(any::<u8>(), 0..1024), |bytes| {
+                let mut spans = Parser::new();
+                let mut scalar = Parser::new();
+                for chunk in bytes.chunks(17) {
+                    let mut actual = Vec::new();
+                    spans.feed(chunk, |event| actual.push(event));
+                    let mut expected = Vec::new();
+                    for &byte in chunk {
+                        if let Some(event) = scalar.advance_byte(byte) {
+                            expected.push(event);
+                        }
+                        while let Some(byte) = scalar.replay_byte.take() {
+                            if let Some(event) = scalar.advance_byte(byte) {
+                                expected.push(event);
+                            }
+                        }
+                    }
+                    prop_assert_eq!(actual, expected);
+                    prop_assert_eq!(&spans, &scalar);
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
     #[test]
     fn c1_csi_restarts_each_incomplete_namespace_across_every_split() {
         let expected = parse(b"\x1b[2;3HX");
