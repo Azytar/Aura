@@ -21,6 +21,13 @@ per commit.
 
 ## [Unreleased]
 
+### Added
+
+- An independent multi-terminal benchmark harness runs controlled Linux/X11
+  workloads, retains provenance and failures, and produces private per-metric
+  tables and charts. Harness unit/failure tests run in CI; timing campaigns
+  and their artifacts remain outside GitHub.
+
 ### Fixed
 
 - Mouse coordinates stay within the terminal grid during out-of-window drags;

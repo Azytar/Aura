@@ -1,5 +1,10 @@
 # Performance
 
+For automated comparisons across Aura, Alacritty, Kitty, WezTerm and xterm,
+see [the multi-terminal harness](TERMINAL_BENCHMARKS.md). Its reproducible
+workloads generate private HTML/CSV/JSON/SVG artifacts outside Git checkouts.
+The tables below are historical internal benchmarks, distinct from that harness.
+
 The original table below records an earlier run of the benchmark binaries.
 The resize follow-up at the end records a separate environment and comparison:
 

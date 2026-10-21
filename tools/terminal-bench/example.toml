@@ -1,0 +1,38 @@
+# Source configuration contains no results. Use absolute binary paths to compare builds.
+font_family = "DejaVu Sans Mono"
+font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
+font_pixels = 14.0
+# Points for other adapters = font_pixels * 72 / dpi. Actual cell geometry is recorded.
+dpi = 96.0
+columns = 80
+rows = 24
+history = 10000
+
+[[terminal]]
+id = "aura"
+kind = "aura"
+binary = "../../target/release/aura"
+# source_ref = "full commit SHA or build reference"  # declared provenance
+
+[[terminal]]
+id = "alacritty"
+kind = "alacritty"
+# Match Aura's observed 9x17 grid for this DejaVu/14 px fixture.
+# Recheck observed geometry after changing font, DPI or emulator versions.
+cell_spacing = [1, 0]
+
+[[terminal]]
+id = "kitty"
+kind = "kitty"
+cell_spacing = [1, 0]
+required = false
+
+[[terminal]]
+id = "wezterm"
+kind = "wezterm"
+required = false
+
+[[terminal]]
+id = "xterm"
+kind = "xterm"
+required = false

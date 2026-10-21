@@ -1,6 +1,6 @@
 # AGENTS.md
 
-AURA Terminal: a GPU-accelerated terminal emulator for Linux. Six-crate Rust workspace, X11 window backend, Vulkan 1.3 renderer. Rust 2024 edition, MSRV 1.88. There is no CI; run verification yourself.
+AURA Terminal: a GPU-accelerated terminal emulator for Linux. Six-crate Rust workspace, X11 window backend, Vulkan 1.3 renderer. Rust 2024 edition, MSRV 1.88. The benchmark harness has unit-test CI; run workspace verification yourself.
 
 ## Build and verify
 
@@ -9,6 +9,7 @@ AURA Terminal: a GPU-accelerated terminal emulator for Linux. Six-crate Rust wor
   `cargo fmt --all -- --check` → `cargo check --workspace --all-targets --all-features --locked` → `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` → `cargo test --workspace --all-targets --all-features --locked -- --nocapture` → `cargo build --release --locked`
 - Focused tests: `cargo test -p aura-core` (parser/grid/scrollback; no display or GPU needed), `cargo test -p aura-pty`, `cargo test -p aura-render`, `cargo test -p aura-config`.
 - The offscreen Vulkan readback tests (`crates/aura-render/tests/offscreen_gpu.rs`) print a skip and pass when no usable Vulkan device exists. This is deliberate — an `#[ignore]`d test once hid a shader bug — do not convert them to `#[ignore]`. They also need a system monospace font (DejaVu / Liberation / Noto).
+- Cross-emulator harness tests: `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/terminal-bench/tests -v`. Native runs require a dedicated X11 display; see `docs/TERMINAL_BENCHMARKS.md`. Artifacts must stay outside every checkout.
 - Benchmarks: `cargo bench --offline -p aura-core -p aura-text`. If you change a benchmark, update `docs/PERFORMANCE.md`.
 - Live end-to-end (needs X11, `xdotool`, `xwd`, ImageMagick `magick`): `./tests/e2e_shell_smoke.sh target/release/aura`. Exit 77 means "no display": a skip, not a pass. Its `xdotool type` input path is inherently racy and the script retries; that is not a terminal bug.
 - X11 regression suite (needs `htop`, `setxkbmap`, `xprop`, etc.): `python3 tests/x11_daily_use.py target/release/aura`. It changes the server keyboard layout, so run it only on a dedicated virtual display. Exit 77 means skipped.

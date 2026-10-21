@@ -178,6 +178,13 @@ See [the reproducible test campaign](docs/TEST_CAMPAIGN.md) for seeded
 properties, concrete replay, braille enumeration, GPU checks and instrumented
 nightly fuzzing, including measured budgets and validation limits.
 
+## Comparative benchmarks
+
+The [multi-terminal harness](docs/TERMINAL_BENCHMARKS.md) automates controlled
+Linux/X11 workloads and generates per-metric tables and charts. It records actual
+geometry, versions, hashes, warmups and failed trials. Measurements and generated
+reports stay outside Git; Xvfb smoke runs do not establish physical GPU latency.
+
 ## Optional diagnostics
 
 Diagnostics are silent by default. `AURA_DEBUG_KEYBOARD=1` enables map, reload

@@ -1,0 +1,31 @@
+name: Terminal benchmark harness
+
+on:
+  push:
+    paths:
+      - 'tools/terminal-bench/**'
+      - '.github/workflows/terminal-bench.yml'
+  pull_request:
+    paths:
+      - 'tools/terminal-bench/**'
+      - '.github/workflows/terminal-bench.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validate harness invariants without performance data
+        run: python3 -m unittest discover -s tools/terminal-bench/tests -v
