@@ -29,7 +29,8 @@ impl SyncGate {
         self.deadline.map_or(-1, |deadline| {
             deadline
                 .saturating_duration_since(Instant::now())
-                .as_millis()
+                .as_nanos()
+                .div_ceil(1_000_000)
                 .min(i32::MAX as u128) as i32
         })
     }

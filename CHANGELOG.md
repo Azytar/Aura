@@ -23,6 +23,9 @@ per commit.
 
 ### Fixed
 
+- Mouse coordinates stay within the terminal grid during out-of-window drags;
+  synchronized-output deadlines round up to avoid a sub-millisecond busy loop.
+
 - Font family discovery includes XDG and legacy user font directories before
   system directories, so configured user-installed faces are actually found.
 

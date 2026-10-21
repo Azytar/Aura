@@ -27,6 +27,7 @@ pub(crate) fn mouse_report(
     event: MouseEvent,
     metrics: CellMetrics,
     padding: [u32; 2],
+    grid: [usize; 2],
 ) -> Option<Vec<u8>> {
     let MouseEvent {
         button,
@@ -78,8 +79,16 @@ pub(crate) fn mouse_report(
     } else {
         cell_position(pixel_x, pixel_y, metrics, padding)
     };
-    let x = (column + 1).min(9999);
-    let y = (row + 1).min(9999);
+    let bounds = if modes.mouse_pixel {
+        [
+            grid[0].saturating_mul(metrics.width as usize),
+            grid[1].saturating_mul(metrics.height as usize),
+        ]
+    } else {
+        grid
+    };
+    let x = column.min(bounds[0].saturating_sub(1)) + 1;
+    let y = row.min(bounds[1].saturating_sub(1)) + 1;
     if sgr {
         Some(
             format!(
@@ -125,26 +134,40 @@ mod tests {
             released: false,
             motion: true,
         };
+        let outside = MouseEvent {
+            x: i16::MAX,
+            y: i16::MAX,
+            ..hover
+        };
         assert_eq!(
-            mouse_report(terminal.modes(), hover, metrics, [4, 6]).unwrap(),
+            mouse_report(terminal.modes(), hover, metrics, [4, 6], [10, 3]).unwrap(),
             b"\x1b[<35;3;3M"
+        );
+        assert_eq!(
+            mouse_report(terminal.modes(), outside, metrics, [4, 6], [10, 3]).unwrap(),
+            b"\x1b[<35;10;3M"
         );
         terminal.process(b"\x1b[?1016h");
         assert_eq!(
-            mouse_report(terminal.modes(), hover, metrics, [4, 6]).unwrap(),
+            mouse_report(terminal.modes(), hover, metrics, [4, 6], [10, 3]).unwrap(),
             b"\x1b[<35;19;33M"
+        );
+        assert_eq!(
+            mouse_report(terminal.modes(), outside, metrics, [4, 6], [10, 3]).unwrap(),
+            b"\x1b[<35;80;48M"
         );
         assert!(
             mouse_report(
                 mouse_modes(&terminal, KeyButMask::SHIFT),
                 hover,
                 metrics,
-                [4, 6]
+                [4, 6],
+                [10, 3]
             )
             .is_none()
         );
         terminal.process(b"\x1b[?1003l\x1b[?1000h");
-        assert!(mouse_report(terminal.modes(), hover, metrics, [4, 6]).is_none());
+        assert!(mouse_report(terminal.modes(), hover, metrics, [4, 6], [10, 3]).is_none());
         let release = MouseEvent {
             button: 1,
             released: true,
@@ -152,7 +175,7 @@ mod tests {
             ..hover
         };
         assert_eq!(
-            mouse_report(terminal.modes(), release, metrics, [4, 6]).unwrap(),
+            mouse_report(terminal.modes(), release, metrics, [4, 6], [10, 3]).unwrap(),
             b"\x1b[<0;19;33m"
         );
     }

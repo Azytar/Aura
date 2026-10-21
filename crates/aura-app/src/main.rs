@@ -565,6 +565,10 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                     configured_metrics(&font, &config),
                                     [config.window.padding_x, config.window.padding_y],
+                                    [
+                                        terminal.active_grid().width(),
+                                        terminal.active_grid().height(),
+                                    ],
                                 ) {
                                     input.push(&bytes);
                                 }
@@ -603,6 +607,10 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                     },
                                     configured_metrics(&font, &config),
                                     [config.window.padding_x, config.window.padding_y],
+                                    [
+                                        terminal.active_grid().width(),
+                                        terminal.active_grid().height(),
+                                    ],
                                 ) {
                                     input.push(&bytes);
                                 }
@@ -625,6 +633,10 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                         },
                                         configured_metrics(&font, &config),
                                         [config.window.padding_x, config.window.padding_y],
+                                        [
+                                            terminal.active_grid().width(),
+                                            terminal.active_grid().height(),
+                                        ],
                                     )
                                 {
                                     if last_mouse_report.as_ref() != Some(&bytes) {
@@ -1941,11 +1953,11 @@ mod tests {
             released: false,
             motion: false,
         };
-        assert!(mouse_report(modes, press, metrics, [0; 2]).is_none());
+        assert!(mouse_report(modes, press, metrics, [0; 2], [80, 24]).is_none());
         modes.mouse_tracking = MouseTracking::Drag;
         modes.mouse_sgr = true;
         assert_eq!(
-            mouse_report(modes, press, metrics, [0; 2]).as_deref(),
+            mouse_report(modes, press, metrics, [0; 2], [80, 24]).as_deref(),
             Some(&b"\x1b[<0;3;3M"[..])
         );
         assert_eq!(
@@ -1957,6 +1969,7 @@ mod tests {
                 },
                 metrics,
                 [0; 2],
+                [80, 24],
             )
             .as_deref(),
             Some(&b"\x1b[<32;3;3M"[..])
@@ -1970,6 +1983,7 @@ mod tests {
                 },
                 metrics,
                 [0; 2],
+                [80, 24],
             )
             .as_deref(),
             Some(&b"\x1b[<0;3;3m"[..])
