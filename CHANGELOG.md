@@ -23,6 +23,11 @@ per commit.
 
 ### Fixed
 
+- Mouse-aware applications receive button-free motion (1003), focus events
+  (1004), SGR pixel coordinates (1016) and normal press-mode releases. Shift
+  retains local selection. The X11 pointer changes with application mouse
+  tracking, hides while typing and returns on motion.
+
 - Unicode sextant blocks (U+1FB00–U+1FB3B), used by terminal logos such
   as Kilo Code, now fill their cell thirds directly instead of depending on
   font fallback. Adjacent filled thirds have no fractional-pixel seams.

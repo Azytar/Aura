@@ -19,6 +19,7 @@ pub enum MouseTracking {
     Off,
     Press,
     Drag,
+    Motion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +66,8 @@ pub struct Modes {
     pub origin: bool,
     pub mouse_tracking: MouseTracking,
     pub mouse_sgr: bool,
+    pub mouse_pixel: bool,
+    pub focus_reporting: bool,
     pub bracketed_paste: bool,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
@@ -80,6 +83,8 @@ impl Default for Modes {
             origin: false,
             mouse_tracking: MouseTracking::Off,
             mouse_sgr: false,
+            mouse_pixel: false,
+            focus_reporting: false,
             bracketed_paste: false,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
@@ -120,6 +125,7 @@ pub struct Terminal {
     modes: Modes,
     mouse_press_enabled: bool,
     mouse_drag_enabled: bool,
+    mouse_motion_enabled: bool,
     rendition: Rendition,
     saved_cursor: Option<SavedCursor>,
     alternate_saved_cursor: Option<SavedCursor>,
@@ -153,6 +159,7 @@ impl Terminal {
             modes: Modes::default(),
             mouse_press_enabled: false,
             mouse_drag_enabled: false,
+            mouse_motion_enabled: false,
             rendition: Rendition::default(),
             saved_cursor: None,
             alternate_saved_cursor: None,
@@ -181,6 +188,13 @@ impl Terminal {
 
     pub const fn modes(&self) -> Modes {
         self.modes
+    }
+
+    /// Xterm focus reports are opt-in and contain no pointer coordinates.
+    pub fn focus_report(&self, focused: bool) -> Option<&'static [u8]> {
+        self.modes
+            .focus_reporting
+            .then_some(if focused { b"\x1b[I" } else { b"\x1b[O" })
     }
 
     /// Replaces the whole mode set.
@@ -1337,7 +1351,13 @@ impl Terminal {
                     self.mouse_drag_enabled = enabled;
                     self.update_mouse_tracking();
                 }
+                1003 => {
+                    self.mouse_motion_enabled = enabled;
+                    self.update_mouse_tracking();
+                }
+                1004 => self.modes.focus_reporting = enabled,
                 1006 => self.modes.mouse_sgr = enabled,
+                1016 => self.modes.mouse_pixel = enabled,
                 1049 => self.switch_alternate(enabled, true),
                 2004 => self.modes.bracketed_paste = enabled,
                 _ => {}
@@ -1545,6 +1565,7 @@ impl Terminal {
         self.modes = Modes::default();
         self.mouse_press_enabled = false;
         self.mouse_drag_enabled = false;
+        self.mouse_motion_enabled = false;
         self.rendition = Rendition::default();
         self.saved_cursor = None;
         self.alternate_saved_cursor = None;
@@ -1588,7 +1609,9 @@ impl Terminal {
     }
 
     fn update_mouse_tracking(&mut self) {
-        self.modes.mouse_tracking = if self.mouse_drag_enabled {
+        self.modes.mouse_tracking = if self.mouse_motion_enabled {
+            MouseTracking::Motion
+        } else if self.mouse_drag_enabled {
             MouseTracking::Drag
         } else if self.mouse_press_enabled {
             MouseTracking::Press
@@ -2672,6 +2695,24 @@ mod tests {
         feed(&mut terminal, b"E");
         assert_eq!(line(&terminal, 0), "ABCD");
         assert_eq!(line(&terminal, 1), "E...");
+    }
+
+    #[test]
+    fn motion_and_focus_modes_are_independent_and_resettable() {
+        let mut terminal = terminal(10, 3);
+        terminal.process(b"\x1b[?1000;1002;1003;1004;1016h");
+        assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Motion);
+        assert_eq!(terminal.focus_report(true), Some(&b"\x1b[I"[..]));
+        assert_eq!(terminal.focus_report(false), Some(&b"\x1b[O"[..]));
+        assert!(terminal.modes().mouse_pixel);
+        terminal.process(b"\x1b[?1003l");
+        assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Drag);
+        terminal.process(b"\x1b[?1002l");
+        assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Press);
+        terminal.process(b"\x1bc");
+        assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Off);
+        assert!(!terminal.modes().mouse_pixel);
+        assert!(terminal.focus_report(true).is_none());
     }
 
     #[test]

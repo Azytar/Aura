@@ -1,9 +1,12 @@
 mod input;
 mod keyboard;
+mod mouse;
 mod perf;
+mod pointer;
 mod signals;
 
 use keyboard::{FontSizeAction, Keyboard, font_size_action};
+use mouse::{MouseEvent, mouse_modes, mouse_report};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -122,7 +125,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     | EventMask::KEY_PRESS
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
-                    | EventMask::POINTER_MOTION,
+                    | EventMask::POINTER_MOTION
+                    | EventMask::FOCUS_CHANGE
+                    | EventMask::ENTER_WINDOW,
             ),
     )?;
     set_title(&connection, window, "Terminal")?;
@@ -217,6 +222,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
     epoll_add(epoll, autoscroll_timer, 5, libc::EPOLLIN as u32)?;
     epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
+    let mut pointer_cursor = pointer::Pointer::new(&connection, window)?;
+    let mut pointer_hidden = false;
     let mut input = input::Input::default();
     let mut watching_write = false;
     let mut keyboard = Keyboard::new(&connection, debug_keyboard)?;
@@ -229,6 +236,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut autoscroll_dir: Option<i8> = None;
     let mut pointer = (0i16, 0i16);
     let mut last_click: Option<(u32, u8, SelectionPoint, u8)> = None;
+    let mut last_mouse_report: Option<Vec<u8>> = None;
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
     let mut buffer = [0u8; 16 * 1024];
@@ -290,7 +298,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 invalidated = true;
                             }
                             Event::Expose(_) => invalidated = true,
+                            Event::EnterNotify(_) => {
+                                pointer_hidden = false;
+                            }
+                            Event::FocusIn(event)
+                                if event.mode == x11rb::protocol::xproto::NotifyMode::NORMAL =>
+                            {
+                                if let Some(bytes) = terminal.focus_report(true) {
+                                    input.push(bytes);
+                                }
+                                cursor_blink_on = true;
+                                invalidated = true;
+                            }
+                            Event::FocusOut(event)
+                                if event.mode == x11rb::protocol::xproto::NotifyMode::NORMAL =>
+                            {
+                                if let Some(bytes) = terminal.focus_report(false) {
+                                    input.push(bytes);
+                                }
+                            }
                             Event::KeyPress(key) => {
+                                pointer_hidden = true;
                                 let (sym, modifiers) = keyboard.key(&key);
                                 if let Some(action) = font_size_action(sym, modifiers) {
                                     let changed = match action {
@@ -389,7 +417,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::ButtonPress(button) => {
-                                if terminal.modes().mouse_tracking == MouseTracking::Off
+                                pointer_hidden = false;
+                                last_mouse_report = None;
+                                if mouse_modes(&terminal, button.state).mouse_tracking
+                                    == MouseTracking::Off
                                     && matches!(button.detail, 4 | 5)
                                 {
                                     if button.detail == 4 {
@@ -398,7 +429,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         terminal.scroll_view_down(3);
                                     }
                                     invalidated = true;
-                                } else if terminal.modes().mouse_tracking == MouseTracking::Off
+                                } else if mouse_modes(&terminal, button.state).mouse_tracking
+                                    == MouseTracking::Off
                                     && button.detail == 2
                                 {
                                     // X11 convention: middle click pastes PRIMARY.
@@ -407,7 +439,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         window,
                                         clipboard.primary_atom,
                                     )?;
-                                } else if terminal.modes().mouse_tracking == MouseTracking::Off
+                                } else if mouse_modes(&terminal, button.state).mouse_tracking
+                                    == MouseTracking::Off
                                     && button.detail == 1
                                 {
                                     let point = selection_point(
@@ -443,7 +476,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     invalidated = true;
                                 } else if let Some(bytes) = mouse_report(
-                                    terminal.modes(),
+                                    mouse_modes(&terminal, button.state),
                                     MouseEvent {
                                         button: button.detail,
                                         x: button.event_x,
@@ -459,13 +492,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::ButtonRelease(button) => {
+                                last_mouse_report = None;
                                 // Release always ends the local drag, even if the
                                 // application enabled mouse tracking mid-gesture.
                                 selection_anchor = None;
                                 if autoscroll_dir.take().is_some() {
                                     set_autoscroll_timer(autoscroll_timer, false)?;
                                 }
-                                if terminal.modes().mouse_tracking == MouseTracking::Off {
+                                if mouse_modes(&terminal, button.state).mouse_tracking
+                                    == MouseTracking::Off
+                                {
                                     // Own the PRIMARY selection like any X11
                                     // client, so other applications can paste
                                     // the highlighted text with a middle click.
@@ -477,10 +513,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             text.as_bytes(),
                                         )?;
                                     }
-                                } else if terminal.modes().mouse_tracking == MouseTracking::Press {
-                                    continue;
                                 } else if let Some(bytes) = mouse_report(
-                                    terminal.modes(),
+                                    mouse_modes(&terminal, button.state),
                                     MouseEvent {
                                         button: button.detail,
                                         x: button.event_x,
@@ -496,10 +530,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::MotionNotify(motion) => {
-                                if terminal.modes().mouse_tracking == MouseTracking::Drag
-                                    && let Some(button) = held_button(motion.state)
+                                pointer_hidden = false;
+                                if matches!(
+                                    mouse_modes(&terminal, motion.state).mouse_tracking,
+                                    MouseTracking::Drag | MouseTracking::Motion
+                                ) && let button = held_button(motion.state).unwrap_or(0)
                                     && let Some(bytes) = mouse_report(
-                                        terminal.modes(),
+                                        mouse_modes(&terminal, motion.state),
                                         MouseEvent {
                                             button,
                                             x: motion.event_x,
@@ -512,8 +549,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         [config.window.padding_x, config.window.padding_y],
                                     )
                                 {
-                                    input.push(&bytes);
-                                } else if terminal.modes().mouse_tracking == MouseTracking::Off
+                                    if last_mouse_report.as_ref() != Some(&bytes) {
+                                        input.push(&bytes);
+                                        last_mouse_report = Some(bytes);
+                                    }
+                                } else if mouse_modes(&terminal, motion.state).mouse_tracking
+                                    == MouseTracking::Off
                                     && held_button(motion.state) == Some(1)
                                     && terminal.selection().is_some()
                                     && let Some(anchor) = selection_anchor
@@ -591,6 +632,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         match pty.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(length) => {
+                                last_mouse_report = None;
                                 let started = stats.start();
                                 let replies = terminal.process(&buffer[..length]);
                                 stats.finish("parse", started);
@@ -760,6 +802,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             set_title(&connection, window, &previous_title)?;
             invalidated = true;
         }
+        pointer_cursor.update(
+            &connection,
+            window,
+            pointer_hidden,
+            terminal.modes().mouse_tracking != MouseTracking::Off,
+        )?;
         if invalidated {
             let started = stats.start();
             let timings = renderer
@@ -1476,81 +1524,6 @@ fn held_button(state: KeyButMask) -> Option<u8> {
         Some(2)
     } else if state.contains(KeyButMask::BUTTON3) {
         Some(3)
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy)]
-struct MouseEvent {
-    button: u8,
-    x: i16,
-    y: i16,
-    state: KeyButMask,
-    released: bool,
-    motion: bool,
-}
-
-fn mouse_report(
-    modes: aura_core::Modes,
-    event: MouseEvent,
-    metrics: CellMetrics,
-    padding: [u32; 2],
-) -> Option<Vec<u8>> {
-    let MouseEvent {
-        button,
-        x: pixel_x,
-        y: pixel_y,
-        state,
-        released,
-        motion,
-    } = event;
-    if modes.mouse_tracking == MouseTracking::Off || (released && button >= 4) {
-        return None;
-    }
-    let mut code = match button {
-        1 => 0u32,
-        2 => 1,
-        3 => 2,
-        4 => 64,
-        5 => 65,
-        _ => return None,
-    };
-    if released && !modes.mouse_sgr {
-        code = 3;
-    } else if motion {
-        code += 32;
-    }
-    if state.contains(KeyButMask::SHIFT) {
-        code += 4;
-    }
-    if state.contains(KeyButMask::MOD1) {
-        code += 8;
-    }
-    if state.contains(KeyButMask::CONTROL) {
-        code += 16;
-    }
-    let (column, row) = cell_position(pixel_x, pixel_y, metrics, padding);
-    let x = (column + 1).min(9999);
-    let y = (row + 1).min(9999);
-    if modes.mouse_sgr {
-        Some(
-            format!(
-                "\x1b[<{code};{x};{}{suffix}",
-                y,
-                suffix = if released { 'm' } else { 'M' }
-            )
-            .into_bytes(),
-        )
-    } else if code <= 223 && x <= 223 && y <= 223 {
-        Some(vec![
-            0x1b,
-            b'[',
-            b'M',
-            (code + 32) as u8,
-            (x + 32) as u8,
-            (y + 32) as u8,
-        ])
     } else {
         None
     }
