@@ -9,6 +9,8 @@ pub struct Csi {
     pub intermediate_len: u8,
     pub params: [u16; CSI_MAX_PARAMS],
     pub present: [bool; CSI_MAX_PARAMS],
+    /// True when this value is a colon subparameter of the previous value.
+    pub subparams: [bool; CSI_MAX_PARAMS],
     pub param_count: u8,
     pub final_byte: u8,
 }
@@ -377,13 +379,14 @@ impl Parser {
                 self.state = State::CsiParam;
                 None
             }
-            b';' if self.state != State::CsiIntermediate => {
+            b';' | b':' if self.state != State::CsiIntermediate => {
                 if self.csi.param_count == 0 {
                     self.csi.param_count = 1;
                 }
                 if self.csi.param_count as usize >= CSI_MAX_PARAMS {
                     self.state = State::CsiIgnore;
                 } else {
+                    self.csi.subparams[self.csi.param_count as usize] = byte == b':';
                     self.csi.param_count += 1;
                     self.state = State::CsiParam;
                 }

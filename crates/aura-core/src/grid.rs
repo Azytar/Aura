@@ -17,6 +17,10 @@ impl CellFlags {
     pub const UNDERLINE: Self = Self(1 << 4);
     pub const STRIKETHROUGH: Self = Self(1 << 5);
     pub const INVERSE: Self = Self(1 << 6);
+    pub const FAINT: Self = Self(1 << 7);
+    pub const HIDDEN: Self = Self(1 << 8);
+    /// SGR 4:2 through 4:5 use three style bits in addition to UNDERLINE.
+    pub const UNDERLINE_STYLE_MASK: Self = Self(7 << 9);
 
     const WIDE_MASK: u32 = Self::WIDE_LEADING.0 | Self::WIDE_SPACER.0;
 
@@ -172,16 +176,22 @@ pub struct Row {
     cells: Box<[Cell]>,
     graphemes: Sidecar<String>,
     hyperlinks: Sidecar<u32>,
+    underline_colors: Sidecar<u32>,
     wrapped: bool,
     dirty: bool,
 }
 
 impl Row {
+    pub fn underline_color_at(&self, column: usize) -> Option<u32> {
+        self.underline_colors.get(column).copied()
+    }
+
     fn new(width: usize) -> Self {
         Self {
             cells: vec![Cell::EMPTY; width].into_boxed_slice(),
             graphemes: Sidecar::new(),
             hyperlinks: Sidecar::new(),
+            underline_colors: Sidecar::new(),
             wrapped: false,
             dirty: true,
         }
@@ -469,6 +479,22 @@ impl Grid {
         self.row(row)?.graphemes.get(column).map(String::as_str)
     }
 
+    pub fn set_underline_color(&mut self, row: usize, column: usize, color: Option<u32>) -> bool {
+        if row >= self.height || column >= self.width {
+            return false;
+        }
+        let target = self.row_mut(row).expect("validated row");
+        if color.is_some() && target.cells[column].content == 0 {
+            return false;
+        }
+        target.underline_colors.set(column, color);
+        if target.cells[column].is_wide_leading() {
+            target.underline_colors.set(column + 1, color);
+        }
+        target.dirty = true;
+        true
+    }
+
     pub fn hyperlink(&self, row: usize, column: usize) -> Option<u32> {
         self.row(row)?.hyperlinks.get(column).copied()
     }
@@ -510,6 +536,7 @@ impl Grid {
         };
         target.graphemes.set(column, multi_scalar_grapheme(text));
         target.hyperlinks.set(column, None);
+        target.underline_colors.set(column, None);
         target.dirty = true;
         true
     }
@@ -531,6 +558,7 @@ impl Grid {
         };
         target.graphemes.set(column, None);
         target.hyperlinks.set(column, None);
+        target.underline_colors.set(column, None);
         target.dirty = true;
         true
     }
@@ -568,7 +596,7 @@ impl Grid {
             content: 0,
             fg: leading.fg,
             bg: leading.bg,
-            flags: CellFlags::WIDE_SPACER.bits(),
+            flags: leading.flags().without_wide().bits() | CellFlags::WIDE_SPACER.bits(),
         };
         let target = self.row_mut(row).expect("validated row");
         target.cells[column] = leading;
@@ -576,7 +604,9 @@ impl Grid {
         target.graphemes.set(column, grapheme);
         target.graphemes.set(column + 1, None);
         target.hyperlinks.set(column, None);
+        target.underline_colors.set(column, None);
         target.hyperlinks.set(column + 1, None);
+        target.underline_colors.set(column + 1, None);
         target.dirty = true;
         true
     }
@@ -603,6 +633,7 @@ impl Grid {
             target.cells[column] = Cell::EMPTY;
             target.graphemes.set(column, None);
             target.hyperlinks.set(column, None);
+            target.underline_colors.set(column, None);
             target.dirty = true;
         }
         if let Some(partner) = partner
@@ -611,6 +642,7 @@ impl Grid {
             target.cells[partner] = Cell::EMPTY;
             target.graphemes.set(partner, None);
             target.hyperlinks.set(partner, None);
+            target.underline_colors.set(partner, None);
             target.dirty = true;
         }
     }
@@ -647,9 +679,11 @@ impl Grid {
         target.cells[at..at + amount].fill(Cell::EMPTY);
         target.graphemes.insert(at, amount, width);
         target.hyperlinks.insert(at, amount, width);
+        target.underline_colors.insert(at, amount, width);
         repair_wide_pairs(&mut target.cells);
         clear_orphan_graphemes(&target.cells, &mut target.graphemes);
-        clear_orphan_hyperlinks(&target.cells, &mut target.hyperlinks);
+        clear_orphan_metadata(&target.cells, &mut target.hyperlinks);
+        clear_orphan_metadata(&target.cells, &mut target.underline_colors);
         target.dirty = true;
         true
     }
@@ -670,9 +704,11 @@ impl Grid {
         target.cells[width - amount..].fill(Cell::EMPTY);
         target.graphemes.delete(at, amount);
         target.hyperlinks.delete(at, amount);
+        target.underline_colors.delete(at, amount);
         repair_wide_pairs(&mut target.cells);
         clear_orphan_graphemes(&target.cells, &mut target.graphemes);
-        clear_orphan_hyperlinks(&target.cells, &mut target.hyperlinks);
+        clear_orphan_metadata(&target.cells, &mut target.hyperlinks);
+        clear_orphan_metadata(&target.cells, &mut target.underline_colors);
         target.dirty = true;
         true
     }
@@ -684,6 +720,7 @@ impl Grid {
         target.cells.fill(Cell::EMPTY);
         target.graphemes.clear();
         target.hyperlinks.clear();
+        target.underline_colors.clear();
         target.wrapped = false;
         target.dirty = true;
         true
@@ -729,6 +766,7 @@ impl Grid {
         target.cells[start..end].fill(blank);
         target.graphemes.clear_range(start..end);
         target.hyperlinks.clear_range(start..end);
+        target.underline_colors.clear_range(start..end);
         if start == 0 && end == width {
             target.wrapped = false;
         }
@@ -763,6 +801,7 @@ impl Grid {
             row.cells.fill(Cell::EMPTY);
             row.graphemes.clear();
             row.hyperlinks.clear();
+            row.underline_colors.clear();
             row.wrapped = false;
             row.dirty = true;
         }
@@ -854,6 +893,7 @@ impl Grid {
         row.cells.fill(Cell::EMPTY);
         row.graphemes.clear();
         row.hyperlinks.clear();
+        row.underline_colors.clear();
         row.wrapped = false;
         row.dirty = true;
     }
@@ -947,6 +987,7 @@ impl Grid {
                     && row.cells[used..].iter().all(|cell| *cell == Cell::EMPTY)
                     && row.graphemes.is_clear_from(used)
                     && row.hyperlinks.is_clear_from(used)
+                    && row.underline_colors.is_clear_from(used)
             })
         {
             return false;
@@ -970,6 +1011,7 @@ impl Grid {
                 row.cells = cells.into_boxed_slice();
                 row.graphemes.truncate(width);
                 row.hyperlinks.truncate(width);
+                row.underline_colors.truncate(width);
             }
             row.dirty = true;
         };
@@ -1088,6 +1130,7 @@ impl Grid {
                             row.cells[column],
                             row.graphemes.get(column).map(String::as_str),
                             row.hyperlinks.get(column).copied(),
+                            row.underline_colors.get(column).copied(),
                         )
                     })
                 })
@@ -1110,7 +1153,8 @@ impl Grid {
                 let row_index = reflowed.len();
                 let mut column = 0;
                 while offset < logical_len && column < new_width {
-                    let (cell, grapheme, hyperlink) = *line.peek().expect("remaining logical cell");
+                    let (cell, grapheme, hyperlink, underline_color) =
+                        *line.peek().expect("remaining logical cell");
                     if cell.is_wide_leading() {
                         if new_width == 1 {
                             row.cells[0] = Cell::new(
@@ -1120,6 +1164,7 @@ impl Grid {
                                 cell.flags().without_wide(),
                             );
                             row.graphemes.set(0, Some("\u{fffd}".to_owned()));
+                            row.underline_colors.set(0, underline_color);
                             if cursor_position
                                 .is_some_and(|pos| (offset..offset + 2).contains(&pos))
                             {
@@ -1137,10 +1182,12 @@ impl Grid {
                         row.cells[column] = cell;
                         row.graphemes.set(column, grapheme.map(str::to_owned));
                         row.hyperlinks.set(column, hyperlink);
+                        row.underline_colors.set(column, underline_color);
                         line.next();
-                        if let Some((spacer, _, spacer_link)) = line.next() {
+                        if let Some((spacer, _, spacer_link, spacer_color)) = line.next() {
                             row.cells[column + 1] = spacer;
                             row.hyperlinks.set(column + 1, spacer_link);
+                            row.underline_colors.set(column + 1, spacer_color);
                         }
                         if let Some(pos) = cursor_position
                             && (offset..offset + 2).contains(&pos)
@@ -1153,6 +1200,7 @@ impl Grid {
                         row.cells[column] = cell;
                         row.graphemes.set(column, grapheme.map(str::to_owned));
                         row.hyperlinks.set(column, hyperlink);
+                        row.underline_colors.set(column, underline_color);
                         if cursor_position == Some(offset) {
                             new_cursor = Some((row_index, column));
                         }
@@ -1162,10 +1210,12 @@ impl Grid {
                     }
                 }
                 if offset < logical_len && column == 0 {
-                    let (cell, grapheme, hyperlink) = *line.peek().expect("remaining logical cell");
+                    let (cell, grapheme, hyperlink, underline_color) =
+                        *line.peek().expect("remaining logical cell");
                     row.cells[0] = cell;
                     row.graphemes.set(0, grapheme.map(str::to_owned));
                     row.hyperlinks.set(0, hyperlink);
+                    row.underline_colors.set(0, underline_color);
                     line.next();
                     offset += 1;
                 }
@@ -1221,11 +1271,13 @@ impl Grid {
             target.cells[..count].copy_from_slice(&source.cells[..count]);
             target.graphemes = source.graphemes.clone_prefix(count);
             target.hyperlinks = source.hyperlinks.clone_prefix(count);
+            target.underline_colors = source.underline_colors.clone_prefix(count);
             repair_wide_pairs(&mut target.cells);
             for column in 0..width {
                 if target.cells[column].content == 0 && !target.cells[column].is_wide_spacer() {
                     target.graphemes.set(column, None);
                     target.hyperlinks.set(column, None);
+                    target.underline_colors.set(column, None);
                 }
             }
         }
@@ -1247,6 +1299,10 @@ impl Grid {
                 if cell.content == 0 && !cell.is_wide_spacer() {
                     assert!(row.graphemes.get(column).is_none(), "orphan grapheme");
                     assert!(row.hyperlinks.get(column).is_none(), "orphan hyperlink");
+                    assert!(
+                        row.underline_colors.get(column).is_none(),
+                        "orphan underline color"
+                    );
                 }
                 if let Some(id) = row.hyperlinks.get(column) {
                     assert!(links.contains_key(id), "unknown hyperlink id");
@@ -1256,6 +1312,11 @@ impl Grid {
                         row.hyperlinks.get(column).copied(),
                         row.hyperlinks.get(column + 1).copied(),
                         "split wide hyperlink"
+                    );
+                    assert_eq!(
+                        row.underline_colors.get(column),
+                        row.underline_colors.get(column + 1),
+                        "split wide underline color"
                     );
                     assert_eq!(
                         (cell.fg, cell.bg),
@@ -1351,15 +1412,15 @@ fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut Sidecar<String>) {
     graphemes.trim();
 }
 
-fn clear_orphan_hyperlinks(cells: &[Cell], hyperlinks: &mut Sidecar<u32>) {
-    for (cell, link) in cells.iter().zip(&mut hyperlinks.0) {
+fn clear_orphan_metadata(cells: &[Cell], metadata: &mut Sidecar<u32>) {
+    for (cell, link) in cells.iter().zip(&mut metadata.0) {
         // Wide spacers have no scalar but still belong to the leading
-        // cell's hyperlink. Only a genuinely empty cell loses ownership.
+        // cell's metadata. Only a genuinely empty cell loses ownership.
         if cell.content == 0 && !cell.is_wide_spacer() {
             *link = None;
         }
     }
-    hyperlinks.trim();
+    metadata.trim();
 }
 
 fn multi_scalar_grapheme(text: &str) -> Option<String> {
@@ -1520,6 +1581,20 @@ mod tests {
     }
 
     #[test]
+    fn clearing_the_last_underline_color_releases_storage() {
+        let mut grid = Grid::new(8, 2).unwrap();
+        grid.set_cell(0, 7, Cell::new('X' as u32, 0, 0, CellFlags::UNDERLINE));
+        grid.set_underline_color(0, 7, Some(0x02010203));
+        assert!(grid.rows[0].underline_colors.0.capacity() > 0);
+        grid.clear_cell(0, 7);
+        assert_eq!(grid.rows[0].underline_colors.0.capacity(), 0);
+        grid.set_cell(0, 7, Cell::new('X' as u32, 0, 0, CellFlags::UNDERLINE));
+        grid.set_underline_color(0, 7, Some(0x02010203));
+        grid.resize_fixed(7, 2).unwrap();
+        assert_eq!(grid.rows[0].underline_colors.0.capacity(), 0);
+    }
+
+    #[test]
     fn ascii_history_has_no_sidecar_allocations() {
         let mut terminal = crate::Terminal::new(8, 4).unwrap();
         terminal.set_scrollback_limit(64);
@@ -1529,6 +1604,7 @@ mod tests {
         for row in grid.scrollback.iter().chain(&grid.rows) {
             assert_eq!(row.graphemes.0.capacity(), 0);
             assert_eq!(row.hyperlinks.0.capacity(), 0);
+            assert_eq!(row.underline_colors.0.capacity(), 0);
         }
     }
 

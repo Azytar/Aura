@@ -1,5 +1,6 @@
 mod keyboard;
 mod protocol;
+mod rendition;
 pub use protocol::HostProperties;
 
 use crate::{
@@ -106,6 +107,7 @@ impl Default for Modes {
 struct Rendition {
     fg: u32,
     bg: u32,
+    underline_color: u32,
     flags: u32,
 }
 
@@ -114,6 +116,7 @@ impl Default for Rendition {
         Self {
             fg: DEFAULT_COLOR,
             bg: DEFAULT_COLOR,
+            underline_color: DEFAULT_COLOR,
             flags: 0,
         }
     }
@@ -263,6 +266,13 @@ impl Terminal {
             .cells()
             .get(column)
             .copied()
+    }
+
+    pub fn viewport_underline_color(&self, row: usize, column: usize) -> Option<u32> {
+        self.grid
+            .active()
+            .viewport_row(row)?
+            .underline_color_at(column)
     }
 
     pub fn viewport_grapheme(&self, row: usize, column: usize) -> Option<String> {
@@ -821,6 +831,11 @@ impl Terminal {
     }
 
     fn csi(&mut self, csi: crate::Csi, replies: &mut Vec<u8>) {
+        // Colon syntax belongs to SGR; it must not flatten into cursor or mode parameters.
+        if csi.subparams.iter().any(|sub| *sub) && (csi.final_byte != b'm' || csi.private.is_some())
+        {
+            return;
+        }
         if self.keyboard_csi(&csi, replies) || self.protocol_csi(&csi, replies) {
             return;
         }
@@ -1023,8 +1038,14 @@ impl Terminal {
                     let width = UnicodeWidthStr::width(combined.as_str());
                     if width == 2 && cell.flags().contains(CellFlags::WIDE_LEADING) {
                         let link = self.active_grid().hyperlink(row, column);
+                        let underline = self
+                            .active_grid()
+                            .row_at(row)
+                            .and_then(|row| row.underline_color_at(column));
                         self.active_grid_mut()
                             .set_wide_grapheme(row, column, &combined, cell);
+                        self.active_grid_mut()
+                            .set_underline_color(row, column, underline);
                         if let Some(link) = link {
                             self.active_grid_mut()
                                 .set_hyperlink(row, column, Some(link));
@@ -1033,8 +1054,14 @@ impl Terminal {
                     }
                     if width == 2 && column + 1 < self.active_grid().width() {
                         let link = self.active_grid().hyperlink(row, column);
+                        let underline = self
+                            .active_grid()
+                            .row_at(row)
+                            .and_then(|row| row.underline_color_at(column));
                         self.active_grid_mut()
                             .set_wide_grapheme(row, column, &combined, cell);
+                        self.active_grid_mut()
+                            .set_underline_color(row, column, underline);
                         if let Some(link) = link {
                             self.active_grid_mut()
                                 .set_hyperlink(row, column, Some(link));
@@ -1046,9 +1073,15 @@ impl Terminal {
                     }
                     if width <= 1 && !cell.flags().contains(CellFlags::WIDE_LEADING) {
                         let link = self.active_grid().hyperlink(row, column);
+                        let underline = self
+                            .active_grid()
+                            .row_at(row)
+                            .and_then(|row| row.underline_color_at(column));
                         cell.content = combined.chars().next().expect("nonempty grapheme") as u32;
                         self.active_grid_mut()
                             .set_grapheme(row, column, &combined, cell);
+                        self.active_grid_mut()
+                            .set_underline_color(row, column, underline);
                         if let Some(link) = link {
                             self.active_grid_mut()
                                 .set_hyperlink(row, column, Some(link));
@@ -1120,6 +1153,12 @@ impl Terminal {
             self.active_grid_mut()
                 .set_hyperlink(cursor.row, cursor.column, Some(id));
         }
+        let underline = self.rendition.underline_color;
+        self.active_grid_mut().set_underline_color(
+            cursor.row,
+            cursor.column,
+            (underline != DEFAULT_COLOR).then_some(underline),
+        );
         self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
         // Even with delayed wrap the cursor names the last occupied column,
         // not the leading half. DSR, backspace and relative moves use it.
@@ -1158,6 +1197,12 @@ impl Terminal {
             self.active_grid_mut()
                 .set_hyperlink(cursor.row, cursor.column, Some(id));
         }
+        let underline = self.rendition.underline_color;
+        self.active_grid_mut().set_underline_color(
+            cursor.row,
+            cursor.column,
+            (underline != DEFAULT_COLOR).then_some(underline),
+        );
         self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
         if cursor.column + 1 >= self.active_grid().width() {
             if self.modes.auto_wrap {
@@ -1418,65 +1463,6 @@ impl Terminal {
         self.modes.keyboard_flags = *self.keyboard_stacks[screen]
             .last()
             .expect("keyboard stack base");
-    }
-
-    fn sgr(&mut self, csi: &crate::Csi) {
-        if csi.param_count == 0 {
-            self.rendition = Rendition::default();
-            return;
-        }
-        let mut index = 0;
-        while index < csi.param_count as usize {
-            let code = csi.param(index, 0);
-            index += 1;
-            match code {
-                0 => self.rendition = Rendition::default(),
-                1 => self.rendition.flags |= CellFlags::BOLD.bits(),
-                3 => self.rendition.flags |= CellFlags::ITALIC.bits(),
-                4 => self.rendition.flags |= CellFlags::UNDERLINE.bits(),
-                7 => self.rendition.flags |= CellFlags::INVERSE.bits(),
-                9 => self.rendition.flags |= CellFlags::STRIKETHROUGH.bits(),
-                22 => self.rendition.flags &= !CellFlags::BOLD.bits(),
-                23 => self.rendition.flags &= !CellFlags::ITALIC.bits(),
-                24 => self.rendition.flags &= !CellFlags::UNDERLINE.bits(),
-                27 => self.rendition.flags &= !CellFlags::INVERSE.bits(),
-                29 => self.rendition.flags &= !CellFlags::STRIKETHROUGH.bits(),
-                30..=37 => self.rendition.fg = indexed_color((code - 30) as u8),
-                40..=47 => self.rendition.bg = indexed_color((code - 40) as u8),
-                90..=97 => self.rendition.fg = indexed_color((code - 90 + 8) as u8),
-                100..=107 => self.rendition.bg = indexed_color((code - 100 + 8) as u8),
-                39 => self.rendition.fg = DEFAULT_COLOR,
-                49 => self.rendition.bg = DEFAULT_COLOR,
-                38 | 48 => {
-                    let is_foreground = code == 38;
-                    let color = match csi.param(index, u16::MAX) {
-                        5 if index + 1 < csi.param_count as usize => {
-                            index += 2;
-                            Some(indexed_color(csi.param(index - 1, 0).min(255) as u8))
-                        }
-                        2 if index + 3 < csi.param_count as usize => {
-                            let r = csi.param(index + 1, 0).min(255) as u32;
-                            let g = csi.param(index + 2, 0).min(255) as u32;
-                            let b = csi.param(index + 3, 0).min(255) as u32;
-                            index += 4;
-                            Some(RGB_COLOR_TAG | (r << 16) | (g << 8) | b)
-                        }
-                        _ => {
-                            index = csi.param_count as usize;
-                            None
-                        }
-                    };
-                    if let Some(color) = color {
-                        if is_foreground {
-                            self.rendition.fg = color;
-                        } else {
-                            self.rendition.bg = color;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     fn save_cursor(&self) -> SavedCursor {

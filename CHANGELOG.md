@@ -23,6 +23,14 @@ per commit.
 
 ### Fixed
 
+- Font family discovery includes XDG and legacy user font directories before
+  system directories, so configured user-installed faces are actually found.
+
+- Faint and hidden text, styled underlines (single, double, curly, dotted and
+  dashed), underline colors and colon-form SGR colors render consistently.
+  Sparse underline metadata follows graphemes, wide pairs, shifts and reflow
+  without allocating full-width tables for ordinary text.
+
 - Configured cursor colors now reach every cursor shape. Focus loss shows a
   steady hollow cursor; focus and typing restart the configured blink interval.
 

@@ -9,6 +9,7 @@ layout(location = 2) flat in uint visible;
 layout(location = 3) flat in uint color_flag;
 layout(location = 4) flat in vec4 cell_bounds;
 layout(location = 5) flat in uint graphic;
+layout(location = 6) flat in float dim_factor;
 layout(location = 0) out vec4 color;
 vec4 unpack_color(uint c) { return vec4(float(c & 255u), float((c >> 8) & 255u), float((c >> 16) & 255u), 255.0) / 255.0; }
 void main() {
@@ -20,7 +21,7 @@ void main() {
         color = vec4(unpack_color(fg).rgb, alpha);
     } else if (color_flag != 0u) {
         vec4 texel = texture(color_atlas, uv);
-        color = vec4(texel.rgb, texel.a);
+        color = vec4(texel.rgb * dim_factor, texel.a);
     } else {
         float alpha = texture(atlas, uv).r;
         color = vec4(unpack_color(fg).rgb, alpha);

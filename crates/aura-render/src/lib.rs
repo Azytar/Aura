@@ -32,6 +32,7 @@ fn graphic_cell(cell: Cell, grapheme: Option<&str>, palette: &Palette) -> Option
         fg: color(palette, cell.fg, true),
         bg: color(palette, cell.bg, false),
         flags: cell.flags,
+        underline_color: u32::MAX,
     })
 }
 
@@ -42,6 +43,7 @@ pub struct GpuCell {
     pub fg: u32,
     pub bg: u32,
     pub flags: u32,
+    pub underline_color: u32,
 }
 
 #[repr(C)]
@@ -479,6 +481,7 @@ impl OffscreenRenderer {
                                 fg: color(&self.palette, cell.fg, true),
                                 bg: color(&self.palette, cell.bg, false),
                                 flags: cell.flags,
+                                underline_color: u32::MAX,
                             };
                             continue;
                         }
@@ -545,6 +548,7 @@ impl OffscreenRenderer {
                             fg: color(&self.palette, cell.fg, true),
                             bg: color(&self.palette, cell.bg, false),
                             flags: cell.flags,
+                            underline_color: u32::MAX,
                         };
                     }
                 }
@@ -562,6 +566,13 @@ impl OffscreenRenderer {
             }
         }
 
+        for row in 0..rows {
+            for column in 0..cols {
+                cells[row * cols + column].underline_color = terminal
+                    .viewport_underline_color(row, column)
+                    .map_or(u32::MAX, |value| color(&self.palette, value, true));
+            }
+        }
         let frame = &mut self.frames[0];
         unsafe { self.device.wait_for_fences(&[frame.fence], true, u64::MAX) }
             .map_err(vk_error("wait for offscreen frame"))?;
@@ -1302,6 +1313,7 @@ impl Renderer {
                         fg: 0x00d8d8d8,
                         bg: 0x00181818,
                         flags: 0,
+                        underline_color: u32::MAX,
                     },
                 );
                 if let Some(upload) = font.glyph('\u{fffd}', false, false)?.2 {
@@ -1329,6 +1341,9 @@ impl Renderer {
                             font,
                             replacement,
                         )?;
+                        self.gpu_cells[row * width + column].underline_color = terminal
+                            .viewport_underline_color(row, column)
+                            .map_or(u32::MAX, |value| color(&self.palette, value, true));
                     }
                 }
                 Ok(())
@@ -1360,6 +1375,7 @@ impl Renderer {
                 fg: color(&self.palette, cell.fg, true),
                 bg: color(&self.palette, cell.bg, false),
                 flags: cell.flags,
+                underline_color: u32::MAX,
             });
         }
         if let Some(graphic) = graphic_cell(cell, grapheme, &self.palette) {
@@ -1414,6 +1430,7 @@ impl Renderer {
             fg: color(&self.palette, cell.fg, true),
             bg: color(&self.palette, cell.bg, false),
             flags: cell.flags,
+            underline_color: u32::MAX,
         })
     }
 
@@ -2770,12 +2787,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gpu_cell_matches_four_word_storage_layout() {
-        assert_eq!(size_of::<GpuCell>(), 16);
+    fn gpu_cell_matches_five_word_storage_layout() {
+        assert_eq!(size_of::<GpuCell>(), 20);
         assert_eq!(std::mem::offset_of!(GpuCell, glyph), 0);
         assert_eq!(std::mem::offset_of!(GpuCell, fg), 4);
         assert_eq!(std::mem::offset_of!(GpuCell, bg), 8);
         assert_eq!(std::mem::offset_of!(GpuCell, flags), 12);
+        assert_eq!(std::mem::offset_of!(GpuCell, underline_color), 16);
         assert_eq!(size_of::<GpuGlyph>(), 48);
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);

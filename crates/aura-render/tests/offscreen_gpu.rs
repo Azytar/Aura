@@ -1066,3 +1066,67 @@ fn configured_cursor_color_and_focus_have_independent_pixel_shapes() {
         }
     }
 }
+
+#[test]
+fn styled_colored_underlines_faint_and_hidden_have_pixel_oracles() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
+    let mut font = Font::load(None, 18.0).unwrap();
+    let metrics = font.metrics();
+    let (cw, ch) = (metrics.width, metrics.height);
+    let mut terminal = Terminal::new(7, 1).unwrap();
+    for style in 1..=5 {
+        terminal.process(format!("\x1b[4:{style};58;2;18;171;52m ").as_bytes());
+    }
+    terminal.process("\x1b[0;2;38;2;200;100;50m█\x1b[8;4m█".as_bytes());
+    let width = cw * 7;
+    let mut renderer = OffscreenRenderer::new(width, ch).unwrap();
+    let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+    let pixel = |column: u32, x: u32, y: u32| {
+        let at = ((y * width + column * cw + x) * 4) as usize;
+        &pixels[at..at + 4]
+    };
+    let ink = [18, 171, 52, 255];
+    let blank = [24, 24, 24, 255];
+    let thick = (ch >> 4).max(1);
+    for y in 0..ch {
+        for x in 0..cw {
+            assert_eq!(pixel(0, x, y), if y >= ch - thick { &ink } else { &blank });
+            let double = y >= ch - thick || (y >= ch - 3 * thick && y < ch - 2 * thick);
+            assert_eq!(pixel(1, x, y), if double { &ink } else { &blank });
+            if y >= ch - thick {
+                assert_eq!(
+                    pixel(3, x, y),
+                    if x % (2 * thick) < thick {
+                        &ink
+                    } else {
+                        &blank
+                    }
+                );
+                assert_eq!(
+                    pixel(4, x, y),
+                    if x % (6 * thick) < 4 * thick {
+                        &ink
+                    } else {
+                        &blank
+                    }
+                );
+            }
+            assert_eq!(pixel(5, x, y), &[100, 50, 25, 255], "faint cell geometry");
+            assert_eq!(pixel(6, x, y), &blank, "hidden glyph and decorations");
+        }
+    }
+    let heights: Vec<_> = (0..cw)
+        .map(|x| (0..ch).find(|&y| pixel(2, x, y) == ink))
+        .collect();
+    assert!(
+        heights.iter().all(Option::is_some),
+        "curl has ink in every column"
+    );
+    assert!(
+        heights.windows(2).any(|pair| pair[0] != pair[1]),
+        "curl changes height"
+    );
+}
