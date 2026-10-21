@@ -23,6 +23,11 @@ per commit.
 
 ### Fixed
 
+- Negotiated Kitty keyboard flags and modifyOtherKeys distinguish modified
+  Enter and other shortcuts while preserving legacy text and Shift-only
+  punctuation. Keyboard stacks are bounded and isolated per screen; repeat
+  and release reports do not leak locally consumed shortcuts.
+
 - Synchronized output batches (2026) defer presentation with a bounded host
   recovery timeout. Color, geometry, mode and terminal queries receive ordered
   replies; unknown modes and termcap names report unsupported capabilities.

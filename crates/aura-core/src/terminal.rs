@@ -1,3 +1,4 @@
+mod keyboard;
 mod protocol;
 pub use protocol::HostProperties;
 
@@ -72,6 +73,8 @@ pub struct Modes {
     pub mouse_pixel: bool,
     pub focus_reporting: bool,
     pub synchronized_output: bool,
+    pub keyboard_flags: u8,
+    pub modify_other_keys: u8,
     pub bracketed_paste: bool,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
@@ -90,6 +93,8 @@ impl Default for Modes {
             mouse_pixel: false,
             focus_reporting: false,
             synchronized_output: false,
+            keyboard_flags: 0,
+            modify_other_keys: 0,
             bracketed_paste: false,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
@@ -126,6 +131,7 @@ struct SavedCursor {
 #[cfg_attr(test, derive(Clone, Debug, PartialEq, Eq))]
 pub struct Terminal {
     host_properties: Option<HostProperties>,
+    keyboard_stacks: [Vec<u8>; 2],
     grid: TerminalGrid,
     parser: Parser,
     modes: Modes,
@@ -161,6 +167,7 @@ impl Terminal {
     pub fn new(width: usize, height: usize) -> Result<Self, GridError> {
         Ok(Self {
             host_properties: None,
+            keyboard_stacks: [vec![0], vec![0]],
             grid: TerminalGrid::new(width, height)?,
             parser: Parser::new(),
             modes: Modes::default(),
@@ -814,7 +821,7 @@ impl Terminal {
     }
 
     fn csi(&mut self, csi: crate::Csi, replies: &mut Vec<u8>) {
-        if self.protocol_csi(&csi, replies) {
+        if self.keyboard_csi(&csi, replies) || self.protocol_csi(&csi, replies) {
             return;
         }
         if csi.intermediate_len != 0 {
@@ -1407,6 +1414,10 @@ impl Terminal {
                 self.alternate_1049_active = false;
             }
         }
+        let screen = usize::from(self.is_alternate_screen());
+        self.modes.keyboard_flags = *self.keyboard_stacks[screen]
+            .last()
+            .expect("keyboard stack base");
     }
 
     fn sgr(&mut self, csi: &crate::Csi) {
@@ -1579,6 +1590,7 @@ impl Terminal {
             .screen_mut(ActiveScreen::Alternate)
             .set_cursor(0, 0);
         self.modes = Modes::default();
+        self.keyboard_stacks = [vec![0], vec![0]];
         self.mouse_press_enabled = false;
         self.mouse_drag_enabled = false;
         self.mouse_motion_enabled = false;

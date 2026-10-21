@@ -31,6 +31,16 @@ impl Keyboard {
         ) {
             return Err(io::Error::other("X11 server does not support XKB").into());
         }
+        xkb::per_client_flags(
+            connection,
+            x11::get_core_keyboard_device_id(connection) as u16,
+            xkb::PerClientFlag::DETECTABLE_AUTO_REPEAT,
+            xkb::PerClientFlag::DETECTABLE_AUTO_REPEAT,
+            xkb::BoolCtrl::default(),
+            xkb::BoolCtrl::default(),
+            xkb::BoolCtrl::default(),
+        )?
+        .reply()?;
         let context = keymap::Context::new(keymap::CONTEXT_NO_FLAGS);
         if context.get_raw_ptr().is_null() {
             return Err(io::Error::other("cannot create XKB context").into());
@@ -132,6 +142,43 @@ impl Keyboard {
         // not turn its printable character into an application shortcut.
         let shortcuts = u16::from(KeyButMask::CONTROL | KeyButMask::MOD1);
         (sym, KeyButMask::from(mask & !(consumed & shortcuts)))
+    }
+
+    pub fn bytes_event(
+        &mut self,
+        sym: u32,
+        modifiers: KeyButMask,
+        modes: aura_core::Modes,
+        kind: u8,
+        detail: u8,
+    ) -> Option<Vec<u8>> {
+        let legacy = if kind == 3 {
+            None
+        } else {
+            self.bytes(sym, modifiers, modes)
+        };
+        let code = keymap::Keycode::new(u32::from(detail));
+        let map = self.state.get_keymap();
+        let base = map
+            .key_get_syms_by_level(code, self.state.key_get_layout(code), 0)
+            .first()
+            .map_or(sym, |sym| sym.raw());
+        let event = crate::enhanced_keys::KeyEvent {
+            sym,
+            base_sym: base,
+            state: modifiers,
+            kind,
+            legacy: legacy.as_deref(),
+        };
+        if modes.keyboard_flags != 0 {
+            crate::enhanced_keys::encode(event, modes.keyboard_flags)
+        } else if kind == 3 {
+            None
+        } else if modes.modify_other_keys != 0 {
+            crate::enhanced_keys::modify_other(&event, modes.modify_other_keys).or(legacy)
+        } else {
+            legacy
+        }
     }
 
     pub fn bytes(

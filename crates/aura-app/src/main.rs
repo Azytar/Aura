@@ -1,3 +1,4 @@
+mod enhanced_keys;
 mod input;
 mod keyboard;
 mod mouse;
@@ -124,6 +125,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 EventMask::EXPOSURE
                     | EventMask::STRUCTURE_NOTIFY
                     | EventMask::KEY_PRESS
+                    | EventMask::KEY_RELEASE
                     | EventMask::BUTTON_PRESS
                     | EventMask::BUTTON_RELEASE
                     | EventMask::POINTER_MOTION
@@ -238,6 +240,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut autoscroll_dir: Option<i8> = None;
     let mut pointer = (0i16, 0i16);
     let mut last_click: Option<(u32, u8, SelectionPoint, u8)> = None;
+    let mut pressed_keys = std::collections::HashMap::<u8, (u32, KeyButMask, bool)>::new();
     let mut last_mouse_report: Option<Vec<u8>> = None;
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
@@ -315,13 +318,51 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Event::FocusOut(event)
                                 if event.mode == x11rb::protocol::xproto::NotifyMode::NORMAL =>
                             {
+                                pressed_keys.clear();
                                 if let Some(bytes) = terminal.focus_report(false) {
                                     input.push(bytes);
                                 }
                             }
+                            Event::KeyRelease(key) => {
+                                let (sym, mut modifiers) = keyboard.key(&key);
+                                let forwarded = pressed_keys
+                                    .remove(&key.detail)
+                                    .is_some_and(|(_, _, forwarded)| forwarded);
+                                if let Some(mask) = enhanced_keys::modifier_mask(sym)
+                                    && !pressed_keys.values().any(|(sym, _, _)| {
+                                        enhanced_keys::modifier_mask(*sym) == Some(mask)
+                                    })
+                                {
+                                    modifiers =
+                                        KeyButMask::from(u16::from(modifiers) & !u16::from(mask));
+                                }
+                                if !forwarded {
+                                    continue;
+                                }
+                                if let Some(bytes) = keyboard.bytes_event(
+                                    sym,
+                                    modifiers,
+                                    terminal.modes(),
+                                    3,
+                                    key.detail,
+                                ) {
+                                    input.push(&bytes);
+                                }
+                            }
                             Event::KeyPress(key) => {
                                 pointer_hidden = true;
-                                let (sym, modifiers) = keyboard.key(&key);
+                                let (sym, mut modifiers) = keyboard.key(&key);
+                                if let Some(mask) = enhanced_keys::modifier_mask(sym) {
+                                    modifiers |= mask;
+                                }
+                                let key_kind = if pressed_keys
+                                    .insert(key.detail, (sym, modifiers, false))
+                                    .is_some()
+                                {
+                                    2
+                                } else {
+                                    1
+                                };
                                 if let Some(action) = font_size_action(sym, modifiers) {
                                     let changed = match action {
                                         FontSizeAction::Grow => font_sizes.grow(),
@@ -404,9 +445,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     invalidated = true;
                                     continue;
                                 }
-                                if let Some(bytes) =
-                                    keyboard.bytes(sym, modifiers, terminal.modes())
-                                {
+                                if let Some(bytes) = keyboard.bytes_event(
+                                    sym,
+                                    modifiers,
+                                    terminal.modes(),
+                                    key_kind,
+                                    key.detail,
+                                ) {
                                     // Typing belongs to the application now; a
                                     // lingering highlight would confuse it with
                                     // fresh output, and the echo must be visible
@@ -414,6 +459,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     terminal.clear_selection();
                                     terminal.jump_to_bottom();
                                     input.push(&bytes);
+                                    if let Some(entry) = pressed_keys.get_mut(&key.detail) {
+                                        entry.2 = true;
+                                    }
                                     cursor_blink_on = true;
                                     invalidated = true;
                                 }

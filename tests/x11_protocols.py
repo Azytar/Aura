@@ -150,6 +150,16 @@ def main():
             fixture.emit(b"\x1b[?2026$p", "SYNC_QUERY")
             wait_for(lambda: b"\x1b[?2026;2$y" in fixture.data(), "expired synchronized mode remained active")
             print("PASS host color/size/mode/termcap replies and stalled synchronized-output recovery")
+            fixture.emit(b"\x1b[>31u\x1b[?u", "KEYBOARD")
+            wait_for(lambda: b"\x1b[?31u" in fixture.data(), "keyboard negotiation failed")
+            start = len(fixture.data())
+            run("xdotool", "key", "shift+Return", "ctrl+Return", "a")
+            wait_for(lambda: all(code in fixture.data()[start:] for code in [b"\x1b[13;2u", b"\x1b[13;5u", b"\x1b[97;1;97u", b"\x1b[97;1:3u"]), "modified Enter or key release encoding differs")
+            fixture.emit(b"\x1b[<u", "LEGACY")
+            start = len(fixture.data())
+            run("xdotool", "key", "a", "Return")
+            wait_for(lambda: fixture.data()[start:] == b"a\r", "legacy keyboard was not restored")
+            print("PASS negotiated keyboard flags, modified Enter, associated text, releases and legacy restore")
         finally:
             fixture.close()
     return 0
