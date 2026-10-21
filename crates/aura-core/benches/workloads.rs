@@ -23,16 +23,24 @@ fn main() {
     });
 
     let cursor = b"\x1b[12;40H".repeat(1_000);
-    measure("CSI cursor movement (9 KiB)", 200, || {
-        let mut terminal = Terminal::new(120, 40).expect("fixed dimensions are valid");
-        black_box(terminal.process(black_box(&cursor)));
-    });
+    measure(
+        &format!("CSI cursor movement ({} bytes)", cursor.len()),
+        200,
+        || {
+            let mut terminal = Terminal::new(120, 40).expect("fixed dimensions are valid");
+            black_box(terminal.process(black_box(&cursor)));
+        },
+    );
 
     let utf8 = "界e\u{301}".repeat(1024).into_bytes();
-    measure("UTF-8 terminal (4 KiB)", 500, || {
-        let mut terminal = Terminal::new(80, 25).expect("fixed dimensions are valid");
-        black_box(terminal.process(black_box(&utf8)));
-    });
+    measure(
+        &format!("UTF-8 terminal ({} bytes)", utf8.len()),
+        500,
+        || {
+            let mut terminal = Terminal::new(80, 25).expect("fixed dimensions are valid");
+            black_box(terminal.process(black_box(&utf8)));
+        },
+    );
 
     let sgr = b"\x1b[38;2;12;34;56mhello\x1b[0m".repeat(128);
     measure("SGR terminal (3 KiB)", 500, || {
@@ -41,10 +49,14 @@ fn main() {
     });
 
     let large_output = vec![b'x'; 250_000];
-    measure("terminal output (250 KiB)", 4, || {
-        let mut terminal = Terminal::new(120, 40).expect("fixed dimensions are valid");
-        black_box(terminal.process(black_box(&large_output)));
-    });
+    measure(
+        &format!("terminal output ({} bytes)", large_output.len()),
+        4,
+        || {
+            let mut terminal = Terminal::new(120, 40).expect("fixed dimensions are valid");
+            black_box(terminal.process(black_box(&large_output)));
+        },
+    );
 
     // Match the native harness's line-oriented traffic without PTY or GPU
     // work. Populate history before timing so steady-state row reuse is

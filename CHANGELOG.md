@@ -30,6 +30,11 @@ per commit.
 
 ### Fixed
 
+- Benchmark startup distinguishes PTY readiness from an observed pixel witness
+  and begins idle sampling after that witness. Resource scopes and exact core
+  payload sizes are explicit; warm font-cache timings retain nanosecond precision
+  and opaque inputs to prevent optimized-away lookups.
+
 - Output bursts coalesce repaints while X11 and PTY input remain active.
   `window.max_fps` controls the render-call ceiling (default 120) and supports
   live reload; synchronized-output waits suspend frame wakeups.

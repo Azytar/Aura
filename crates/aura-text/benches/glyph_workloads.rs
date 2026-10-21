@@ -9,8 +9,8 @@ fn measure(name: &str, iterations: usize, mut operation: impl FnMut()) {
         operation();
     }
     println!(
-        "{name}: {:.1} us/iteration",
-        start.elapsed().as_secs_f64() * 1_000_000.0 / iterations as f64
+        "{name}: {:.1} ns/iteration",
+        start.elapsed().as_secs_f64() * 1_000_000_000.0 / iterations as f64
     );
 }
 
@@ -33,8 +33,8 @@ fn main() {
         .expect("shape cache seed");
     measure("shaped grapheme cache hit", 20_000, || {
         black_box(
-            shaped_cache
-                .glyph_text("e\u{301}", false, false)
+            black_box(&mut shaped_cache)
+                .glyph_text(black_box("e\u{301}"), black_box(false), black_box(false))
                 .expect("cached shaped glyph"),
         );
     });

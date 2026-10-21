@@ -312,6 +312,21 @@ def trial(
             result["cell_pixels"] = [cw, ch]
             result["window_pixels"] = [width, height]
             x11.focus(window)
+            # PTY readiness can precede the first rendered content. Measure
+            # an explicit witness too, and let startup drawing finish before
+            # the idle CPU interval begins.
+            initial_rgb = [41, 83, 167]
+            channel.request("paint", rgb=initial_rgb)
+            observed = wait_pixel(
+                x11,
+                window,
+                [width - max(1, cw // 2), height - max(1, ch // 2)],
+                initial_rgb,
+                resources,
+                settings["timeout"],
+            )
+            result["metrics"]["startup_observed_pixel_ms"] = [(observed - start) / 1e6]
+            result["checks"]["startup_witness"] = True
             # Every trial starts with the same controlled idle period and no cursor blink.
             phase = resources.begin()
             until = time.monotonic() + settings["idle_seconds"]

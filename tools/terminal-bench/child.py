@@ -174,6 +174,11 @@ def serve(path, title):
                     geometry = size()
                     witness(request["rgb"], geometry["columns"], geometry["rows"])
                 send(dict(op=op, received_ns=received))
+            elif op == "paint":
+                geometry = size()
+                witness(request["rgb"], geometry["columns"], geometry["rows"])
+                barrier()
+                send(dict(op=op))
             elif op == "size":
                 deadline = time.monotonic() + request.get("timeout", 10)
                 while time.monotonic() < deadline:

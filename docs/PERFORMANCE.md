@@ -26,6 +26,14 @@ Payload construction is also outside the timer. Each iteration asserts that
 the configured history length remains retained. These cases isolate processing
 and recycling from PTY backpressure, font rasterization and GPU work.
 
+Current core output labels report the exact byte counts for CSI, UTF-8 and
+large-output fixtures; older approximate labels remain in the historical tables.
+Font workloads report nanoseconds per iteration so warm cache lookups do not
+round to zero at the former microsecond precision. Repeated-cluster cache hits
+remain a warm-cache case, distinct from mixed/contextual shaping and native input.
+That loop hides its receiver and inputs from the optimizer so an inline lookup
+cannot collapse into repeated copies of one constant result.
+
 The original table below records an earlier run of the benchmark binaries.
 The resize follow-up at the end records a separate environment and comparison:
 

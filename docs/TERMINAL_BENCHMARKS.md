@@ -76,13 +76,14 @@ are labeled separately in the dashboard, regardless of this declaration.
 | Metric | Clock boundary | Meaning |
 | --- | --- | --- |
 | Startup | process launch → raw helper handshake after cursor queries | PTY readiness, including the common Python helper; first visible frame is not measured |
+| Startup witness | process launch → explicit solid-color witness observed in X11 | upper bound including geometry normalization, control transport and capture; not first glyph or physical scanout |
 | ASCII / Unicode / SGR / TUI output | first workload write → ordered DSR reply received by helper | bytes/s through PTY and terminal processing; not presented frames/s |
 | Key delivery | XTest request → helper receives exactly `a` | host event delivery and PTY scheduling, including helper scheduling |
 | Key delivery under output | same boundary while a separate synthetic child continuously writes | responsiveness with a saturated, backpressured PTY; no pixel timing in this case |
 | Key to observed pixel | XTest request → new witness color read from the X11 drawable | upper bound to drawable update, including control transport, capture and 1 ms polling |
 | Resize | XResizeWindow request → helper observes target PTY columns/rows | reflow, event handling and geometry notification; no presentation timestamp |
 | CPU | differences in observed process-tree CPU counters | terminal tree after readiness, excluding helper descendants and the X server |
-| RSS | sum of live tree resident pages, sampled every 10 ms | sampled process RSS, with shared pages counted per process; not PSS, VRAM or a guaranteed instantaneous peak |
+| RSS | sum of live tree resident pages after PTY readiness, sampled every 10 ms | shared pages counted per process; not PSS, VRAM, a whole-lifetime high-water mark or a guaranteed instantaneous peak |
 
 Input-to-observed-pixel is a closed-loop test: one key and its witness complete
 before the next sample. XGetImage can observe a drawable before the compositor
@@ -97,6 +98,15 @@ process consumes no CPU. The recorder samples the tree while waiting for control
 messages; its own CPU and synthetic writer CPU are outside the terminal scope.
 X server/compositor CPU, GPU energy and VRAM are not measured. These scoped
 figures do not establish total system efficiency.
+
+The idle interval begins after the startup witness has been observed, so an
+early PTY handshake alone cannot move initial drawing into the idle sample.
+Older runs without `startup_observed_pixel_ms` used readiness as the idle
+boundary; do not mix their idle samples with runs using this boundary. Missing
+startup-witness measurements in old runs remain missing, never zero.
+The RSS peak starts at PTY readiness, after the helper PID becomes known and
+can be excluded. A startup change can move allocations across that boundary;
+use a separate whole-process resource probe for lifetime peak comparisons.
 
 ## Workloads and correctness boundaries
 

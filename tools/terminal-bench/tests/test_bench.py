@@ -120,6 +120,19 @@ class Configuration(Temporary):
 
 
 class Protocol(Temporary):
+    def test_pixel_wait_requires_the_presented_witness_and_times_out(self):
+        x11, resources = Mock(), Mock()
+        x11.pixel.side_effect = [[0, 0, 0], [41, 83, 167]]
+        self.assertGreater(
+            runner.wait_pixel(x11, 1, [4, 5], [41, 83, 167], resources, 1), 0
+        )
+        resources.sample.assert_called_once()
+        x11.pixel.side_effect = None
+        x11.pixel.return_value = [0, 0, 0]
+        with patch.object(runner.time, "monotonic", side_effect=[0, 0, 2]):
+            with self.assertRaisesRegex(TimeoutError, "witness"):
+                runner.wait_pixel(x11, 1, [4, 5], [41, 83, 167], resources, 1)
+
     def test_payloads_are_deterministic_complete_utf8_and_cover_budget(self):
         for kind in ["ascii", "unicode", "sgr", "tui"]:
             data = child.payload(kind, 4096, 80, 24)
@@ -264,6 +277,27 @@ class Sampling(unittest.TestCase):
 
 
 class Reports(Temporary):
+    def test_startup_witness_is_independent_and_old_runs_keep_missing_data(self):
+        manifest = self.manifest()
+        rows = report.aggregate(manifest)
+        old = [row for row in rows if row["metric"] == "startup_observed_pixel_ms"]
+        self.assertTrue(all(row["p50"] is None and row["n"] == 0 for row in old))
+        manifest["trials"][1]["metrics"]["startup_observed_pixel_ms"] = [17]
+        rows = report.aggregate(manifest)
+        witness = next(
+            row
+            for row in rows
+            if row["metric"] == "startup_observed_pixel_ms"
+            and row["terminal"] == "aura"
+        )
+        self.assertEqual(witness["p50"], 17)
+        ready = next(
+            row
+            for row in rows
+            if row["metric"] == "startup_ready_ms" and row["terminal"] == "aura"
+        )
+        self.assertEqual(ready["p50"], 2)
+
     def manifest(self):
         measured = dict(
             terminal="aura",

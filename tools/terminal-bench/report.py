@@ -9,6 +9,11 @@ from common import outside_checkout, summarize
 
 METRICS = {
     "startup_ready_ms": ("Inicio hasta PTY preparado", "ms", False),
+    "startup_observed_pixel_ms": (
+        "Inicio → testigo observado en X11 (cota)",
+        "ms",
+        False,
+    ),
     "ascii_mib_s": ("ASCII procesado", "MiB/s", True),
     "unicode_mib_s": ("Unicode procesado", "MiB/s", True),
     "sgr_mib_s": ("Texto con SGR procesado", "MiB/s", True),
@@ -20,7 +25,7 @@ METRICS = {
     "idle_cpu_percent": ("CPU en reposo", "% de un núcleo", False),
     "idle_rss_mib": ("RSS muestreado en reposo", "MiB", False),
     "load_cpu_seconds": ("CPU de las fases de carga", "s de CPU", False),
-    "sampled_peak_rss_mib": ("Pico RSS muestreado de la sesión", "MiB", False),
+    "sampled_peak_rss_mib": ("Pico RSS muestreado tras preparar el PTY", "MiB", False),
 }
 COLORS = {
     "aura": "#3b82f6",
