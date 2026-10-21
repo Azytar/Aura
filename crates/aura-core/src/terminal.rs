@@ -1154,11 +1154,10 @@ impl Terminal {
                 .set_hyperlink(cursor.row, cursor.column, Some(id));
         }
         let underline = self.rendition.underline_color;
-        self.active_grid_mut().set_underline_color(
-            cursor.row,
-            cursor.column,
-            (underline != DEFAULT_COLOR).then_some(underline),
-        );
+        if underline != DEFAULT_COLOR {
+            self.active_grid_mut()
+                .set_underline_color(cursor.row, cursor.column, Some(underline));
+        }
         self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
         // Even with delayed wrap the cursor names the last occupied column,
         // not the leading half. DSR, backspace and relative moves use it.
@@ -1198,11 +1197,10 @@ impl Terminal {
                 .set_hyperlink(cursor.row, cursor.column, Some(id));
         }
         let underline = self.rendition.underline_color;
-        self.active_grid_mut().set_underline_color(
-            cursor.row,
-            cursor.column,
-            (underline != DEFAULT_COLOR).then_some(underline),
-        );
+        if underline != DEFAULT_COLOR {
+            self.active_grid_mut()
+                .set_underline_color(cursor.row, cursor.column, Some(underline));
+        }
         self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
         if cursor.column + 1 >= self.active_grid().width() {
             if self.modes.auto_wrap {

@@ -107,6 +107,9 @@ impl<T> Sidecar<T> {
         self.0.get(column).and_then(Option::as_ref)
     }
     fn set(&mut self, column: usize, value: Option<T>) {
+        if value.is_none() && column >= self.0.len() {
+            return;
+        }
         if value.is_some() && column >= self.0.len() {
             self.0.resize_with(column + 1, || None);
         }
@@ -479,12 +482,13 @@ impl Grid {
         self.row(row)?.graphemes.get(column).map(String::as_str)
     }
 
+    /// Applies to a printed cell and both halves of a wide character.
     pub fn set_underline_color(&mut self, row: usize, column: usize, color: Option<u32>) -> bool {
         if row >= self.height || column >= self.width {
             return false;
         }
         let target = self.row_mut(row).expect("validated row");
-        if color.is_some() && target.cells[column].content == 0 {
+        if target.cells[column].content == 0 {
             return false;
         }
         target.underline_colors.set(column, color);
@@ -1592,6 +1596,13 @@ mod tests {
         grid.set_underline_color(0, 7, Some(0x02010203));
         grid.resize_fixed(7, 2).unwrap();
         assert_eq!(grid.rows[0].underline_colors.0.capacity(), 0);
+        grid.set_wide_cell(0, 2, Cell::new('界' as u32, 0, 0, CellFlags::UNDERLINE));
+        assert!(grid.set_underline_color(0, 2, Some(0x02010203)));
+        assert!(!grid.set_underline_color(0, 3, None));
+        assert_eq!(
+            grid.rows[0].underline_color_at(2),
+            grid.rows[0].underline_color_at(3)
+        );
     }
 
     #[test]
