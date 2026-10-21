@@ -12,8 +12,8 @@ sync_timeout_ms = 150            # 1..2000; recover an unfinished TUI update bat
 [font]
 family = "monospace"             # family name or explicit font file
 size = 14.0                      # 6..72 pixels; Ctrl+Plus/Minus zoom, Ctrl+0 resets
-letter_spacing = 0               # -16..16; changes cell width
-line_spacing = 0                 # -32..32; changes cell height
+letter_spacing = 0               # 0..16; changes cell width
+line_spacing = 0                 # 0..32; changes cell height
 offset_x = 0                     # -32..32; glyph offset only
 offset_y = 0                     # -32..32; glyph offset only
 # [font.bold]
