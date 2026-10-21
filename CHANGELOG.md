@@ -23,6 +23,11 @@ per commit.
 
 ### Fixed
 
+- Configuration now supports validated imports, atomic live reload, custom
+  bindings, shell arguments and child environment. Cursor timing, pointer
+  policy and window identity have effective settings; standalone validation
+  and a complete editable example expose errors before opening a window.
+
 - Negotiated Kitty keyboard flags and modifyOtherKeys distinguish modified
   Enter and other shortcuts while preserving legacy text and Shift-only
   punctuation. Keyboard stacks are bounded and isolated per screen; repeat

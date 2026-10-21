@@ -28,7 +28,7 @@ AURA Terminal: a GPU-accelerated terminal emulator for Linux. Six-crate Rust wor
 
 ## Conventions and gotchas
 
-- Config is `~/.config/aura/config.toml`, read once at startup and never hot-reloaded. `example/config.toml` documents every key and is loaded by a test in `crates/aura-config/src/lib.rs`; keep it parseable. (Root `examples/` is an empty leftover.)
-- CLI flags are `--help`, `--version`, and `--doctor` only; `--doctor` reports display, font, config, and Vulkan status. The README's `aura doctor` is prose, not a subcommand.
+- Config defaults to `~/.config/aura/config.toml`; imports and runtime settings support validated live reload (see `docs/CONFIGURATION.md`). `example/config.toml` documents every key and is loaded by a test in `crates/aura-config/src/lib.rs`; keep it parseable. (Root `examples/` is an empty leftover.)
+- CLI flags include `--help`, `--version`, `--doctor`, `--config-file PATH`, `--check-config` and `--print-config`; config validation must work without X11.
 - `crates/aura-core/fuzz` is a separate cargo workspace with its own lockfile and is not touched by root `cargo` commands; it needs cargo-fuzz plus a nightly toolchain.
 - Commit messages follow the existing `type(scope): summary` style (e.g. `fix(app): ...`).

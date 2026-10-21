@@ -1,125 +1,91 @@
-# AURA Terminal configuration.
-#
-# This file is optional. When it is absent, AURA uses exactly these defaults and
-# is fully functional. Every section is optional: a file that only sets the
-# colours, or only the window, loads with everything else at its default.
-# Unknown options, invalid types and out-of-range values are startup errors.
-#
-# Copy this file to ~/.config/aura/config.toml to use it as-is, or copy the
-# parts you want.
+# Copy to ~/.config/aura/config.toml. Every section is optional.
+# Validate without X11: aura --config-file PATH --check-config
+# Unknown keys and invalid values are errors; a rejected reload keeps the old config.
 
-# ---------------------------------------------------------------------------
-# Font selection
-# ---------------------------------------------------------------------------
-# `family` accepts either a font family name or an explicit filesystem path.
-# When a name is given, AURA searches /usr/share/fonts and
-# /usr/local/share/fonts for a file whose internal family name or filename stem
-# matches (case-insensitive). A path is used directly, which is the reliable
-# way to select a specific font file.
-#
-# `size` is the startup rasterization size in typographic pixels, between 6.0
-# and 72.0. Each distinct size produces its own metrics, atlas, and
-# rasterization.
-#
-# Runtime zoom: Ctrl+Plus / Ctrl+Minus change the live size by 1.0 px (clamped
-# to the same 6.0-72.0 range); Ctrl+0 restores this configured size. The TOML
-# value itself never changes at runtime. Zoom preserves the outer window size;
-# the number of complete rows and columns changes with the font metrics.
+[general]
+# Imports are relative to this file. Later imports override earlier ones;
+# this file overrides all imports. Tables merge, arrays replace whole arrays.
+# import = ["themes/dark.toml", "local.toml"]
+live_config_reload = true
+sync_timeout_ms = 150            # 1..2000; recover an unfinished TUI update batch
+
 [font]
-family = "monospace"
-size = 14.0
-
-# Visual-only glyph nudges. These do not change cell geometry.
-# offset_x = 0
-# offset_y = 0
-
-# Extra space between lines and cells, in pixels. Both change cell geometry.
-# line_spacing = 0
-# letter_spacing = 0
-
-# Per-style face overrides. Omit a section to discover available sibling faces,
-# with synthetic styling when a native style is unavailable. Omitted family
-# uses the loaded primary family; explicit file paths are also accepted.
+family = "monospace"              # family name or explicit font file
+size = 14.0                      # 6..72 pixels; Ctrl+Plus/Minus zoom, Ctrl+0 resets
+letter_spacing = 0               # -16..16; changes cell width
+line_spacing = 0                 # -32..32; changes cell height
+offset_x = 0                     # -32..32; glyph offset only
+offset_y = 0                     # -32..32; glyph offset only
 # [font.bold]
 # family = "Iosevka"
 # style = "Bold"
-#
 # [font.italic]
-# family = "Iosevka"
-# style = "Italic"
-#
+# style = "Italic"               # omitted family uses the primary family
 # [font.bold_italic]
-# family = "Iosevka"
 # style = "Bold Italic"
-
-# Faces tried, in order, when the primary face has no glyph for a character.
 # [font.fallback]
 # families = ["Noto Sans CJK", "Noto Color Emoji", "Noto Sans Symbols 2"]
 
-# ---------------------------------------------------------------------------
-# Window
-# ---------------------------------------------------------------------------
-# Startup size in whole cells, plus padding on each side in pixels. The window
-# manager receives cell-sized resize hints. Fractional cell areas are cleared
-# with the background colour rather than stretching glyphs.
 [window]
-columns = 120
-lines = 32
+columns = 120                    # startup size; 1..512
+lines = 32                       # startup size; 1..256
 padding_x = 0
 padding_y = 0
+title = "Terminal"
+class = "AURA Terminal"           # X11 WM_CLASS for window-manager rules
+dynamic_title = true             # allow the application to update the title
 
-# ---------------------------------------------------------------------------
-# Colours
-# ---------------------------------------------------------------------------
-# `theme` picks a complete starting palette: "dark" (default), "light", or
-# "custom". With "custom" every colour below defaults to the dark palette until
-# you set it, so a partial override still yields a usable set.
-#
-# Colours accept "#rrggbb", "rrggbb", "0xrrggbb", "#rgb" shorthand, or a plain
-# integer.
-#
-# `palette` replaces all 16 ANSI colours: entries 0-7 are normal and 8-15 are
-# bright. It must list exactly 16 values.
 [colors]
-theme = "dark"
+theme = "dark"                   # dark | light | custom; custom starts from dark
+# Colors accept "#rrggbb", "#rgb", "rrggbb", "0xrrggbb" or an integer.
 # foreground = "#d8d8d8"
 # background = "#181818"
-# cursor = "#d8d8d8"        # defaults to the foreground
+# cursor = "#d8d8d8"
 # selection = "#406090"
-# palette = [
+# palette = [                    # exactly 16 ANSI colors: normal, then bright
 #   "#000000", "#cd0000", "#00cd00", "#cdcd00", "#0000ee", "#cd00cd", "#00cdcd", "#e5e5e5",
 #   "#7f7f7f", "#ff0000", "#00ff00", "#ffff00", "#5c5cff", "#ff00ff", "#00ffff", "#ffffff",
 # ]
 
-# ---------------------------------------------------------------------------
-# Cursor
-# ---------------------------------------------------------------------------
-# Initial shape and blink state. Applications that emit DECSCUSR
-# (`CSI Ps SP q`) override this from then on.
 [cursor]
-style = "block"      # block | underline | bar
+style = "block"                  # block | underline | bar; TUI cursor sequences override it
 blink = true
+blink_interval_ms = 500           # 100..2000; typing restarts the interval
+blink_timeout_ms = 5000           # 0..60000; 0 keeps blinking while idle
 
-# ---------------------------------------------------------------------------
-# Scrollback
-# ---------------------------------------------------------------------------
-# Rows retained above the visible screen. 0 disables history. The upper bound
-# is 1000000, which is a memory guard rather than a recommended value: each row
-# holds a full line of cells plus its grapheme and hyperlink sidecars.
+[mouse]
+hide_when_typing = true
+scroll_lines = 3                  # 1..100; wheel scroll when the application is not tracking
+# Shift temporarily gives selection back to Aura in a mouse-aware TUI.
+
 [scrollback]
-lines = 10000
+lines = 10000                    # 0 disables history; maximum 1000000
 
-# ---------------------------------------------------------------------------
-# Security
-# ---------------------------------------------------------------------------
-# OSC 52 clipboard policy. AURA never answers an OSC 52 *read* request: a
-# terminal that does hands host clipboard contents to whatever is running
-# inside it. "write-only" (default) lets a child request that the terminal set
-# the clipboard; "disabled" ignores OSC 52 entirely.
-#
-# `max_paste_bytes` bounds a single paste before it is forwarded to the child.
-# Range: 1-1048564 bytes (1 MiB minus bracketed-paste delimiters). An oversized
-# paste is rejected as a whole; no partial UTF-8 or escape sequence is sent.
+[keyboard]
+use_default_bindings = true
+# Ctrl+Shift+C/V copy/paste, Shift+Insert pastes PRIMARY.
+# Ctrl+Shift+R reloads. Shift+PageUp/Down and Ctrl+Shift+Home/End scroll the main screen.
+# Custom bindings override defaults; the last matching binding wins.
+# [[keyboard.bindings]]
+# key = "F6"                     # XKB key name or one Unicode character
+# mods = "Control|Shift"          # optional; Shift | Alt | Control | Super
+# mode = "Main"                  # Any (default) | Main | Alternate
+# chars = "example"              # exactly one of chars or action
+# [[keyboard.bindings]]
+# key = "C"
+# mods = "Control|Shift"
+# action = "None"                # disable a default binding
+
+[shell]
+# Shell, arguments, working directory and env apply to newly started children.
+# Without program/args, the existing SHELL selection and login-shell behavior remain.
+# program = "/bin/zsh"
+# args = ["-l"]
+# working_directory = "~/projects"
+
+[env]
+# EDITOR = "nvim"                # child-only environment; values must be strings
+
 [security]
-osc52 = "write-only"    # write-only | disabled
-max_paste_bytes = 65536
+osc52 = "write-only"             # write-only | disabled; clipboard reads are never answered
+max_paste_bytes = 65536           # 1..1048564; reject oversized pastes as a whole

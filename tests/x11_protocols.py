@@ -12,18 +12,20 @@ from x11_daily_use import capture, run, wait_for, window_for
 
 
 class Fixture:
-    def __init__(self, root, binary, output, config=""):
+    def __init__(self, root, binary, output, config="", *, argv=None, complete_config=False, title="READY"):
         self.root = root
-        (root / "aura").mkdir(parents=True)
-        (root / "aura/config.toml").write_text('[window]\ncolumns=20\nlines=8\npadding_x=4\npadding_y=6\n[cursor]\nblink=false\n' + config)
+        (root / "aura").mkdir(parents=True, exist_ok=True)
+        (root / "aura/config.toml").write_text(config if complete_config else '[window]\ncolumns=20\nlines=8\npadding_x=4\npadding_y=6\n[cursor]\nblink=false\n' + config)
         self.received = root / "input"
         fifo = root / "control"
         os.mkfifo(fifo)
         self.control = os.open(fifo, os.O_RDWR | os.O_NONBLOCK)
         helper = root / "shell"
         helper.write_text(f'''#!{sys.executable}
-import os,select,tty
+import os,select,tty,json,sys
 tty.setraw(0)
+with open({str(root / "metadata")!r},"w") as report:
+    json.dump({{"cwd":os.getcwd(),"args":sys.argv[1:],"probe":os.environ.get("AURA_CONFIG_TEST")}},report)
 fd=os.open({str(fifo)!r},os.O_RDONLY | os.O_NONBLOCK)
 os.write(1,{output!r}+b"\\x1b]0;READY\\a")
 pending=b""
@@ -42,9 +44,9 @@ while True:
 ''')
         helper.chmod(0o755)
         self.log = (root / "stderr").open("wb")
-        self.process = subprocess.Popen([binary], env=dict(os.environ, SHELL=str(helper), XDG_CONFIG_HOME=str(root)), stdout=self.log, stderr=self.log)
+        self.process = subprocess.Popen([binary] + (argv or []), env=dict(os.environ, SHELL=str(helper), XDG_CONFIG_HOME=str(root)), stdout=self.log, stderr=self.log)
         self.window = window_for(self.process)
-        wait_for(lambda: run("xdotool", "getwindowname", self.window).strip() == b"READY", "raw PTY not ready")
+        wait_for(lambda: run("xdotool", "getwindowname", self.window).strip() == title.encode(), "raw PTY not ready")
 
     def emit(self, data, title):
         os.write(self.control, (data + b"\x1b]0;" + title.encode() + b"\a").hex().encode() + b"\n")

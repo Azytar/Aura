@@ -1,3 +1,5 @@
+mod bindings;
+mod config_reload;
 mod enhanced_keys;
 mod input;
 mod keyboard;
@@ -7,7 +9,8 @@ mod pointer;
 mod signals;
 mod sync;
 
-use keyboard::{FontSizeAction, Keyboard, font_size_action};
+use aura_config::BindingAction;
+use keyboard::Keyboard;
 use mouse::{MouseEvent, mouse_modes, mouse_report};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -37,38 +40,40 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if opts.is_none() {
+    let Some(opts) = opts else {
         return;
-    }
-    if let Err(error) = run() {
+    };
+    if let Err(error) = run(opts) {
         eprintln!("aura: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     // Validate both flags before opening X11 or spawning a child.
     let debug_keyboard = perf::flag("AURA_DEBUG_KEYBOARD")?;
     let mut stats = perf::Perf::new(perf::flag("AURA_PERF")?);
     let termination = signals::Termination::new()?;
-    let config = AppConfig::load_from_path(None)?;
-    let mut font_sizes = RuntimeFontSize::new(config.font.size);
-    let mut font = Font::load_with_family(&config.font.family, font_sizes.current())
-        .map_err(io::Error::other)?;
-    font.set_fallback_families(&config.font.fallback_families);
-    for (bold, italic, face) in [
-        (true, false, &config.font.bold),
-        (false, true, &config.font.italic),
-        (true, true, &config.font.bold_italic),
-    ] {
-        if let Some(face) = face {
-            if face.family.is_none() && face.style.is_none() {
-                continue;
-            }
-            font.set_style_face(bold, italic, face.family.as_deref(), face.style.as_deref())
-                .map_err(io::Error::other)?;
-        }
+    let config_path = options.config_path.clone().or_else(AppConfig::config_path);
+    let mut config = if let Some(path) = options.config_path.as_deref() {
+        AppConfig::load_with_sources(path)?.0
+    } else {
+        AppConfig::load_from_path(None)?
+    };
+    let mut key_bindings = bindings::Bindings::new(&config.keyboard)?;
+    let mut config_watcher = config_reload::Watcher::new(config_path);
+    if options.check_config {
+        load_font(&config, config.font.size)?;
+        println!("configuration OK");
+        return Ok(());
     }
+    if options.doctor {
+        doctor(options.config_path.as_deref());
+        return Ok(());
+    }
+
+    let mut font_sizes = RuntimeFontSize::new(config.font.size);
+    let mut font = load_font(&config, font_sizes.current())?;
     let geometry = FontGeometry::new(
         font.metrics().width,
         font.metrics().height,
@@ -133,8 +138,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     | EventMask::ENTER_WINDOW,
             ),
     )?;
-    set_title(&connection, window, "Terminal")?;
-    set_window_properties(&connection, window, &geometry)?;
+    set_title(&connection, window, &config.window.title)?;
+    set_window_properties(&connection, window, &geometry, &config.window.class)?;
     let mut clipboard = Clipboard::new(&connection, config.security.max_paste_bytes)?;
     connection.change_property32(
         PropMode::REPLACE,
@@ -157,7 +162,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // these lanes current so SIGWINCH observers never see them drop to zero.
     let mut last_winsize = PtySize::new(columns, rows)?;
     (last_winsize.pixel_width, last_winsize.pixel_height) = geometry.pty_pixels();
-    let mut pty = Pty::spawn_shell(last_winsize)?;
+    let program = config
+        .shell
+        .program
+        .as_deref()
+        .map(aura_config::expand_home)
+        .transpose()?;
+    let directory = config
+        .shell
+        .working_directory
+        .as_deref()
+        .map(aura_config::expand_home)
+        .transpose()?;
+    let args: Vec<_> = config.shell.args.iter().map(String::as_str).collect();
+    let environment: Vec<_> = config
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    let mut pty = Pty::spawn_configured(
+        program.as_deref(),
+        &args,
+        directory.as_deref(),
+        &environment,
+        last_winsize,
+    )?;
     // XCB stays alive in this scope, so the raw pointer remains valid until Renderer is dropped.
     let raw_connection = connection.as_raw_xcb_connection().cast();
     let mut renderer = Renderer::new(raw_connection, window, pixel_width, pixel_height)
@@ -189,19 +218,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     // SAFETY: timerfd_create returned a new descriptor owned by this scope.
     let _timer_owner = unsafe { OwnedFd::from_raw_fd(timer) };
-    let interval = libc::itimerspec {
-        it_interval: libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 500_000_000,
-        },
-        it_value: libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 500_000_000,
-        },
+    set_periodic_timer(timer, config.cursor.blink_interval_ms)?;
+    // Configuration polling is independent from the cursor's typing reset.
+    // SAFETY: timerfd_create has no borrowed memory and returns a new descriptor.
+    let reload_timer = unsafe {
+        libc::timerfd_create(
+            libc::CLOCK_MONOTONIC,
+            libc::TFD_CLOEXEC | libc::TFD_NONBLOCK,
+        )
     };
-    if unsafe { libc::timerfd_settime(timer, 0, &interval, std::ptr::null_mut()) } == -1 {
+    if reload_timer == -1 {
         return Err(io::Error::last_os_error().into());
     }
+    // SAFETY: the successful timerfd_create returned an owned descriptor.
+    let _reload_timer_owner = unsafe { OwnedFd::from_raw_fd(reload_timer) };
+    set_periodic_timer(reload_timer, 1000)?;
     let autoscroll_timer = unsafe {
         libc::timerfd_create(
             libc::CLOCK_MONOTONIC,
@@ -225,7 +256,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
     epoll_add(epoll, autoscroll_timer, 5, libc::EPOLLIN as u32)?;
     epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
-    let mut sync_gate = sync::SyncGate::new(std::time::Duration::from_millis(150));
+    epoll_add(epoll, reload_timer, 6, libc::EPOLLIN as u32)?;
+    let mut sync_gate = sync::SyncGate::new(std::time::Duration::from_millis(
+        config.general.sync_timeout_ms,
+    ));
+    let mut reload_pending = false;
+    let mut last_typing = std::time::Instant::now();
     let mut pointer_cursor = pointer::Pointer::new(&connection, window)?;
     let mut pointer_hidden = false;
     let mut input = input::Input::default();
@@ -351,6 +387,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::KeyPress(key) => {
                                 pointer_hidden = true;
+                                last_typing = std::time::Instant::now();
+                                set_periodic_timer(timer, config.cursor.blink_interval_ms)?;
                                 let (sym, mut modifiers) = keyboard.key(&key);
                                 if let Some(mask) = enhanced_keys::modifier_mask(sym) {
                                     modifiers |= mask;
@@ -363,86 +401,70 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     1
                                 };
-                                if let Some(action) = font_size_action(sym, modifiers) {
-                                    let changed = match action {
-                                        FontSizeAction::Grow => font_sizes.grow(),
-                                        FontSizeAction::Shrink => font_sizes.shrink(),
-                                        FontSizeAction::Reset => font_sizes.reset(),
-                                    };
-                                    if changed {
-                                        // Apply the final size once per event batch rather
-                                        // than rebuilding the atlas for each repeated key.
-                                        font_resize_pending = true;
-                                        cursor_blink_on = true;
-                                        invalidated = true;
-                                    }
-                                    continue;
-                                }
-                                if modifiers.contains(KeyButMask::CONTROL)
-                                    && modifiers.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, 0x63 | 0x43)
-                                {
-                                    if let Some(text) = terminal.selection_text() {
-                                        clipboard.set_text(
+                                if let Some(action) = key_bindings.action(
+                                    sym,
+                                    modifiers,
+                                    terminal.is_alternate_screen(),
+                                ) {
+                                    match action {
+                                        BindingAction::IncreaseFontSize
+                                        | BindingAction::DecreaseFontSize
+                                        | BindingAction::ResetFontSize => {
+                                            let changed = match action {
+                                                BindingAction::IncreaseFontSize => {
+                                                    font_sizes.grow()
+                                                }
+                                                BindingAction::DecreaseFontSize => {
+                                                    font_sizes.shrink()
+                                                }
+                                                _ => font_sizes.reset(),
+                                            };
+                                            if changed {
+                                                font_resize_pending = true;
+                                                cursor_blink_on = true;
+                                                invalidated = true;
+                                            }
+                                        }
+                                        BindingAction::Copy => {
+                                            if let Some(text) = terminal.selection_text() {
+                                                clipboard.set_text(
+                                                    &connection,
+                                                    window,
+                                                    clipboard.clipboard_atom,
+                                                    text.as_bytes(),
+                                                )?;
+                                            }
+                                        }
+                                        BindingAction::Paste => clipboard.request_paste(
                                             &connection,
                                             window,
                                             clipboard.clipboard_atom,
-                                            text.as_bytes(),
-                                        )?;
+                                        )?,
+                                        BindingAction::PasteSelection => clipboard.request_paste(
+                                            &connection,
+                                            window,
+                                            clipboard.primary_atom,
+                                        )?,
+                                        BindingAction::ScrollPageUp => {
+                                            terminal.page_up();
+                                            invalidated = true;
+                                        }
+                                        BindingAction::ScrollPageDown => {
+                                            terminal.page_down();
+                                            invalidated = true;
+                                        }
+                                        BindingAction::ScrollTop => {
+                                            terminal.scrollback_top();
+                                            invalidated = true;
+                                        }
+                                        BindingAction::ScrollBottom => {
+                                            terminal.jump_to_bottom();
+                                            invalidated = true;
+                                        }
+                                        BindingAction::ReloadConfig => reload_pending = true,
+                                        BindingAction::Send(bytes) => input.push(bytes.as_bytes()),
+                                        BindingAction::None => {}
                                     }
-                                    continue;
-                                }
-                                if modifiers.contains(KeyButMask::CONTROL)
-                                    && modifiers.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, 0x76 | 0x56)
-                                {
-                                    clipboard.request_paste(
-                                        &connection,
-                                        window,
-                                        clipboard.clipboard_atom,
-                                    )?;
-                                    continue;
-                                }
-                                if modifiers.contains(KeyButMask::SHIFT) && sym == 0xff63 {
-                                    // Alacritty's default: Shift+Insert pastes
-                                    // the PRIMARY selection without reaching the
-                                    // application.
-                                    clipboard.request_paste(
-                                        &connection,
-                                        window,
-                                        clipboard.primary_atom,
-                                    )?;
-                                    continue;
-                                }
-                                // Scrollback shortcuts are local-view operations. On the
-                                // alternate screen the application owns the viewport,
-                                // so these keys fall through to the encoding below
-                                // and reach it as modified navigation keys instead
-                                // of scrolling (and clearing the selection of) a
-                                // view the application never sees.
-                                if modifiers.contains(KeyButMask::CONTROL)
-                                    && modifiers.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, 0xff50 | 0xff57)
-                                    && !terminal.is_alternate_screen()
-                                {
-                                    if sym == 0xff50 {
-                                        terminal.scrollback_top();
-                                    } else {
-                                        terminal.jump_to_bottom();
-                                    }
-                                    invalidated = true;
-                                    continue;
-                                }
-                                if modifiers.contains(KeyButMask::SHIFT)
-                                    && matches!(sym, 0xff55 | 0xff56)
-                                    && !terminal.is_alternate_screen()
-                                {
-                                    if sym == 0xff55 {
-                                        terminal.page_up();
-                                    } else {
-                                        terminal.page_down();
-                                    }
-                                    invalidated = true;
                                     continue;
                                 }
                                 if let Some(bytes) = keyboard.bytes_event(
@@ -474,9 +496,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     && matches!(button.detail, 4 | 5)
                                 {
                                     if button.detail == 4 {
-                                        terminal.scroll_view_up(3);
+                                        terminal.scroll_view_up(config.mouse.scroll_lines);
                                     } else {
-                                        terminal.scroll_view_down(3);
+                                        terminal.scroll_view_down(config.mouse.scroll_lines);
                                     }
                                     invalidated = true;
                                 } else if mouse_modes(&terminal, button.state).mouse_tracking
@@ -732,10 +754,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             size_of::<u64>(),
                         )
                     };
-                    cursor_blink_on = !cursor_blink_on;
+                    let old = cursor_blink_on;
+                    cursor_blink_on = if config.cursor.blink_timeout_ms != 0
+                        && last_typing.elapsed().as_millis()
+                            >= u128::from(config.cursor.blink_timeout_ms)
+                    {
+                        true
+                    } else {
+                        !cursor_blink_on
+                    };
                     // A hidden or steady cursor needs no blink repaints.
-                    if terminal.modes().cursor_visible && terminal.modes().cursor_blink {
+                    if old != cursor_blink_on
+                        && terminal.modes().cursor_visible
+                        && terminal.modes().cursor_blink
+                    {
                         invalidated = true;
+                    }
+                }
+                6 => {
+                    let mut count = 0u64;
+                    // SAFETY: count is writable and reload_timer remains owned.
+                    let _ = unsafe {
+                        libc::read(
+                            reload_timer,
+                            (&mut count as *mut u64).cast(),
+                            size_of::<u64>(),
+                        )
+                    };
+                    if config.general.live_config_reload && config_watcher.changed() {
+                        reload_pending = true;
                     }
                 }
                 4 => running = false,
@@ -794,6 +841,79 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         }
+        if reload_pending {
+            reload_pending = false;
+            let candidate = (|| -> Result<_, Box<dyn std::error::Error>> {
+                let path = config_watcher
+                    .path
+                    .as_deref()
+                    .ok_or_else(|| io::Error::other("no configuration path"))?;
+                let (next, sources) = AppConfig::load_with_sources(path)?;
+                let bindings = bindings::Bindings::new(&next.keyboard)?;
+                let size = if next.font.size != config.font.size {
+                    next.font.size
+                } else {
+                    font_sizes.current()
+                };
+                let next_font = if next.font != config.font {
+                    Some(load_font(&next, size)?)
+                } else {
+                    None
+                };
+                Ok((next, sources, bindings, next_font))
+            })();
+            match candidate {
+                Ok((next, sources, bindings, next_font)) => {
+                    if next.font.size != config.font.size {
+                        font_sizes = RuntimeFontSize::new(next.font.size);
+                    }
+                    if let Some(next_font) = next_font {
+                        font = next_font;
+                        renderer.invalidate_font();
+                    }
+                    if next.cursor.style != config.cursor.style
+                        || next.cursor.blink != config.cursor.blink
+                    {
+                        apply_configured_modes(&mut terminal, &next);
+                    }
+                    terminal.set_scrollback_limit(next.scrollback.lines);
+                    renderer.set_palette(next.colors.palette());
+                    renderer.set_glyph_offset(next.font.offset_x, next.font.offset_y);
+                    renderer.set_padding(next.window.padding_x, next.window.padding_y);
+                    renderer.set_cell_spacing(next.font.letter_spacing, next.font.line_spacing);
+                    let background = next.colors.palette().background;
+                    let pixel = connection
+                        .alloc_color(
+                            screen.default_colormap,
+                            ((background >> 16) & 255) as u16 * 257,
+                            ((background >> 8) & 255) as u16 * 257,
+                            (background & 255) as u16 * 257,
+                        )?
+                        .reply()?
+                        .pixel;
+                    connection.change_window_attributes(
+                        window,
+                        &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                            .background_pixel(pixel),
+                    )?;
+                    clipboard.max_paste_bytes = next.security.max_paste_bytes;
+                    set_periodic_timer(timer, next.cursor.blink_interval_ms)?;
+                    sync_gate = sync::SyncGate::new(std::time::Duration::from_millis(
+                        next.general.sync_timeout_ms,
+                    ));
+                    key_bindings = bindings;
+                    config = next;
+                    config_watcher.loaded(sources);
+                    font_resize_pending = true;
+                    invalidated = true;
+                    if !config.window.dynamic_title || terminal.title().is_empty() {
+                        set_title(&connection, window, &config.window.title)?;
+                    }
+                    set_class(&connection, window, &config.window.class)?;
+                }
+                Err(error) => eprintln!("aura: configuration reload rejected: {error}"),
+            }
+        }
         if running && font_resize_pending {
             let started = stats.start();
             resize_font(
@@ -848,7 +968,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        if terminal.title() != previous_title {
+        if config.window.dynamic_title && terminal.title() != previous_title {
             previous_title = terminal.title().to_owned();
             set_title(&connection, window, &previous_title)?;
             invalidated = true;
@@ -856,7 +976,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         pointer_cursor.update(
             &connection,
             window,
-            pointer_hidden,
+            pointer_hidden && config.mouse.hide_when_typing,
             terminal.modes().mouse_tracking != MouseTracking::Off,
         )?;
         let synchronized = if terminal.modes().synchronized_output || sync_gate.active() {
@@ -888,44 +1008,82 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Parsed launch options; `None` means a flag like `--help` already ran.
-type LaunchOptions = Option<()>;
+#[derive(Default)]
+struct Options {
+    config_path: Option<std::path::PathBuf>,
+    check_config: bool,
+    doctor: bool,
+}
+type LaunchOptions = Option<Options>;
 
-#[allow(clippy::never_loop)]
 fn arguments() -> Result<LaunchOptions, Box<dyn std::error::Error>> {
-    let mut launch = Some(());
-    for arg in std::env::args_os().skip(1) {
+    let mut options = Options::default();
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
         match arg.to_str() {
-            Some("--help" | "-h") => {
-                launch = None;
-                println!(
-                    "aura {} - GPU-accelerated terminal emulator for Linux\n\n\
-                     Usage: aura [OPTIONS]\n\n\
-                     Options:\n  \
-                     -h, --help       print this help and exit\n  \
-                     -V, --version    print the version and exit\n  \
-                     --doctor         report display, font, config, and Vulkan\n  \
-                     diagnostics, then exit\n\n\
-                     Font and terminal geometry are configured in:\n  \
-                     ~/.config/aura/config.toml\n\n\
-                     With no argument aura starts an interactive shell. When the\n  \
-                     configuration file is absent the built-in defaults are used.",
-                    env!("CARGO_PKG_VERSION")
-                );
+            Some("--config-file") => {
+                options.config_path =
+                    Some(args.next().ok_or("--config-file requires a path")?.into())
+            }
+            Some("--check-config") => options.check_config = true,
+            Some("--doctor") => options.doctor = true,
+            Some("--print-config") => {
+                print!("{}", include_str!("../../../example/config.toml"));
+                return Ok(None);
             }
             Some("--version" | "-V") => {
-                launch = None;
                 println!("aura {}", env!("CARGO_PKG_VERSION"));
+                return Ok(None);
             }
-            Some("--doctor") => {
-                launch = None;
-                doctor();
+            Some("--help" | "-h") => {
+                println!(
+                    "aura {}\nUsage: aura [--config-file PATH] [--check-config | --doctor]\n  --print-config  print the default TOML configuration\n  --version       print the version\n  --help          print this help",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Ok(None);
             }
-            Some(other) => return Err(format!("unknown argument: {other}").into()),
-            None => return Err("arguments must be valid UTF-8".into()),
+            _ => return Err(format!("unknown argument: {}", arg.to_string_lossy()).into()),
         }
     }
-    Ok(launch)
+    Ok(Some(options))
+}
+
+fn load_font(config: &AppConfig, size: f32) -> Result<Font, Box<dyn std::error::Error>> {
+    let mut font = Font::load_with_family(&config.font.family, size).map_err(io::Error::other)?;
+    font.set_fallback_families(&config.font.fallback_families);
+    for (bold, italic, face) in [
+        (true, false, &config.font.bold),
+        (false, true, &config.font.italic),
+        (true, true, &config.font.bold_italic),
+    ] {
+        if let Some(face) = face {
+            if face.family.is_none() && face.style.is_none() {
+                continue;
+            }
+            font.set_style_face(bold, italic, face.family.as_deref(), face.style.as_deref())
+                .map_err(io::Error::other)?;
+        }
+    }
+    Ok(font)
+}
+
+fn set_periodic_timer(timer: i32, millis: u64) -> io::Result<()> {
+    let spec = libc::itimerspec {
+        it_interval: libc::timespec {
+            tv_sec: (millis / 1000) as _,
+            tv_nsec: ((millis % 1000) * 1_000_000) as _,
+        },
+        it_value: libc::timespec {
+            tv_sec: (millis / 1000) as _,
+            tv_nsec: ((millis % 1000) * 1_000_000) as _,
+        },
+    };
+    // SAFETY: spec is initialized and timer remains owned by the caller.
+    if unsafe { libc::timerfd_settime(timer, 0, &spec, std::ptr::null_mut()) } == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Seeds the terminal with the modes the configuration chooses, before any
@@ -952,7 +1110,7 @@ fn apply_configured_modes(terminal: &mut Terminal, config: &AppConfig) {
 ///
 /// Nothing here opens the PTY, spawns a child, or writes to the user's
 /// clipboard, and no file contents are echoed beyond the configuration path.
-fn doctor() {
+fn doctor(config_path: Option<&std::path::Path>) {
     println!("AURA Terminal {}", env!("CARGO_PKG_VERSION"));
     println!();
 
@@ -976,7 +1134,10 @@ fn doctor() {
     println!();
 
     println!("Configuration");
-    match AppConfig::config_path() {
+    match config_path
+        .map(std::path::Path::to_path_buf)
+        .or_else(AppConfig::config_path)
+    {
         Some(path) => {
             let present = path.is_file();
             println!("  path                 {}", path.display());
@@ -1271,6 +1432,7 @@ fn set_window_properties(
     connection: &XCBConnection,
     window: u32,
     geometry: &FontGeometry,
+    class: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let net_wm_pid = connection.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
     connection.change_property32(
@@ -1286,7 +1448,7 @@ fn set_window_properties(
         window,
         AtomEnum::WM_CLASS,
         AtomEnum::STRING,
-        b"aura\0AURA Terminal\0",
+        format!("aura\0{class}\0").as_bytes(),
     )?;
     set_size_hints(connection, window, geometry)?;
     connection.flush()?;
@@ -1605,6 +1767,21 @@ fn update_host_properties(terminal: &mut Terminal, config: &AppConfig, font: &Fo
         ],
         window_pixels: [size.pixel_width, size.pixel_height],
     });
+}
+
+fn set_class(
+    connection: &XCBConnection,
+    window: u32,
+    class: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    connection.change_property8(
+        PropMode::REPLACE,
+        window,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        format!("aura\0{class}\0").as_bytes(),
+    )?;
+    Ok(())
 }
 
 fn configured_metrics(font: &Font, config: &AppConfig) -> CellMetrics {

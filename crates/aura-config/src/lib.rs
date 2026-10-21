@@ -3,6 +3,13 @@
 //! `core` never reads the filesystem or TOML. The app crate parses, validates,
 //! and converts config into typed values before constructing any font/render/terminal.
 
+mod interaction;
+mod loader;
+pub use interaction::{
+    BindingAction, GeneralConfig, KeyBinding, KeyboardConfig, MouseConfig, ShellConfig,
+};
+pub use loader::expand_home;
+
 use std::path::{Path, PathBuf};
 
 /// Re-exported from `aura-text`: the single source of truth for runtime
@@ -535,6 +542,9 @@ pub struct WindowConfig {
     pub lines: usize,
     pub padding_x: u32,
     pub padding_y: u32,
+    pub title: String,
+    pub class: String,
+    pub dynamic_title: bool,
 }
 
 impl WindowConfig {
@@ -602,6 +612,20 @@ impl WindowConfig {
             lines,
             padding_x,
             padding_y,
+            title: window
+                .get("title")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("Terminal")
+                .to_string(),
+            class: window
+                .get("class")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("AURA Terminal")
+                .to_string(),
+            dynamic_title: window
+                .get("dynamic_title")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(true),
         })
     }
 }
@@ -728,6 +752,8 @@ pub struct CursorConfig {
     pub style: CursorShape,
     /// Whether the cursor blinks when the application does not say otherwise.
     pub blink: bool,
+    pub blink_interval_ms: u64,
+    pub blink_timeout_ms: u64,
 }
 
 impl Default for CursorConfig {
@@ -735,6 +761,8 @@ impl Default for CursorConfig {
         Self {
             style: CursorShape::default(),
             blink: true,
+            blink_interval_ms: 500,
+            blink_timeout_ms: 5000,
         }
     }
 }
@@ -760,6 +788,22 @@ impl CursorConfig {
         Ok(Self {
             style,
             blink: blink.unwrap_or(true),
+            blink_interval_ms: interaction::bounded(
+                &cursor,
+                "blink_interval_ms",
+                500,
+                100,
+                2000,
+                "cursor",
+            )?,
+            blink_timeout_ms: interaction::bounded(
+                &cursor,
+                "blink_timeout_ms",
+                5000,
+                0,
+                60000,
+                "cursor",
+            )?,
         })
     }
 }
@@ -951,6 +995,11 @@ fn validate_config(table: &toml::Table) -> Result<(), ConfigError> {
         table,
         "configuration",
         &[
+            ("general", Table),
+            ("mouse", Table),
+            ("keyboard", Table),
+            ("shell", Table),
+            ("env", Table),
             ("font", Table),
             ("window", Table),
             ("colors", Table),
@@ -982,6 +1031,9 @@ fn validate_config(table: &toml::Table) -> Result<(), ConfigError> {
                 ("lines", Integer),
                 ("padding_x", Integer),
                 ("padding_y", Integer),
+                ("title", String),
+                ("class", String),
+                ("dynamic_title", Boolean),
             ],
         ),
         (
@@ -995,7 +1047,15 @@ fn validate_config(table: &toml::Table) -> Result<(), ConfigError> {
                 ("palette", Array),
             ],
         ),
-        ("cursor", &[("style", String), ("blink", Boolean)]),
+        (
+            "cursor",
+            &[
+                ("style", String),
+                ("blink", Boolean),
+                ("blink_interval_ms", Integer),
+                ("blink_timeout_ms", Integer),
+            ],
+        ),
         ("scrollback", &[("lines", Integer)]),
         (
             "security",
@@ -1029,6 +1089,11 @@ pub const MAX_PASTE_BYTES: usize = 1024 * 1024 - 12;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppConfig {
+    pub general: GeneralConfig,
+    pub mouse: MouseConfig,
+    pub keyboard: KeyboardConfig,
+    pub shell: ShellConfig,
+    pub env: std::collections::BTreeMap<String, String>,
     pub font: FontConfig,
     pub window: WindowConfig,
     pub colors: ColorsConfig,
@@ -1041,6 +1106,11 @@ impl AppConfig {
     /// Loads the default configuration without reading the filesystem.
     pub fn defaults() -> Self {
         Self {
+            general: GeneralConfig::default(),
+            mouse: MouseConfig::default(),
+            keyboard: KeyboardConfig::default(),
+            shell: ShellConfig::default(),
+            env: Default::default(),
             font: FontConfig {
                 family: DEFAULT_FONT_FAMILY.to_string(),
                 size: DEFAULT_FONT_SIZE,
@@ -1058,6 +1128,9 @@ impl AppConfig {
                 lines: DEFAULT_LINES,
                 padding_x: DEFAULT_PADDING,
                 padding_y: DEFAULT_PADDING,
+                title: "Terminal".into(),
+                class: "AURA Terminal".into(),
+                dynamic_title: true,
             },
             colors: ColorsConfig {
                 theme: ThemeKind::default(),
@@ -1086,23 +1159,17 @@ impl AppConfig {
             None => return Ok(Self::defaults()),
         };
 
-        let content = match std::fs::read_to_string(path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::defaults());
-            }
-            Err(error) => {
-                return Err(ConfigError::io(
-                    path.display().to_string(),
-                    error.to_string(),
-                ));
-            }
-        };
+        match std::fs::metadata(path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::defaults()),
+            Err(e) => return Err(ConfigError::io(path.display().to_string(), e.to_string())),
+        }
+        Self::load_with_sources(path).map(|(config, _)| config)
+    }
 
-        let parsed: toml::Table = toml::from_str(&content)
-            .map_err(|error| ConfigError::parse(path.display().to_string(), error.to_string()))?;
-
-        Self::load_from_text(&parsed)
+    pub fn load_with_sources(path: &Path) -> Result<(Self, Vec<PathBuf>), ConfigError> {
+        let (table, sources) = loader::load(path)?;
+        Ok((Self::load_from_text(&table)?, sources))
     }
 
     /// Builds a configuration from an already parsed TOML table. Kept separate
@@ -1110,13 +1177,29 @@ impl AppConfig {
     /// touching the filesystem.
     pub fn load_from_text(table: &toml::Table) -> Result<Self, ConfigError> {
         validate_config(table)?;
+        let general = GeneralConfig::parse(table)?;
+        let mouse = MouseConfig::parse(table)?;
+        let keyboard = KeyboardConfig::parse(table)?;
+        let shell = ShellConfig::parse(table)?;
+        let env = interaction::environment(table)?;
         let font = FontConfig::parse_table(table)?;
         let window = WindowConfig::parse_table(table)?;
         let colors = ColorsConfig::parse_table(table)?;
+        if window.title.contains('\0') || window.class.contains('\0') {
+            return Err(ConfigError::invalid_value(
+                "window",
+                "title and class cannot contain NUL",
+            ));
+        }
         let cursor = CursorConfig::parse_table(table)?;
         let scrollback = ScrollbackConfig::parse_table(table)?;
         let security = SecurityConfig::parse_table(table)?;
         Ok(Self {
+            general,
+            mouse,
+            keyboard,
+            shell,
+            env,
             font,
             window,
             colors,

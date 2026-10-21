@@ -48,7 +48,7 @@ time and embedded in the binary; no runtime data files are needed.
 ./target/release/aura
 aura --help
 aura --version
-aura doctor
+aura --doctor
 ```
 
 Configuration is optional. When `~/.config/aura/config.toml` is absent, the
@@ -57,28 +57,16 @@ configuration is provided in `example/config.toml`.
 
 ## Configuration
 
-The TOML file is read once at startup; it is never hot-reloaded. Every
-section is optional, so a file that only sets the colours, or only the window,
-loads with everything else at its defaults. Unknown keys, invalid types and
-out-of-range values are reported at startup instead of silently loading defaults.
-Supported keys:
+Every section is optional. Unknown keys, invalid types and out-of-range values
+are errors. Fonts, colors, padding, cursor behavior, bindings and other runtime
+settings reload when the file or an import changes; an invalid edit keeps the
+active configuration. Ctrl+Shift+R retries a reload.
 
-- `font.family`, `font.size` (startup size, 6-72 px)
-- `font.bold`, `font.italic`, `font.bold_italic` (optional per-style faces)
-- `font.fallback.families` (ordered fallback family names)
-- `font.offset_x`, `font.offset_y`, `font.line_spacing`, `font.letter_spacing`
-- `window.columns`, `window.lines`, `window.padding_x`, `window.padding_y`
-- `colors.theme` (`dark`, `light`, or `custom`) with optional
-  `foreground`, `background`, `cursor`, `selection`, and a 16-entry `palette`.
-  Colours accept `#rrggbb`, `rrggbb`, `0xrrggbb`, `#rgb`, or an integer.
-- `cursor.style` (`block`, `underline`, `bar`) and `cursor.blink`
-- `scrollback.lines` (0 disables history, up to 1000000)
-- `security.osc52` (`write-only` or `disabled`) and `security.max_paste_bytes`
-  (1-1048564 bytes; oversized pastes are rejected whole).
-
-`example/config.toml` documents every key with its default. AURA never answers
-an OSC 52 *read* request, so the clipboard cannot be extracted by something
-running inside the terminal.
+Use `aura --print-config` for the documented example, `--config-file PATH` to
+select a file, and `--check-config` to validate it without opening X11. The
+[configuration guide](docs/CONFIGURATION.md) covers imports, custom bindings,
+shell arguments, child environment and reload behavior. `example/config.toml`
+lists every setting and its default. OSC 52 reads are never answered.
 
 `font.size` is the configured startup size. `Ctrl+Plus` / `Ctrl+Minus`
 change the size during the session (fresh rasterization, rebuilt atlas,
@@ -104,6 +92,7 @@ install -Dm644 aura.desktop /usr/share/applications/aura.desktop
 - `Ctrl+Plus` / `Ctrl+Minus` change the runtime font size by 1.0 px
   (clamped to 6-72 px); `Ctrl+0` restores the configured `font.size`.
 - `Ctrl+Shift+C` copy selection, `Ctrl+Shift+V` paste.
+- `Ctrl+Shift+R` reload configuration; `[keyboard.bindings]` customizes shortcuts.
 - Local mouse selection: click and drag, double click for a word, triple
   click for a line; dragging past an edge scrolls the view. Releasing a
   selection publishes it as the X11 PRIMARY selection; `Shift+Insert` or a
@@ -155,19 +144,16 @@ a `Ctrl+C` when a skew is detected.
 ## Known limitations
 
 - **X11 only.** The window backend is X11; there is no Wayland frontend yet.
-  `aura doctor` reports which displays are visible.
+  `aura --doctor` reports which displays are visible.
 - **No IME.** Composing text through an input method is not implemented, so
   CJK input relies on the input method's own commit path reaching the X
   keyboard events.
-- **No configurable key bindings.** The shortcuts are fixed in
-  `crates/aura-app/src/main.rs`; `[keyboard]` does not exist yet.
-- **No input-to-present latency instrumentation.** Only aggregate frame timing
-  is reported on stderr.
+- **No input-to-present latency instrumentation.** Opt-in host stage timings
+  do not establish when an image reaches the screen.
 - **No subpixel antialiasing**, and underline and strikethrough render as solid
   bars. Hyperlink text has no distinct style.
 - **No fontconfig discovery.** Fonts are found by scanning standard
   directories, so a font outside them needs an explicit path.
-- Font configuration is startup-only; live reload is not implemented.
 - OSC 8 hyperlinks are parsed and stored, and OSC 52 writes are honoured, but
   nothing opens a link on click.
 

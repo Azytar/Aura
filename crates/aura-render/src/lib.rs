@@ -846,6 +846,9 @@ impl Renderer {
     /// Installs a colour palette. Takes effect on the next frame; nothing is
     /// re-rasterized because glyph masks do not depend on colour.
     pub fn set_palette(&mut self, palette: Palette) {
+        if self.palette != palette {
+            self.grid_size = None;
+        }
         self.palette = palette;
     }
 

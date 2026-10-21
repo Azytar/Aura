@@ -83,12 +83,34 @@ impl Pty {
         let shell = configured_shell();
         let name = shell.file_name().unwrap_or_else(|| OsStr::new("sh"));
         let login_name = format!("-{}", name.to_string_lossy());
-        Self::spawn(&shell, &[], Some(&login_name), size)
+        Self::spawn(&shell, &[], Some(&login_name), size, None, &[])
     }
 
     /// Starts a command with stdin, stdout, and stderr attached to the PTY slave.
     pub fn spawn_command(program: &Path, args: &[&str], size: PtySize) -> io::Result<Self> {
-        Self::spawn(program, args, None, size)
+        Self::spawn(program, args, None, size, None, &[])
+    }
+
+    pub fn spawn_configured(
+        program: Option<&Path>,
+        args: &[&str],
+        directory: Option<&Path>,
+        environment: &[(&str, &str)],
+        size: PtySize,
+    ) -> io::Result<Self> {
+        let default_shell = configured_shell();
+        let path = program.unwrap_or(&default_shell);
+        let login = if program.is_none() && args.is_empty() {
+            Some(format!(
+                "-{}",
+                path.file_name()
+                    .unwrap_or_else(|| OsStr::new("sh"))
+                    .to_string_lossy()
+            ))
+        } else {
+            None
+        };
+        Self::spawn(path, args, login.as_deref(), size, directory, environment)
     }
 
     fn spawn(
@@ -96,6 +118,8 @@ impl Pty {
         args: &[&str],
         argv0: Option<&str>,
         size: PtySize,
+        directory: Option<&Path>,
+        environment: &[(&str, &str)],
     ) -> io::Result<Self> {
         let winsize = size.to_winsize()?;
         let mut master_fd = -1;
@@ -131,6 +155,10 @@ impl Pty {
             .stderr(Stdio::from(stderr))
             .env("TERM", "xterm-256color")
             .env("COLORTERM", "truecolor");
+        if let Some(directory) = directory {
+            command.current_dir(directory);
+        }
+        command.envs(environment.iter().copied());
         if let Some(argv0) = argv0 {
             command.arg0(argv0);
         }
@@ -309,5 +337,39 @@ mod tests {
             .to_winsize()
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod configured_tests {
+    use super::*;
+    #[test]
+    fn configured_child_receives_its_own_directory_args_and_environment() {
+        let path = std::env::temp_dir();
+        let directory = path.to_str().unwrap();
+        let mut pty = Pty::spawn_configured(
+            Some(Path::new("/bin/sh")),
+            &["-c", "printf '%s|%s' \"$PWD\" \"$AURA_CHILD_TEST\""],
+            Some(&path),
+            &[("AURA_CHILD_TEST", "configured")],
+            PtySize::new(20, 8).unwrap(),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut buffer = [0; 256];
+        while std::time::Instant::now() < deadline {
+            match pty.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&buffer[..n]),
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2))
+                }
+                Err(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(output, format!("{directory}|configured").as_bytes());
+        pty.close().unwrap();
     }
 }
