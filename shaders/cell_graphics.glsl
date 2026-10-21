@@ -255,7 +255,28 @@ float box_coverage(uint index, vec2 p, vec2 size) {
     return coverage;
 }
 
+// Unicode sextants number the 2x3 subcells in reading order: 12/34/56.
+// The range skips masks 21 (left half) and 42 (right half), which already
+// have U+258C/U+2590 encodings; space and full block are outside this range.
+float sextant_coverage(uint scalar, vec2 p, vec2 size) {
+    uint mask = scalar - 0x1fb00u + 1u;
+    if (mask >= 21u) mask += 1u;
+    if (mask >= 42u) mask += 1u;
+    float coverage = 0.0;
+    for (uint sixth = 0u; sixth < 6u; ++sixth) {
+        if ((mask & (1u << sixth)) == 0u) continue;
+        vec2 slot = vec2(sixth % 2u, sixth / 2u);
+        vec2 low = slot * size / vec2(2.0, 3.0);
+        vec2 high = (slot + 1.0) * size / vec2(2.0, 3.0);
+        // Sum disjoint areas so adjacent thirds leave no antialiasing seam
+        // when a pixel straddles their shared fractional boundary.
+        coverage += rect_coverage(p, low, high);
+    }
+    return min(coverage, 1.0);
+}
+
 float graphic_coverage(uint scalar, vec2 p, vec2 size) {
+    if (scalar >= 0x1fb00u) return sextant_coverage(scalar, p, size);
     if (scalar >= 0x2800u) return braille_coverage(scalar - 0x2800u, p, size);
     if (scalar >= 0x2580u) return block_coverage(scalar - 0x2580u, p, size);
     return box_coverage(scalar - 0x2500u, p, size);

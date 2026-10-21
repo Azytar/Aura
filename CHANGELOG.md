@@ -23,6 +23,10 @@ per commit.
 
 ### Fixed
 
+- Unicode sextant blocks (U+1FB00–U+1FB3B), used by terminal logos such
+  as Kilo Code, now fill their cell thirds directly instead of depending on
+  font fallback. Adjacent filled thirds have no fractional-pixel seams.
+
 - Keyboard traces are opt-in and compiled only in debug builds. Host timing
   reports are independently opt-in, retain bounded stage samples and omit
   stages not reached; ordinary rendering no longer samples frame clocks.

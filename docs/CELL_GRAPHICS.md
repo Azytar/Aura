@@ -162,3 +162,19 @@ DejaVu. With an override they specifically check `↵`; the native fixture
 also checks the other characters and shared cache/zoom behavior. Missing
 required fonts/Vulkan are errors in required mode, and local skips remain
 reported omissions.
+
+## Sextant blocks
+
+U+1FB00–U+1FB3B use a 2x3 rectangle grid, with Unicode subcells numbered
+`12/34/56`. These are distinct from the 2x4 circular dots of Braille. Terminal
+logos can mix sextants with full and half blocks; all three use the actual
+cell stride, including letter/line spacing, without font fallback or glyph
+offsets. Attached combining marks still use the text shaping path.
+
+The sextant range omits space, full block, left half and right half because
+those shapes already have earlier Unicode encodings. Filled subcell areas
+are added before blending, preserving contiguous edges even when a cell's
+height is not divisible by three. Colors and inverse video use the same
+existing cell passes. Tests use independently named Unicode sextants to
+check every pixel, and `tests/x11_sextants.py` checks native initial frames,
+color updates and exact comparison with fresh rendering.

@@ -365,3 +365,92 @@ fn graphical_cells_survive_zoom_and_selection_preserves_original_text() {
     terminal.clear_selection();
     assert_eq!(renderer.render(&mut terminal, &mut font).unwrap(), original);
 }
+
+#[test]
+fn unicode_sextants_cover_their_named_sixths_without_font_fallback() {
+    if !gpu_available() {
+        assert_ne!(std::env::var("AURA_REQUIRE_GPU").as_deref(), Ok("1"));
+        return;
+    }
+    // Unicode numbers the six rectangles in reading order: 12/34/56.
+    // Read their independent Unicode names instead of duplicating shader masks.
+    let assignments: Vec<_> = include_str!("../../../tests/campaign/sextant-cells.txt")
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| {
+            let (cp, cells) = line.split_once(' ').unwrap();
+            (u32::from_str_radix(cp, 16).unwrap(), cells)
+        })
+        .collect();
+    assert_eq!(assignments.len(), 60);
+    let text: String = assignments
+        .iter()
+        .map(|(cp, _)| char::from_u32(*cp).unwrap())
+        .collect();
+    for family in ["DejaVu Sans Mono", "Liberation Mono"] {
+        for size in [9.0, 14.0, 18.0, 23.0, 36.0] {
+            for spacing in [0, 3] {
+                let mut font = Font::load_with_family(family, size).unwrap();
+                // Both renderers reserve U+FFFD even for an otherwise geometric
+                // frame. Some primary fonts need fallback for that reservation.
+                font.glyph('\u{fffd}', false, false).unwrap();
+                let reserved_fallbacks = font.fallback_count();
+                let (cw, ch) = (
+                    font.metrics().width + spacing,
+                    font.metrics().height + spacing,
+                );
+                let (width, height) = (cw * 10 + 6, ch * 6 + 10);
+                let mut terminal = Terminal::new(10, 6).unwrap();
+                terminal.process(b"\x1b[?25l\x1b[1;3m");
+                terminal.process(text.as_bytes());
+                let mut renderer = OffscreenRenderer::new(width, height).unwrap();
+                renderer.set_padding(3, 5);
+                renderer.set_cell_spacing(spacing as i32, spacing as i32);
+                renderer.set_glyph_offset(9, -7);
+                let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+                for (index, (cp, names)) in assignments.iter().enumerate() {
+                    for y in 0..ch {
+                        for x in 0..cw {
+                            let mut covered = 0.0f64;
+                            for digit in names.bytes() {
+                                let sixth = u32::from(digit - b'1');
+                                let left = f64::from((sixth % 2) * cw) / 2.0;
+                                let top = f64::from((sixth / 2) * ch) / 3.0;
+                                let right = left + f64::from(cw) / 2.0;
+                                let bottom = top + f64::from(ch) / 3.0;
+                                covered += (right.min(f64::from(x + 1)) - left.max(f64::from(x)))
+                                    .max(0.0)
+                                    * (bottom.min(f64::from(y + 1)) - top.max(f64::from(y)))
+                                        .max(0.0);
+                            }
+                            let expected = (24.0 + 192.0 * covered.min(1.0)).round() as u8;
+                            let actual = pixel(
+                                &pixels,
+                                width,
+                                3 + (index as u32 % 10) * cw + x,
+                                5 + (index as u32 / 10) * ch + y,
+                            );
+                            assert!(
+                                actual.abs_diff(expected) <= 1,
+                                "U+{cp:X} sixths={names} family={family} size={size} spacing={spacing} pixel=({x},{y}) expected={expected} actual={actual}"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        terminal
+                            .viewport_cell(index / 10, index % 10)
+                            .unwrap()
+                            .content,
+                        *cp
+                    );
+                }
+                assert_eq!(
+                    font.fallback_count(),
+                    reserved_fallbacks,
+                    "sextants must use cell geometry, not a font"
+                );
+                assert_eq!(pixel(&pixels, width, 0, 0), 24);
+            }
+        }
+    }
+}

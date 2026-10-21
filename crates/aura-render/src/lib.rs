@@ -22,7 +22,7 @@ const MAX_ROWS: usize = MAX_GRID_ROWS;
 const GRAPHIC_TAG: u32 = 0x8000_0000;
 
 fn graphic_cell(cell: Cell, grapheme: Option<&str>, palette: &Palette) -> Option<GpuCell> {
-    if !matches!(cell.content, 0x2500..=0x259f | 0x2800..=0x28ff)
+    if !matches!(cell.content, 0x2500..=0x259f | 0x2800..=0x28ff | 0x1fb00..=0x1fb3b)
         || grapheme.is_some_and(|text| text.chars().count() != 1)
     {
         return None;
