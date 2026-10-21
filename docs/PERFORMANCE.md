@@ -34,6 +34,11 @@ remain a warm-cache case, distinct from mixed/contextual shaping and native inpu
 That loop hides its receiver and inputs from the optimizer so an inline lookup
 cannot collapse into repeated copies of one constant result.
 
+Font cluster memoization retains one bounded key and shares invalidation with
+its atlas. Differential tests compare it with full map lookup through context,
+style, face, fallback and size changes. Warm repeated-cluster results should be
+considered alongside mixed/contextual workloads and native runs.
+
 The original table below records an earlier run of the benchmark binaries.
 The resize follow-up at the end records a separate environment and comparison:
 

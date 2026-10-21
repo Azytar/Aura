@@ -158,6 +158,9 @@ pub struct Font {
     color_shelf_y: u32,
     color_shelf_height: u32,
     glyphs: HashMap<GlyphKey, (u32, GlyphInfo)>,
+    // One repeated cluster can be looked up without allocating an owned key.
+    // Face, size and atlas changes invalidate this together with `glyphs`.
+    last_text: Option<(GlyphKey, u32, GlyphInfo)>,
     context: ScaleContext,
 }
 
@@ -221,6 +224,7 @@ impl Font {
             color_shelf_y: 1,
             color_shelf_height: 0,
             glyphs: HashMap::new(),
+            last_text: None,
             context: ScaleContext::new(),
         })
     }
@@ -253,6 +257,7 @@ impl Font {
         self.atlas.fill(0);
         self.color_atlas.fill(0);
         self.glyphs.clear();
+        self.last_text = None;
         self.shelf_x = 1;
         self.shelf_y = 1;
         self.shelf_height = 0;
@@ -581,6 +586,7 @@ impl Font {
     }
 
     /// Shapes one grapheme with adjacent run context for joining scripts.
+    #[inline]
     pub fn glyph_text_with_context(
         &mut self,
         text: &str,
@@ -598,6 +604,32 @@ impl Font {
         if text.chars().count() == 1 && pre_context.is_empty() && post_context.is_empty() {
             return self.glyph(text.chars().next().expect("nonempty text"), bold, italic);
         }
+        if let Some((key, index, info)) = &self.last_text
+            && key.size_bits == self.size.to_bits()
+            && key.bold == bold
+            && key.italic == italic
+            && let GlyphIdentity::Text {
+                grapheme,
+                pre_context: pre,
+                post_context: post,
+            } = &key.identity
+            && grapheme == text
+            && pre == pre_context
+            && post == post_context
+        {
+            return Ok((*index, *info, None));
+        }
+        self.lookup_or_rasterize_text(text, pre_context, post_context, bold, italic)
+    }
+
+    fn lookup_or_rasterize_text(
+        &mut self,
+        text: &str,
+        pre_context: &str,
+        post_context: &str,
+        bold: bool,
+        italic: bool,
+    ) -> Result<(u32, GlyphInfo, Option<GlyphUpload>), String> {
         let face_id = self.resolve_text_face(text, bold, italic);
         let font_face = self.face(face_id).ok_or("invalid loaded font")?;
         let synthetic_bold = bold && font_face.attributes().weight().0 < 600;
@@ -614,6 +646,7 @@ impl Font {
             italic,
         };
         if let Some((index, info)) = self.glyphs.get(&key).copied() {
+            self.last_text = Some((key, index, info));
             return Ok((index, info, None));
         }
         if self.glyphs.len() >= MAX_GLYPHS {
@@ -1060,6 +1093,54 @@ fn load_fallbacks(configured: &[PathBuf]) -> Vec<FaceData> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_cluster_cache_matches_full_lookup_through_font_changes() {
+        let mut cached = Font::load(None, 18.0).unwrap();
+        let mut reference = Font::load(None, 18.0).unwrap();
+        for change in 0..6 {
+            for font in [&mut cached, &mut reference] {
+                match change {
+                    1 => {
+                        font.set_size(23.0).unwrap();
+                    }
+                    2 => font.invalidate_atlas(),
+                    3 => font.set_fallback_families(&[]),
+                    4 => {
+                        let path = font.primary_path.to_string_lossy().into_owned();
+                        font.set_style_face(true, false, Some(&path), None).unwrap();
+                    }
+                    5 => {
+                        font.set_size(18.0).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            for (text, pre, post, bold, italic) in [
+                ("e\u{301}", "", "", false, false),
+                ("م", "سل", "ن", false, false),
+                ("م", "س", "ن", false, false),
+                ("م", "", "", false, false),
+                ("e\u{301}", "", "", true, false),
+                ("e\u{301}", "", "", false, true),
+                ("e\u{301}", "", "", true, true),
+                ("e\u{301}", "", "", false, false),
+            ] {
+                for _ in 0..3 {
+                    reference.last_text = None;
+                    assert_eq!(
+                        cached.glyph_text_with_context(text, pre, post, bold, italic),
+                        reference.glyph_text_with_context(text, pre, post, bold, italic),
+                        "change={change}, text={text:?}, pre={pre:?}, post={post:?}"
+                    );
+                    assert_eq!(
+                        cached.glyph('X', false, false),
+                        reference.glyph('X', false, false)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn return_arrow_uses_a_real_fallback_when_the_primary_face_lacks_it() {
         let primary = std::env::var_os("AURA_TEST_SYMBOL_FONT")
