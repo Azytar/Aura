@@ -23,6 +23,9 @@ per commit.
 
 ### Fixed
 
+- Configured cursor colors now reach every cursor shape. Focus loss shows a
+  steady hollow cursor; focus and typing restart the configured blink interval.
+
 - Configuration now supports validated imports, atomic live reload, custom
   bindings, shell arguments and child environment. Cursor timing, pointer
   policy and window identity have effective settings; standalone validation

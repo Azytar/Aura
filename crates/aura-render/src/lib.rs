@@ -70,6 +70,7 @@ struct PushGrid {
     selection_color: u32,
     padding_x: u32,
     padding_y: u32,
+    cursor_color: u32,
 }
 
 /// Maps a DECSCUSR cursor shape to the push-constant encoding.
@@ -233,6 +234,8 @@ pub struct Renderer {
     offset_x: i32,
     offset_y: i32,
     palette: Palette,
+    cursor_color: Option<u32>,
+    focused: bool,
     padding: [u32; 2],
     spacing: [i32; 2],
 }
@@ -271,6 +274,8 @@ pub struct OffscreenRenderer {
     offset_x: i32,
     offset_y: i32,
     palette: Palette,
+    cursor_color: Option<u32>,
+    focused: bool,
     padding: [u32; 2],
     spacing: [i32; 2],
 }
@@ -391,6 +396,8 @@ impl OffscreenRenderer {
             offset_x: 0,
             offset_y: 0,
             palette: Palette::DARK,
+            cursor_color: None,
+            focused: true,
             padding: [0; 2],
             spacing: [0; 2],
         })
@@ -405,6 +412,16 @@ impl OffscreenRenderer {
     /// re-rasterized because glyph masks do not depend on colour.
     pub fn set_palette(&mut self, palette: Palette) {
         self.palette = palette;
+    }
+
+    /// Overrides the cursor paint; None derives it from the cell foreground.
+    pub fn set_cursor_color(&mut self, color: Option<u32>) {
+        self.cursor_color = color.map(pack_rgb);
+    }
+
+    /// Unfocused windows show a steady hollow cursor instead of a filled cell.
+    pub const fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     /// The palette in use, so callers can report or round-trip it.
@@ -651,10 +668,15 @@ impl OffscreenRenderer {
             selection_end: terminal
                 .selection_cell_range()
                 .map_or(u32::MAX, |range| range.1),
-            cursor_style: push_cursor_style(terminal.modes().cursor_style),
+            cursor_style: if self.focused {
+                push_cursor_style(terminal.modes().cursor_style)
+            } else {
+                3
+            },
             selection_color,
             padding_x: self.padding[0],
             padding_y: self.padding[1],
+            cursor_color: self.cursor_color.unwrap_or(u32::MAX),
         };
         record_frame(
             &self.device,
@@ -838,6 +860,8 @@ impl Renderer {
             offset_x: 0,
             offset_y: 0,
             palette: Palette::DARK,
+            cursor_color: None,
+            focused: true,
             padding: [0; 2],
             spacing: [0; 2],
         })
@@ -850,6 +874,16 @@ impl Renderer {
             self.grid_size = None;
         }
         self.palette = palette;
+    }
+
+    /// Overrides the cursor paint; None derives it from the cell foreground.
+    pub fn set_cursor_color(&mut self, color: Option<u32>) {
+        self.cursor_color = color.map(pack_rgb);
+    }
+
+    /// Unfocused windows show a steady hollow cursor instead of a filled cell.
+    pub const fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
     }
 
     /// The palette in use, so callers can report or round-trip it.
@@ -1015,7 +1049,7 @@ impl Renderer {
             cursor: (terminal.cursor().row * width + terminal.cursor().column) as u32,
             cursor_visible: u32::from(
                 terminal.modes().cursor_visible
-                    && (!terminal.modes().cursor_blink || cursor_blink_on)
+                    && (!self.focused || !terminal.modes().cursor_blink || cursor_blink_on)
                     && terminal.viewport_offset() == 0,
             ),
             selection_start: terminal
@@ -1024,10 +1058,15 @@ impl Renderer {
             selection_end: terminal
                 .selection_cell_range()
                 .map_or(u32::MAX, |range| range.1),
-            cursor_style: push_cursor_style(terminal.modes().cursor_style),
+            cursor_style: if self.focused {
+                push_cursor_style(terminal.modes().cursor_style)
+            } else {
+                3
+            },
             selection_color,
             padding_x: self.padding[0],
             padding_y: self.padding[1],
+            cursor_color: self.cursor_color.unwrap_or(u32::MAX),
         };
         record_frame(
             &self.device,
@@ -2741,7 +2780,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
         assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
-        assert_eq!(size_of::<PushGrid>(), 60);
+        assert_eq!(size_of::<PushGrid>(), 64);
         assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
         assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
@@ -2757,6 +2796,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(PushGrid, selection_color), 48);
         assert_eq!(std::mem::offset_of!(PushGrid, padding_x), 52);
         assert_eq!(std::mem::offset_of!(PushGrid, padding_y), 56);
+        assert_eq!(std::mem::offset_of!(PushGrid, cursor_color), 60);
     }
 
     #[test]

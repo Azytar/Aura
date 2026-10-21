@@ -195,6 +195,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     renderer.set_padding(config.window.padding_x, config.window.padding_y);
     renderer.set_cell_spacing(config.font.letter_spacing, config.font.line_spacing);
     renderer.set_palette(config.colors.palette());
+    renderer.set_cursor_color(config.colors.cursor);
     renderer
         .render(&mut terminal, &mut font, true)
         .map_err(io::Error::other)?;
@@ -348,12 +349,17 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(bytes) = terminal.focus_report(true) {
                                     input.push(bytes);
                                 }
+                                renderer.set_focused(true);
+                                last_typing = std::time::Instant::now();
+                                set_periodic_timer(timer, config.cursor.blink_interval_ms)?;
                                 cursor_blink_on = true;
                                 invalidated = true;
                             }
                             Event::FocusOut(event)
                                 if event.mode == x11rb::protocol::xproto::NotifyMode::NORMAL =>
                             {
+                                renderer.set_focused(false);
+                                invalidated = true;
                                 pressed_keys.clear();
                                 if let Some(bytes) = terminal.focus_report(false) {
                                     input.push(bytes);
@@ -878,6 +884,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     terminal.set_scrollback_limit(next.scrollback.lines);
                     renderer.set_palette(next.colors.palette());
+                    renderer.set_cursor_color(next.colors.cursor);
                     renderer.set_glyph_offset(next.font.offset_x, next.font.offset_y);
                     renderer.set_padding(next.window.padding_x, next.window.padding_y);
                     renderer.set_cell_spacing(next.font.letter_spacing, next.font.line_spacing);

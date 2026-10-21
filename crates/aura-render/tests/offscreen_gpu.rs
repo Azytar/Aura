@@ -1021,3 +1021,48 @@ fn return_symbols_remain_visible_without_painting_neighbor_cells() {
         }
     }
 }
+
+#[test]
+fn configured_cursor_color_and_focus_have_independent_pixel_shapes() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
+    let mut font = Font::load(None, 18.0).unwrap();
+    let metrics = font.metrics();
+    let (width, height) = (metrics.width, metrics.height);
+    let mut terminal = Terminal::new(1, 1).unwrap();
+    terminal.process(b" \r");
+    let mut renderer = OffscreenRenderer::new(width, height).unwrap();
+    renderer.set_show_cursor(true);
+    renderer.set_cursor_color(Some(0x12ab34));
+    for (sequence, focused, shape) in [
+        ("\x1b[2 q", true, 0),
+        ("\x1b[4 q", true, 1),
+        ("\x1b[6 q", true, 2),
+        ("\x1b[2 q", false, 3),
+    ] {
+        terminal.process(sequence.as_bytes());
+        renderer.set_focused(focused);
+        let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+        let thick = (height >> 4).max(1);
+        for y in 0..height {
+            for x in 0..width {
+                let painted = match shape {
+                    0 => true,
+                    1 => y >= height - 2 * thick,
+                    2 => x < 2 * thick,
+                    3 => x < thick || y < thick || x >= width - thick || y >= height - thick,
+                    _ => unreachable!(),
+                };
+                let expected = if painted {
+                    [0x12, 0xab, 0x34, 255]
+                } else {
+                    [24, 24, 24, 255]
+                };
+                let at = ((y * width + x) * 4) as usize;
+                assert_eq!(&pixels[at..at + 4], &expected, "shape={shape} ({x},{y})");
+            }
+        }
+    }
+}
