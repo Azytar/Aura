@@ -1,6 +1,7 @@
 mod bindings;
 mod config_reload;
 mod enhanced_keys;
+mod frame_pacing;
 mod input;
 mod keyboard;
 mod mouse;
@@ -196,9 +197,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     renderer.set_cell_spacing(config.font.letter_spacing, config.font.line_spacing);
     renderer.set_palette(config.colors.palette());
     renderer.set_cursor_color(config.colors.cursor);
-    renderer
-        .render(&mut terminal, &mut font, true)
-        .map_err(io::Error::other)?;
+    // The X11 background already paints the empty window. Let the first
+    // Expose/PTY batch draw actual content instead of submitting a blank
+    // frame before mapping and then immediately replacing it.
     connection.map_window(window)?;
     connection.flush()?;
 
@@ -270,6 +271,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut keyboard = Keyboard::new(&connection, debug_keyboard)?;
     let mut running = true;
     let mut invalidated = false;
+    let mut frame_pacer = frame_pacing::FramePacer::new(config.window.max_fps);
     let mut font_resize_pending = false;
     let mut cursor_blink_on = true;
     let mut selection_anchor = None;
@@ -301,7 +303,13 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                     epoll_owner.as_raw_fd(),
                     events.as_mut_ptr(),
                     events.len() as i32,
-                    sync_gate.timeout_ms(),
+                    match (
+                        sync_gate.timeout_ms(),
+                        frame_pacer.timeout_ms(std::time::Instant::now()),
+                    ) {
+                        (-1, timeout) | (timeout, -1) => timeout,
+                        (sync, frame) => sync.min(frame),
+                    },
                 )
             }
         };
@@ -882,6 +890,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             })();
             match candidate {
                 Ok((next, sources, bindings, next_font)) => {
+                    if next.window.max_fps != config.window.max_fps {
+                        frame_pacer.set_max_fps(next.window.max_fps);
+                    }
                     if next.font.size != config.font.size {
                         font_sizes = RuntimeFontSize::new(next.font.size);
                     }
@@ -1009,14 +1020,22 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
         if !synchronized && terminal.modes().synchronized_output {
             terminal.end_synchronized_output();
         }
+        if synchronized {
+            frame_pacer.suspend();
+        }
         if invalidated && !synchronized {
-            let started = stats.start();
-            let timings = renderer
-                .render_with_timings(&mut terminal, &mut font, cursor_blink_on, stats.enabled())
-                .map_err(io::Error::other)?;
-            stats.finish("frame_total", started);
-            stats.renderer(timings);
-            invalidated = false;
+            let now = std::time::Instant::now();
+            frame_pacer.request(now);
+            if frame_pacer.ready(now) {
+                frame_pacer.submitted(now);
+                let started = stats.start();
+                let timings = renderer
+                    .render_with_timings(&mut terminal, &mut font, cursor_blink_on, stats.enabled())
+                    .map_err(io::Error::other)?;
+                stats.finish("frame_total", started);
+                stats.renderer(timings);
+                invalidated = false;
+            }
         }
         stats.maybe_report();
         if pty.try_wait()?.is_some() {

@@ -545,6 +545,7 @@ pub struct WindowConfig {
     pub title: String,
     pub class: String,
     pub dynamic_title: bool,
+    pub max_fps: u32,
 }
 
 impl WindowConfig {
@@ -626,6 +627,7 @@ impl WindowConfig {
                 .get("dynamic_title")
                 .and_then(toml::Value::as_bool)
                 .unwrap_or(true),
+            max_fps: interaction::bounded(&window, "max_fps", 120, 1, 1000, "window")? as u32,
         })
     }
 }
@@ -1028,6 +1030,7 @@ fn validate_config(table: &toml::Table) -> Result<(), ConfigError> {
             "window",
             &[
                 ("columns", Integer),
+                ("max_fps", Integer),
                 ("lines", Integer),
                 ("padding_x", Integer),
                 ("padding_y", Integer),
@@ -1124,6 +1127,7 @@ impl AppConfig {
                 fallback_families: Vec::new(),
             },
             window: WindowConfig {
+                max_fps: 120,
                 columns: DEFAULT_COLUMNS,
                 lines: DEFAULT_LINES,
                 padding_x: DEFAULT_PADDING,
@@ -1722,6 +1726,27 @@ columns = 0
         let parsed: toml::Table = toml::from_str(toml_str).unwrap();
         let err = WindowConfig::parse_table(&parsed).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn render_rate_is_bounded_and_has_the_same_default_when_omitted() {
+        let parse = |text: &str| AppConfig::load_from_text(&toml::from_str(text).unwrap());
+        assert_eq!(
+            parse("").unwrap().window.max_fps,
+            AppConfig::defaults().window.max_fps
+        );
+        for rate in [1, 120, 1000] {
+            assert_eq!(
+                parse(&format!("[window]\nmax_fps = {rate}"))
+                    .unwrap()
+                    .window
+                    .max_fps,
+                rate
+            );
+        }
+        for value in ["0", "-1", "1001", "120.0", "true", "\"120\""] {
+            assert!(parse(&format!("[window]\nmax_fps = {value}")).is_err());
+        }
     }
 
     #[test]

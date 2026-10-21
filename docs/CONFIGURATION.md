@@ -79,6 +79,13 @@ Arguments are passed directly, without an intermediate command-line parser.
 The directory and environment apply only to the child. With no explicit program
 or arguments, Aura keeps its configured interactive login-shell selection.
 
+## Repaint scheduling
+
+`window.max_fps` limits render calls to 1..1000 per second (default 120), with
+a short initial coalescing delay. Input and PTY processing continue between
+repaints; an idle terminal does not poll for frames. This is a ceiling, not a
+promise of presented frames or display latency. The setting supports live reload.
+
 ## Fonts and text
 
 Font names search `$XDG_DATA_HOME/fonts` (default `~/.local/share/fonts`),

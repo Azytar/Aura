@@ -34,6 +34,7 @@ padding_y = 0
 title = "Terminal"
 class = "AURA Terminal"          # X11 WM_CLASS for window-manager rules
 dynamic_title = true             # allow the application to update the title
+max_fps = 120                    # 1..1000; render-call ceiling, not a presentation guarantee
 
 [colors]
 theme = "dark"                   # dark | light | custom; custom starts from dark

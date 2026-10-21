@@ -30,6 +30,12 @@ per commit.
 
 ### Fixed
 
+- Output bursts coalesce repaints while X11 and PTY input remain active.
+  `window.max_fps` controls the render-call ceiling (default 120) and supports
+  live reload; synchronized-output waits suspend frame wakeups.
+- Startup waits until PTY and renderer resources exist before mapping, then
+  draws the first content batch instead of an extra empty frame.
+
 - Printable ASCII writes update row spans without repeating cell and metadata
   cleanup for each byte. UTF-8 runs preserve scalar parser events and fragmented
   input behavior; combining extensions retain existing cell metadata.

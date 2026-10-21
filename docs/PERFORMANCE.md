@@ -14,6 +14,11 @@ scalar terminal writes, including malformed UTF-8, wide pairs, combining marks,
 links, decoration, delayed wrap, character sets and insert mode. Recording scroll
 is also compared with the previous cloning algorithm and checks buffer ownership.
 
+Native comparisons additionally exercise render coalescing. `window.max_fps`
+sets a render-call ceiling while the event loop continues to service input and
+output. Record the effective setting when comparing builds; a changed rate is
+not evidence of faster GPU presentation. Keep collected measurements private.
+
 The sustained core workloads write approximately 1 MiB of line-oriented ASCII,
 wide/combining Unicode or SGR text per iteration, eight times. Each terminal uses
 an 80x24 grid and either zero or 10,000 history rows, filled outside the timer.
