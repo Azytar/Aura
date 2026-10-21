@@ -35,6 +35,7 @@ pub enum Event {
     },
     Csi(Csi),
     Osc(Vec<u8>),
+    DcsQuery(Vec<u8>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +64,7 @@ pub struct Parser {
     csi_bytes: usize,
     string: Vec<u8>,
     string_overflow: bool,
+    is_dcs: bool,
     string_utf8_remaining: u8,
     utf8: [u8; 4],
     utf8_len: u8,
@@ -80,6 +82,7 @@ impl Default for Parser {
             csi_bytes: 0,
             string: Vec::with_capacity(128),
             string_overflow: false,
+            is_dcs: false,
             string_utf8_remaining: 0,
             utf8: [0; 4],
             utf8_len: 0,
@@ -201,6 +204,7 @@ impl Parser {
         match byte {
             0x90 | 0x98 | 0x9e | 0x9f => {
                 self.begin_string(State::Dcs);
+                self.is_dcs = byte == 0x90;
                 None
             }
             0x9b => {
@@ -267,6 +271,7 @@ impl Parser {
             }
             b'P' | b'X' | b'^' | b'_' => {
                 self.begin_string(State::Dcs);
+                self.is_dcs = byte == b'P';
                 None
             }
             0x20..=0x2f => {
@@ -466,10 +471,7 @@ impl Parser {
 
     fn advance_dcs(&mut self, byte: u8) -> Option<Event> {
         match byte {
-            0x9c if self.string_utf8_remaining == 0 => {
-                self.state = State::Ground;
-                None
-            }
+            0x9c if self.string_utf8_remaining == 0 => self.finish_dcs(),
             0x1b => {
                 self.state = State::DcsEscape;
                 None
@@ -483,15 +485,27 @@ impl Parser {
 
     fn advance_dcs_escape(&mut self, byte: u8) -> Option<Event> {
         if byte == b'\\' {
-            self.state = State::Ground;
-            self.string.clear();
-            self.string_overflow = false;
+            return self.finish_dcs();
         } else {
             self.push_string(0x1b);
             self.push_string(byte);
             self.state = State::Dcs;
         }
         None
+    }
+
+    fn finish_dcs(&mut self) -> Option<Event> {
+        self.state = State::Ground;
+        let query = self.is_dcs
+            && !self.string_overflow
+            && (self.string.starts_with(b"+q") || self.string.starts_with(b"$q"));
+        self.string_overflow = false;
+        if query {
+            Some(Event::DcsQuery(std::mem::take(&mut self.string)))
+        } else {
+            self.string.clear();
+            None
+        }
     }
 
     fn reset_sequence(&mut self) {
@@ -502,6 +516,7 @@ impl Parser {
         self.csi_bytes = 0;
         self.string.clear();
         self.string_overflow = false;
+        self.is_dcs = false;
         self.string_utf8_remaining = 0;
     }
 }

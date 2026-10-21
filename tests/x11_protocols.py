@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from x11_daily_use import run, wait_for, window_for
+from x11_daily_use import capture, run, wait_for, window_for
 
 
 class Fixture:
@@ -134,6 +134,23 @@ def main():
             if other is not None:
                 other.terminate()
                 other.wait(timeout=8)
+            fixture.close()
+        fixture = Fixture(Path(directory) / "queries", binary, b"\x1b[?1003h\x1b[?1003$p\x1b[?9999$p\x1b]10;?\x07\x1b[14t\x1b[16t\x1b[18t\x1bP+q4d73\x1b\\")
+        try:
+            expected = [b"\x1b[?1003;1$y", b"\x1b[?9999;0$y", b"\x1b]10;rgb:", b"\x1b[4;", b"\x1b[6;", b"\x1b[8;8;20t", b"\x1bP0+r4d73\x1b\\"]
+            wait_for(lambda: all(part in fixture.data() for part in expected), "missing host capability replies")
+            fixture.emit(b"\x1b[?25l\x1b[?2026h\x1b[48;2;17;34;51m\x1b[2J", "HELD")
+            # The client deliberately never closes the batch. The host's bounded
+            # recovery must eventually present the new background and clear mode.
+            def recovered():
+                image = capture(fixture.window, Path(directory) / "sync.xwd")
+                at = ((image[1] // 2) * image[0] + image[0] // 2) * 3
+                return image[2][at:at + 3] == bytes([17, 34, 51])
+            wait_for(recovered, "stalled synchronized output never recovered")
+            fixture.emit(b"\x1b[?2026$p", "SYNC_QUERY")
+            wait_for(lambda: b"\x1b[?2026;2$y" in fixture.data(), "expired synchronized mode remained active")
+            print("PASS host color/size/mode/termcap replies and stalled synchronized-output recovery")
+        finally:
             fixture.close()
     return 0
 

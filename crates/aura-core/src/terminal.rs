@@ -1,3 +1,6 @@
+mod protocol;
+pub use protocol::HostProperties;
+
 use crate::{
     ActiveScreen, Cell, CellFlags, Cursor, Grid, GridError, Parser, ParserEvent, TerminalGrid,
 };
@@ -68,6 +71,7 @@ pub struct Modes {
     pub mouse_sgr: bool,
     pub mouse_pixel: bool,
     pub focus_reporting: bool,
+    pub synchronized_output: bool,
     pub bracketed_paste: bool,
     pub cursor_style: CursorStyle,
     pub cursor_blink: bool,
@@ -85,6 +89,7 @@ impl Default for Modes {
             mouse_sgr: false,
             mouse_pixel: false,
             focus_reporting: false,
+            synchronized_output: false,
             bracketed_paste: false,
             cursor_style: CursorStyle::Block,
             cursor_blink: true,
@@ -120,6 +125,7 @@ struct SavedCursor {
 /// Terminal semantics layered over the independent main and alternate grids.
 #[cfg_attr(test, derive(Clone, Debug, PartialEq, Eq))]
 pub struct Terminal {
+    host_properties: Option<HostProperties>,
     grid: TerminalGrid,
     parser: Parser,
     modes: Modes,
@@ -154,6 +160,7 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(width: usize, height: usize) -> Result<Self, GridError> {
         Ok(Self {
+            host_properties: None,
             grid: TerminalGrid::new(width, height)?,
             parser: Parser::new(),
             modes: Modes::default(),
@@ -723,7 +730,12 @@ impl Terminal {
                 replies,
             ),
             ParserEvent::Csi(csi) => self.csi(csi, replies),
-            ParserEvent::Osc(bytes) => self.osc(&bytes),
+            ParserEvent::DcsQuery(bytes) => self.protocol_dcs(&bytes, replies),
+            ParserEvent::Osc(bytes) => {
+                if !self.protocol_osc(&bytes, replies) {
+                    self.osc(&bytes);
+                }
+            }
         }
     }
 
@@ -802,6 +814,9 @@ impl Terminal {
     }
 
     fn csi(&mut self, csi: crate::Csi, replies: &mut Vec<u8>) {
+        if self.protocol_csi(&csi, replies) {
+            return;
+        }
         if csi.intermediate_len != 0 {
             if csi.private.is_none()
                 && csi.final_byte == b'q'
@@ -1360,6 +1375,7 @@ impl Terminal {
                 1016 => self.modes.mouse_pixel = enabled,
                 1049 => self.switch_alternate(enabled, true),
                 2004 => self.modes.bracketed_paste = enabled,
+                2026 => self.modes.synchronized_output = enabled,
                 _ => {}
             }
         }

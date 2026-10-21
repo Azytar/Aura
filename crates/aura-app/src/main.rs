@@ -4,6 +4,7 @@ mod mouse;
 mod perf;
 mod pointer;
 mod signals;
+mod sync;
 
 use keyboard::{FontSizeAction, Keyboard, font_size_action};
 use mouse::{MouseEvent, mouse_modes, mouse_report};
@@ -222,6 +223,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
     epoll_add(epoll, autoscroll_timer, 5, libc::EPOLLIN as u32)?;
     epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
+    let mut sync_gate = sync::SyncGate::new(std::time::Duration::from_millis(150));
     let mut pointer_cursor = pointer::Pointer::new(&connection, window)?;
     let mut pointer_hidden = false;
     let mut input = input::Input::default();
@@ -259,7 +261,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     epoll_owner.as_raw_fd(),
                     events.as_mut_ptr(),
                     events.len() as i32,
-                    -1,
+                    sync_gate.timeout_ms(),
                 )
             }
         };
@@ -634,6 +636,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(length) => {
                                 last_mouse_report = None;
                                 let started = stats.start();
+                                update_host_properties(&mut terminal, &config, &font, last_winsize);
                                 let replies = terminal.process(&buffer[..length]);
                                 stats.finish("parse", started);
                                 for request in terminal.take_clipboard_requests() {
@@ -808,7 +811,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             pointer_hidden,
             terminal.modes().mouse_tracking != MouseTracking::Off,
         )?;
-        if invalidated {
+        let synchronized = if terminal.modes().synchronized_output || sync_gate.active() {
+            sync_gate.update(
+                terminal.modes().synchronized_output,
+                std::time::Instant::now(),
+            )
+        } else {
+            false
+        };
+        if !synchronized && terminal.modes().synchronized_output {
+            terminal.end_synchronized_output();
+        }
+        if invalidated && !synchronized {
             let started = stats.start();
             let timings = renderer
                 .render_with_timings(&mut terminal, &mut font, cursor_blink_on, stats.enabled())
@@ -1527,6 +1541,22 @@ fn held_button(state: KeyButMask) -> Option<u8> {
     } else {
         None
     }
+}
+
+fn update_host_properties(terminal: &mut Terminal, config: &AppConfig, font: &Font, size: PtySize) {
+    let palette = config.colors.palette();
+    let metrics = configured_metrics(font, config);
+    terminal.set_host_properties(aura_core::HostProperties {
+        foreground: palette.foreground,
+        background: palette.background,
+        cursor: config.colors.cursor_color(),
+        ansi: palette.ansi,
+        cell_pixels: [
+            metrics.width.min(u16::MAX as u32) as u16,
+            metrics.height.min(u16::MAX as u32) as u16,
+        ],
+        window_pixels: [size.pixel_width, size.pixel_height],
+    });
 }
 
 fn configured_metrics(font: &Font, config: &AppConfig) -> CellMetrics {

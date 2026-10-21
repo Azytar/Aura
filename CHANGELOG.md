@@ -23,6 +23,10 @@ per commit.
 
 ### Fixed
 
+- Synchronized output batches (2026) defer presentation with a bounded host
+  recovery timeout. Color, geometry, mode and terminal queries receive ordered
+  replies; unknown modes and termcap names report unsupported capabilities.
+
 - Mouse-aware applications receive button-free motion (1003), focus events
   (1004), SGR pixel coordinates (1016) and normal press-mode releases. Shift
   retains local selection. The X11 pointer changes with application mouse
