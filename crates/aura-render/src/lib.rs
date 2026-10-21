@@ -175,6 +175,7 @@ struct FrameDraw {
     instances: u32,
     extent: vk::Extent2D,
     background_color: u32,
+    draw_background: bool,
     final_layout: vk::ImageLayout,
     readback: Option<vk::Buffer>,
 }
@@ -702,6 +703,7 @@ impl OffscreenRenderer {
                 instances: count as u32,
                 extent: self.extent,
                 background_color: pack_rgb(self.palette.background),
+                draw_background: needs_background(&cells, &push, pack_rgb(self.palette.background)),
                 final_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 readback: Some(readback.handle),
             },
@@ -1092,6 +1094,11 @@ impl Renderer {
                 instances: count as u32,
                 extent: self.extent,
                 background_color: pack_rgb(self.palette.background),
+                draw_background: needs_background(
+                    &self.gpu_cells,
+                    &push,
+                    pack_rgb(self.palette.background),
+                ),
                 final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                 readback: None,
             },
@@ -2570,6 +2577,26 @@ fn destroy_buffer(device: &Device, buffer: Buffer) {
     }
 }
 
+/// The attachment clear already paints a uniform default background. Keep
+/// the shader for every case that can add a different color or decoration.
+fn needs_background(cells: &[GpuCell], push: &PushGrid, background: u32) -> bool {
+    if push.cursor_visible != 0 || push.selection_start != u32::MAX {
+        return true;
+    }
+    cells.iter().any(|cell| {
+        let flags = CellFlags::from_bits_retain(cell.flags);
+        let color = if flags.contains(CellFlags::INVERSE) {
+            cell.fg
+        } else {
+            cell.bg
+        };
+        color != background
+            || (!flags.contains(CellFlags::HIDDEN)
+                && (flags.contains(CellFlags::UNDERLINE)
+                    || flags.contains(CellFlags::STRIKETHROUGH)))
+    })
+}
+
 fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), String> {
     let FrameDraw {
         image,
@@ -2581,6 +2608,7 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
         instances,
         extent,
         background_color,
+        draw_background,
         final_layout,
         readback,
     } = draw;
@@ -2662,8 +2690,10 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
             0,
             bytemuck::bytes_of(push),
         );
-        device.cmd_bind_pipeline(frame.command, vk::PipelineBindPoint::GRAPHICS, *background);
-        device.cmd_draw(frame.command, 3, 1, 0, 0);
+        if *draw_background {
+            device.cmd_bind_pipeline(frame.command, vk::PipelineBindPoint::GRAPHICS, *background);
+            device.cmd_draw(frame.command, 3, 1, 0, 0);
+        }
         device.cmd_bind_pipeline(frame.command, vk::PipelineBindPoint::GRAPHICS, *text);
         device.cmd_draw(frame.command, 4, *instances, 0, 0);
         device.cmd_end_rendering(frame.command);

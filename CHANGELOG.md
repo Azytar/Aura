@@ -30,6 +30,10 @@ per commit.
 
 ### Fixed
 
+- Uniform default backgrounds without visible decorations, a cursor or a
+  selection use the attachment clear directly, avoiding a redundant draw while
+  preserving colored-to-default transitions and pixel output.
+
 - Repeated shaped-cluster lookups reuse one bounded entry without temporary
   string keys. Size, style and context checks and atlas/face invalidation preserve
   the normal lookup and rasterization results.

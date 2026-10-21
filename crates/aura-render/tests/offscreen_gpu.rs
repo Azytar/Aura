@@ -17,6 +17,58 @@ fn require_gpu() -> bool {
 }
 
 #[test]
+fn cell_backgrounds_cover_odd_grids_exactly_with_padding_and_spacing() {
+    if !require_gpu() {
+        eprintln!("skipped: no Vulkan 1.3 graphics device available");
+        return;
+    }
+    for size in [9.0, 18.0, 36.0] {
+        let mut font = Font::load(None, size).unwrap();
+        let metrics = font.metrics();
+        let (columns, rows) = (37, 11);
+        let (cw, ch) = (metrics.width + 1, metrics.height + 2);
+        let (width, height) = (cw * columns as u32 + 8, ch * rows as u32 + 10);
+        let mut terminal = Terminal::new(columns, rows).unwrap();
+        terminal.process(b"\x1b[?25l");
+        let color = |row: usize, col: usize| {
+            [
+                ((row * 17 + col * 31) % 256) as u8,
+                ((row * 43 + col * 13) % 256) as u8,
+                ((row * 7 + col * 53) % 256) as u8,
+                255,
+            ]
+        };
+        for row in 0..rows {
+            for col in 0..columns {
+                let [r, g, b, _] = color(row, col);
+                terminal.process(
+                    format!("\x1b[{};{}H\x1b[48;2;{r};{g};{b}m ", row + 1, col + 1).as_bytes(),
+                );
+            }
+        }
+        let mut renderer = OffscreenRenderer::new(width, height).unwrap();
+        renderer.set_padding(4, 5);
+        renderer.set_cell_spacing(1, 2);
+        let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+        for y in 0..height {
+            for x in 0..width {
+                let expected = if x >= 4 && y >= 5 && x < width - 4 && y < height - 5 {
+                    color(((y - 5) / ch) as usize, ((x - 4) / cw) as usize)
+                } else {
+                    [24, 24, 24, 255]
+                };
+                let offset = ((y * width + x) * 4) as usize;
+                assert_eq!(
+                    &pixels[offset..offset + 4],
+                    expected,
+                    "size={size}, pixel={x},{y}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn renders_terminal_cells_and_reads_back_expected_colors() {
     if !require_gpu() {
         eprintln!("skipped: no Vulkan 1.3 graphics device available");

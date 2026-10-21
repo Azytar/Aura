@@ -39,6 +39,11 @@ its atlas. Differential tests compare it with full map lookup through context,
 style, face, fallback and size changes. Warm repeated-cluster results should be
 considered alongside mixed/contextual workloads and native runs.
 
+Background-pass elision requires the attachment clear to match every effective
+cell background, with no visible decorations, cursor or selection. Each acquired
+image is still cleared. Validate complete RGBA images across colored-to-default
+transitions, decoration states and cursor/selection changes.
+
 The original table below records an earlier run of the benchmark binaries.
 The resize follow-up at the end records a separate environment and comparison:
 
