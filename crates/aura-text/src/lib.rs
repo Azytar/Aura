@@ -263,23 +263,16 @@ impl Font {
 
     /// Resolves a font family name or filesystem path to a concrete font file.
     ///
-    /// Resolution order:
-    /// 1. If `family` is an existing file, use it directly.
-    /// 2. Search `/usr/share/fonts` recursively for files whose stem contains
-    ///    the family name (case-insensitive).
-    /// 3. Fall back to the same search in `/usr/local/share/fonts`.
+    /// Explicit paths take precedence, then user fonts, then system directories.
+    /// This is directory discovery; fontconfig aliases and rules are not evaluated.
     pub fn resolve_family_path(family: &str) -> Option<PathBuf> {
         let candidate = PathBuf::from(family);
         if candidate.is_file() {
             return Some(candidate);
         }
-        for root in ["/usr/share/fonts", "/usr/local/share/fonts"] {
-            let root = PathBuf::from(root);
-            if let Some(found) = search_font_dir(&root, family) {
-                return Some(found);
-            }
-        }
-        None
+        font_search_roots()
+            .iter()
+            .find_map(|root| search_font_dir(root, family))
     }
 
     /// Loads a font by family name or explicit path, falling back to the
@@ -977,6 +970,26 @@ fn family_matches_path(family: &str, path: &Path) -> bool {
 /// hyphens, or other punctuation match font file stems that omit them.
 fn normalize_name(name: &str) -> String {
     name.chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+fn font_search_roots() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
+    let mut roots = Vec::new();
+    if let Some(data) = data {
+        roots.push(data.join("fonts"));
+    }
+    if let Some(home) = home {
+        roots.push(home.join(".fonts"));
+    }
+    roots.extend([
+        PathBuf::from("/usr/local/share/fonts"),
+        PathBuf::from("/usr/share/fonts"),
+    ]);
+    roots
 }
 
 fn default_font_path() -> Option<PathBuf> {

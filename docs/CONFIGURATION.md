@@ -78,3 +78,16 @@ EDITOR = "nvim"
 Arguments are passed directly, without an intermediate command-line parser.
 The directory and environment apply only to the child. With no explicit program
 or arguments, Aura keeps its configured interactive login-shell selection.
+
+## Fonts and text
+
+Font names search `$XDG_DATA_HOME/fonts` (default `~/.local/share/fonts`),
+`~/.fonts`, `/usr/local/share/fonts` and `/usr/share/fonts`. Explicit file paths
+take precedence. Fontconfig aliases and rules are not evaluated. Style faces and
+fallback families use the same discovery; fallback preserves the primary grid.
+
+`colors.cursor` overrides the block, bar and underline paint. With no override,
+the cursor uses the effective cell foreground. Unfocused windows show a steady
+hollow cursor. `cursor.blink_interval_ms` sets the interval; typing restarts it.
+After `cursor.blink_timeout_ms` of inactivity the cursor stays visible; zero
+disables that timeout. Applications can still select cursor shape and blinking.

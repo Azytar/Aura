@@ -150,10 +150,10 @@ a `Ctrl+C` when a skew is detected.
   keyboard events.
 - **No input-to-present latency instrumentation.** Opt-in host stage timings
   do not establish when an image reaches the screen.
-- **No subpixel antialiasing**, and underline and strikethrough render as solid
-  bars. Hyperlink text has no distinct style.
-- **No fontconfig discovery.** Fonts are found by scanning standard
-  directories, so a font outside them needs an explicit path.
+- **No subpixel antialiasing.** Hyperlink text has no distinct automatic style.
+- **No fontconfig discovery.** Fonts are found in XDG/user and standard system
+  directories; fonts outside them need an explicit path. Fontconfig aliases and
+  rules are not evaluated.
 - OSC 8 hyperlinks are parsed and stored, and OSC 52 writes are honoured, but
   nothing opens a link on click.
 
