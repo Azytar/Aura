@@ -100,6 +100,12 @@ install -Dm644 aura.desktop /usr/share/applications/aura.desktop
 - `Shift+PageUp` / `Shift+PageDown` scrollback, `Ctrl+Shift+Home` top,
   `Ctrl+Shift+End` bottom.
 
+Mouse-aware applications can request hover motion, focus changes and pixel
+coordinates. Shift gives local selection back to Aura. Enhanced keyboard
+sequences are negotiated by the application; ordinary shell input keeps its
+legacy encoding. The pointer hides while typing and returns on motion;
+`[mouse]` and `[cursor]` customize that behavior and cursor timing.
+
 ## Layout
 
 - `crates/aura-core`: VT parser, terminal state, grid, scrollback, Unicode.

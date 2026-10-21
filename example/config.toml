@@ -10,7 +10,7 @@ live_config_reload = true
 sync_timeout_ms = 150            # 1..2000; recover an unfinished TUI update batch
 
 [font]
-family = "monospace"              # family name or explicit font file
+family = "monospace"             # family name or explicit font file
 size = 14.0                      # 6..72 pixels; Ctrl+Plus/Minus zoom, Ctrl+0 resets
 letter_spacing = 0               # -16..16; changes cell width
 line_spacing = 0                 # -32..32; changes cell height
@@ -32,7 +32,7 @@ lines = 32                       # startup size; 1..256
 padding_x = 0
 padding_y = 0
 title = "Terminal"
-class = "AURA Terminal"           # X11 WM_CLASS for window-manager rules
+class = "AURA Terminal"          # X11 WM_CLASS for window-manager rules
 dynamic_title = true             # allow the application to update the title
 
 [colors]
@@ -50,12 +50,12 @@ theme = "dark"                   # dark | light | custom; custom starts from dar
 [cursor]
 style = "block"                  # block | underline | bar; TUI cursor sequences override it
 blink = true
-blink_interval_ms = 500           # 100..2000; typing restarts the interval
-blink_timeout_ms = 5000           # 0..60000; 0 keeps blinking while idle
+blink_interval_ms = 500          # 100..2000; typing restarts the interval
+blink_timeout_ms = 5000          # 0..60000; 0 keeps blinking while idle
 
 [mouse]
 hide_when_typing = true
-scroll_lines = 3                  # 1..100; wheel scroll when the application is not tracking
+scroll_lines = 3                 # 1..100; wheel scroll when the application is not tracking
 # Shift temporarily gives selection back to Aura in a mouse-aware TUI.
 
 [scrollback]
@@ -88,4 +88,4 @@ use_default_bindings = true
 
 [security]
 osc52 = "write-only"             # write-only | disabled; clipboard reads are never answered
-max_paste_bytes = 65536           # 1..1048564; reject oversized pastes as a whole
+max_paste_bytes = 65536          # 1..1048564; reject oversized pastes as a whole
