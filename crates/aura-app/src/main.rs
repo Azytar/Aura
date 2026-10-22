@@ -275,6 +275,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut font_resize_pending = false;
     let mut cursor_blink_on = true;
     let mut selection_anchor = None;
+    let mut selection_override = false;
     let mut selection_kind = SelectionKind::Cell;
     let mut autoscroll_dir: Option<i8> = None;
     let mut pointer = (0i16, 0i16);
@@ -546,6 +547,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                         .map_or(1, |(_, _, _, count)| count % 3 + 1);
                                     last_click = Some((button.time, button.detail, point, count));
                                     selection_anchor = Some(point);
+                                    // Keep ownership of a Shift-started gesture
+                                    // until release, even if Shift is released first.
+                                    selection_override = button.state.contains(KeyButMask::SHIFT);
                                     selection_kind = match count {
                                         2 => SelectionKind::Word,
                                         3 => SelectionKind::Line,
@@ -583,16 +587,20 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::ButtonRelease(button) => {
                                 last_mouse_report = None;
+                                let local_release =
+                                    button.detail == 1 && selection_anchor.is_some();
                                 // Only releasing the selecting button ends a drag.
                                 // Wheel releases must leave its anchor and timer alive.
                                 if button.detail == 1 {
                                     selection_anchor = None;
+                                    selection_override = false;
                                     if autoscroll_dir.take().is_some() {
                                         set_autoscroll_timer(autoscroll_timer, false)?;
                                     }
                                 }
-                                if mouse_modes(&terminal, button.state).mouse_tracking
-                                    == MouseTracking::Off
+                                if local_release
+                                    || mouse_modes(&terminal, button.state).mouse_tracking
+                                        == MouseTracking::Off
                                 {
                                     // Own the PRIMARY selection like any X11
                                     // client, so other applications can paste
@@ -629,10 +637,16 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::MotionNotify(motion) => {
                                 pointer_hidden = false;
-                                if matches!(
-                                    mouse_modes(&terminal, motion.state).mouse_tracking,
-                                    MouseTracking::Drag | MouseTracking::Motion
-                                ) && let button = held_button(motion.state).unwrap_or(0)
+                                let local_drag = selection_anchor.is_some()
+                                    && terminal.selection().is_some()
+                                    && (selection_override
+                                        || terminal.modes().mouse_tracking == MouseTracking::Off);
+                                if !local_drag
+                                    && matches!(
+                                        mouse_modes(&terminal, motion.state).mouse_tracking,
+                                        MouseTracking::Drag | MouseTracking::Motion
+                                    )
+                                    && let button = held_button(motion.state).unwrap_or(0)
                                     && let Some(bytes) = mouse_report(
                                         mouse_modes(&terminal, motion.state),
                                         MouseEvent {
@@ -655,8 +669,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                         input.push(&bytes);
                                         last_mouse_report = Some(bytes);
                                     }
-                                } else if mouse_modes(&terminal, motion.state).mouse_tracking
-                                    == MouseTracking::Off
+                                } else if (local_drag
+                                    || mouse_modes(&terminal, motion.state).mouse_tracking
+                                        == MouseTracking::Off)
                                     && held_button(motion.state) == Some(1)
                                     && terminal.selection().is_some()
                                     && let Some(anchor) = selection_anchor
@@ -822,7 +837,8 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         )
                     };
                     if let (Some(direction), Some(anchor)) = (autoscroll_dir, selection_anchor)
-                        && terminal.modes().mouse_tracking == MouseTracking::Off
+                        && (selection_override
+                            || terminal.modes().mouse_tracking == MouseTracking::Off)
                         && terminal.selection().is_some()
                     {
                         let metrics = configured_metrics(&font, &config);
@@ -857,6 +873,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         set_autoscroll_timer(autoscroll_timer, false)?;
                         autoscroll_dir = None;
                         selection_anchor = None;
+                        selection_override = false;
                     }
                 }
                 _ => {}

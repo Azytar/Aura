@@ -284,6 +284,67 @@ def history_selection(root, binary):
         fixture.close()
 
 
+def shifted_history_selection(root, binary):
+    output = b"\r\n".join(f"line{line:03}".encode() for line in range(60))
+    fixture = Fixture(
+        root / "shift-selection",
+        binary,
+        output + b"\x1b[?1003;1006h",
+        config="[window]\ncolumns=40\nlines=12\npadding_x=0\npadding_y=0\n[cursor]\nblink=false\n",
+        complete_config=True,
+    )
+    try:
+        run("xdotool", "windowmove", fixture.window, "0", "0")
+        geometry = dict(
+            line.split("=", 1)
+            for line in run("xdotool", "getwindowgeometry", "--shell", fixture.window)
+            .decode()
+            .splitlines()
+        )
+        cell = int(geometry["HEIGHT"]) // 12
+        run("xdotool", "keydown", "Shift_L")
+        run(
+            "xdotool", "mousemove", "--window", fixture.window, "0",
+            str(cell * 10 + cell // 2), "mousedown", "1",
+        )
+        # Finish the gesture with Shift released. The application never got its
+        # button press, so it must not get the rest of this local selection.
+        start = len(fixture.data())
+        run("xdotool", "mousemove", "--window", fixture.window, "0", "0")
+        run("xdotool", "keyup", "Shift_L")
+
+        # The anchor is column zero of line 58; selection includes that one
+        # character, not the rest of its row.
+        expected = b"\n".join(f"line{line:03}".encode() for line in range(58)) + b"\nl"
+
+        def copied_to_start():
+            run("xdotool", "key", "ctrl+shift+c")
+            text = run("xclip", "-o", "-selection", "clipboard", timeout=2)
+            return text == expected
+
+        wait_for(
+            copied_to_start, "Shift drag did not autoscroll over application mouse mode"
+        )
+        run("xdotool", "mouseup", "1")
+        primary = run("xclip", "-o", "-selection", "primary", timeout=2)
+        assert primary == expected, primary
+        # An ordered input sentinel waits for queued reports to reach the raw
+        # helper before checking that no part of this gesture leaked to it.
+        run("xdotool", "key", "a")
+        wait_for(lambda: fixture.data().endswith(b"a"), "release sentinel not delivered")
+        assert fixture.data()[start:] == b"a", fixture.data()[start:]
+        # Normal motion still belongs to the application after release.
+        run("xdotool", "key", "ctrl+shift+End")
+        run("xdotool", "mousemove", "--window", fixture.window, "20", "30")
+        wait_for(
+            lambda: b"\x1b[<35;" in fixture.data()[start:], "mouse reporting did not resume"
+        )
+        print("PASS: Shift history drag, modifier release, PRIMARY and application mouse ownership")
+    finally:
+        run("xdotool", "mouseup", "1", "keyup", "Shift_L")
+        fixture.close()
+
+
 def main():
     for tool in ["xdotool", "xdpyinfo", "xrdb", "xclip"]:
         if not shutil.which(tool):
@@ -301,6 +362,7 @@ def main():
         root = Path(directory)
         themed_pointer(root, binary)
         history_selection(root, binary)
+        shifted_history_selection(root, binary)
     return 0
 
 

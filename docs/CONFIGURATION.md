@@ -66,6 +66,8 @@ mouse tracking for local selection; ordinary hover/motion reports remain opt-in.
 Holding the left button in the first or last text row scrolls the selection
 through retained history, even when the pointer cannot leave the screen.
 Releasing that button stops the scroll; wheel events can be used during the drag.
+A selection started with Shift retains local ownership until button release,
+including edge autoscroll, even if Shift is released first.
 
 The mouse pointer loads the X11 session theme at startup: `XCURSOR_THEME` and
 `XCURSOR_SIZE` override `Xcursor.theme` and `Xcursor.size` from Xresources.

@@ -30,6 +30,9 @@ per commit.
 
 ### Fixed
 
+- Shift-started local selections keep drag ownership through button release,
+  including edge autoscroll over applications with mouse tracking enabled.
+
 - Mouse pointers load the session's Xcursor theme and size instead of using
   fixed white core cursors. Missing or malformed themes retain a visible fallback.
 - Selection drags scroll retained history from inside the top and bottom text
