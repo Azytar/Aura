@@ -40,8 +40,15 @@ large-output fixtures; older approximate labels remain in the historical tables.
 Font workloads report nanoseconds per iteration so warm cache lookups do not
 round to zero at the former microsecond precision. Repeated-cluster cache hits
 remain a warm-cache case, distinct from mixed/contextual shaping and native input.
-That loop hides its receiver and inputs from the optimizer so an inline lookup
-cannot collapse into repeated copies of one constant result.
+Both scalar and repeated-cluster loops hide their receiver and inputs from the
+optimizer so an inline lookup cannot collapse into repeated copies of one
+constant result. Apply the same harness to both libraries when comparing builds;
+older scalar results with a visible receiver are not directly comparable.
+
+Scalar glyph lookup retains 128 bounded entries keyed by character and style
+before face resolution. Collisions use the normal lookup; atlas, face, fallback
+and size changes invalidate the entries. This is distinct from parsing Unicode
+or shaping contextual text and does not establish native input latency.
 
 Font cluster memoization retains one bounded key and shares invalidation with
 its atlas. Differential tests compare it with full map lookup through context,

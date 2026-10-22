@@ -120,6 +120,17 @@ enum GlyphIdentity {
     },
 }
 
+const SCALAR_CACHE_ENTRIES: usize = 128;
+
+#[derive(Clone, Copy)]
+struct ScalarGlyph {
+    ch: char,
+    bold: bool,
+    italic: bool,
+    index: u32,
+    info: GlyphInfo,
+}
+
 struct PositionedRaster {
     x: i32,
     y: i32,
@@ -161,6 +172,9 @@ pub struct Font {
     // One repeated cluster can be looked up without allocating an owned key.
     // Face, size and atlas changes invalidate this together with `glyphs`.
     last_text: Option<(GlyphKey, u32, GlyphInfo)>,
+    // Bounded front cache skips face/charmap resolution on repeated scalars.
+    // All face, style and size changes clear it with the atlas.
+    scalar_glyphs: [Option<ScalarGlyph>; SCALAR_CACHE_ENTRIES],
     context: ScaleContext,
 }
 
@@ -225,6 +239,7 @@ impl Font {
             color_shelf_height: 0,
             glyphs: HashMap::new(),
             last_text: None,
+            scalar_glyphs: [None; SCALAR_CACHE_ENTRIES],
             context: ScaleContext::new(),
         })
     }
@@ -258,6 +273,7 @@ impl Font {
         self.color_atlas.fill(0);
         self.glyphs.clear();
         self.last_text = None;
+        self.scalar_glyphs.fill(None);
         self.shelf_x = 1;
         self.shelf_y = 1;
         self.shelf_height = 0;
@@ -359,7 +375,36 @@ impl Font {
     /// Returns a stable atlas index and uploads only on the first lookup.
     /// Glyphs missing from the primary face fall back to the loaded fallback
     /// faces; characters missing everywhere use the primary .notdef glyph.
+    #[inline]
     pub fn glyph(
+        &mut self,
+        ch: char,
+        bold: bool,
+        italic: bool,
+    ) -> Result<(u32, GlyphInfo, Option<GlyphUpload>), String> {
+        let slot = ((ch as usize).wrapping_mul(33)
+            ^ (usize::from(bold) * 67)
+            ^ (usize::from(italic) * 19))
+            & (SCALAR_CACHE_ENTRIES - 1);
+        if let Some(cached) = self.scalar_glyphs[slot]
+            && cached.ch == ch
+            && cached.bold == bold
+            && cached.italic == italic
+        {
+            return Ok((cached.index, cached.info, None));
+        }
+        let (index, info, upload) = self.lookup_or_rasterize_glyph(ch, bold, italic)?;
+        self.scalar_glyphs[slot] = Some(ScalarGlyph {
+            ch,
+            bold,
+            italic,
+            index,
+            info,
+        });
+        Ok((index, info, upload))
+    }
+
+    fn lookup_or_rasterize_glyph(
         &mut self,
         ch: char,
         bold: bool,
@@ -1093,6 +1138,49 @@ fn load_fallbacks(configured: &[PathBuf]) -> Vec<FaceData> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scalar_front_cache_matches_full_lookup_through_collisions_and_font_changes() {
+        let mut cached = Font::load(None, 16.0).unwrap();
+        let mut reference = Font::load(None, 16.0).unwrap();
+        for change in 0..7 {
+            for font in [&mut cached, &mut reference] {
+                match change {
+                    1 => {
+                        font.set_size(24.0).unwrap();
+                    }
+                    2 => font.invalidate_atlas(),
+                    3 => font.set_fallback_families(&[]),
+                    4 => {
+                        let path = font.primary_path.to_string_lossy().into_owned();
+                        font.set_style_face(true, false, Some(&path), None).unwrap();
+                    }
+                    5 => {
+                        font.set_size(16.0).unwrap();
+                    }
+                    6 => {
+                        assert!(!font.set_size(16.0).unwrap());
+                    }
+                    _ => {}
+                }
+            }
+            for ch in ['A', 'a', 'á', 'a', '界', '↵', '🙂', ' ', '\u{fe0f}', 'A'] {
+                for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
+                    for _ in 0..3 {
+                        reference.scalar_glyphs.fill(None);
+                        assert_eq!(
+                            cached.glyph(ch, bold, italic),
+                            reference.glyph(ch, bold, italic),
+                            "change={change}, ch={ch:?}, bold={bold}, italic={italic}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(cached.fallback_count(), reference.fallback_count());
+            assert_eq!(cached.atlas_pixels(), reference.atlas_pixels());
+            assert_eq!(cached.color_atlas_pixels(), reference.color_atlas_pixels());
+        }
+    }
+
     #[test]
     fn repeated_cluster_cache_matches_full_lookup_through_font_changes() {
         let mut cached = Font::load(None, 18.0).unwrap();

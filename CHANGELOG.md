@@ -30,6 +30,8 @@ per commit.
 
 ### Fixed
 
+- Repeated scalar glyphs use a bounded front cache before font-face resolution.
+  Font, style, fallback and atlas changes invalidate it with the main glyph cache.
 - Shift-started local selections keep drag ownership through button release,
   including edge autoscroll over applications with mouse tracking enabled.
 

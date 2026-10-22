@@ -21,8 +21,8 @@ fn main() {
         .expect("rasterize cache seed");
     measure("glyph cache hit", 50_000, || {
         black_box(
-            cached
-                .glyph(black_box('A'), false, false)
+            black_box(&mut cached)
+                .glyph(black_box('A'), black_box(false), black_box(false))
                 .expect("cached glyph"),
         );
     });
