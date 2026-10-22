@@ -45,12 +45,18 @@ changes relative to the chosen baseline. Each metric retains its own unit and
 direction of improvement.
 
 `quick` uses one warmup and three measured repetitions, 256 KiB output budgets,
-16 samples for each input case, four resize pairs and 0.3 seconds of idle time.
+16 samples for each continuous input case, eight input-to-pixel samples after
+50 ms pauses, four resize pairs and 0.3 seconds of idle time.
 It is a functional smoke profile, unsuitable for stable hardware rankings.
 `standard` uses two warmups and seven measured repetitions, 8 MiB budgets,
-100 input samples per case, twelve resize pairs and two idle seconds.
-`--repetitions`, `--warmups`, `--seed` and `--timeout` are explicit overrides
-retained in the run. Retain unfavorable repetitions and inspect raw trials.
+100 samples per continuous input case, 32 input-to-pixel samples after 50 ms
+pauses, twelve resize pairs and two idle seconds.
+`--repetitions`, `--warmups`, `--seed`, `--timeout` and `--payload-mib` are
+explicit overrides retained in the run. `--payload-mib` accepts 1..256 MiB per
+output case; for example 64 MiB makes short TUI rewrites less sensitive to one
+render interval. Larger output budgets leave input, resize, font and history
+settings unchanged. Compare the same budgets and preserve shorter runs too.
+Retain unfavorable repetitions and inspect raw trials.
 
 For hardware work, use an otherwise idle **dedicated** X11 desktop:
 
@@ -81,12 +87,22 @@ are labeled separately in the dashboard, regardless of this declaration.
 | Key delivery | XTest request → helper receives exactly `a` | host event delivery and PTY scheduling, including helper scheduling |
 | Key delivery under output | same boundary while a separate synthetic child continuously writes | responsiveness with a saturated, backpressured PTY; no pixel timing in this case |
 | Key to observed pixel | XTest request → new witness color read from the X11 drawable | upper bound to drawable update, including control transport, capture and 1 ms polling |
+| Key to observed pixel after pause | same boundary, with 50 ms after the previous observed witness before arming/injection | a separate offered-input cadence; the pause is excluded from the clock and does not certify idle |
 | Resize | XResizeWindow request → helper observes target PTY columns/rows | reflow, event handling and geometry notification; no presentation timestamp |
 | CPU | differences in observed process-tree CPU counters | terminal tree after readiness, excluding helper descendants and the X server |
 | RSS | sum of live tree resident pages after PTY readiness, sampled every 10 ms | shared pages counted per process; not PSS, VRAM, a whole-lifetime high-water mark or a guaranteed instantaneous peak |
 
 Input-to-observed-pixel is a closed-loop test: one key and its witness complete
-before the next sample. XGetImage can observe a drawable before the compositor
+before the next sample. The continuous case injects the next key without an
+intentional pause; its rate can reach the configured frame ceiling. The paused
+case requests a 50 ms pause after the prior witness before arming and injecting
+the next key. Actual witness-to-injection gaps, including scheduling and arming,
+are retained per sample in `input_after_pause_gaps_ms`. Both keep the same
+terminal configuration and use distinct sample lists;
+never pool them or describe a difference between them as a terminal speedup.
+The pause does not prove that a driver, compositor or device became idle.
+Old runs without `key_to_observed_pixel_after_pause_ms` retain missing data.
+XGetImage can observe a drawable before the compositor
 or display scans it out. Neither this metric nor DSR establishes input-to-photon
 latency. The capture itself can synchronize server/driver work. Control/startup
 and geometry waits have timeouts; a stalled native X server/driver can require
@@ -98,6 +114,11 @@ process consumes no CPU. The recorder samples the tree while waiting for control
 messages; its own CPU and synthetic writer CPU are outside the terminal scope.
 X server/compositor CPU, GPU energy and VRAM are not measured. These scoped
 figures do not establish total system efficiency.
+
+The additional `input_after_pause` phase retains its own CPU/resource counters.
+It is excluded from `load_cpu_seconds` along with idle so deliberately waiting
+between keys does not expand that aggregate's phase scope. Sampled peak RSS
+still covers the entire run after readiness, including this phase.
 
 The idle interval begins after the startup witness has been observed, so an
 early PTY handshake alone cannot move initial drawing into the idle sample.

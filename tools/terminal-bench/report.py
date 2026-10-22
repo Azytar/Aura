@@ -21,6 +21,11 @@ METRICS = {
     "key_to_child_ms": ("Tecla → proceso del PTY", "ms", False),
     "key_to_child_under_output_ms": ("Tecla → PTY con salida continua", "ms", False),
     "key_to_observed_pixel_ms": ("Tecla → píxel observado en X11 (cota)", "ms", False),
+    "key_to_observed_pixel_after_pause_ms": (
+        "Tecla → píxel tras pausa solicitada de 50 ms (cota)",
+        "ms",
+        False,
+    ),
     "resize_ack_ms": ("Resize → geometría del PTY", "ms", False),
     "idle_cpu_percent": ("CPU en reposo", "% de un núcleo", False),
     "idle_rss_mib": ("RSS muestreado en reposo", "MiB", False),

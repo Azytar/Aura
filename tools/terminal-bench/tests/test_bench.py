@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import adapters
+import bench
 import child
 import common
 import report
@@ -90,6 +91,27 @@ class Configuration(Temporary):
             with self.assertRaises(ValueError):
                 common.load_config(path)
 
+    def test_output_budget_override_is_bounded_and_recorded(self):
+        arguments = [
+            "bench.py", "run", "--config", str(self.config()),
+            "--output", str(self.root / "run"), "--xvfb", "--payload-mib",
+        ]
+        for value in [0, 257]:
+            with (
+                patch.object(sys, "argv", arguments + [str(value)]),
+                patch.object(runner, "run") as execute,
+            ):
+                self.assertEqual(bench.main(), 1)
+                execute.assert_not_called()
+        with (
+            patch.object(sys, "argv", arguments + ["64"]),
+            patch.object(runner, "run", return_value={"status": "complete"}) as execute,
+            patch.object(report, "render"),
+        ):
+            self.assertEqual(bench.main(), 0)
+            self.assertEqual(execute.call_args.args[1]["payload_bytes"], 64 * 1024 * 1024)
+            self.assertEqual(common.PROFILES["standard"]["payload_bytes"], 8 * 1024 * 1024)
+
     def test_output_cannot_escape_through_symlinks_into_any_checkout(self):
         repository = self.root / "repository"
         (repository / ".git").mkdir(parents=True)
@@ -132,6 +154,35 @@ class Protocol(Temporary):
         with patch.object(runner.time, "monotonic", side_effect=[0, 0, 2]):
             with self.assertRaisesRegex(TimeoutError, "witness"):
                 runner.wait_pixel(x11, 1, [4, 5], [41, 83, 167], resources, 1)
+
+    def test_input_clock_starts_at_injection_and_requires_a_fresh_witness(self):
+        channel, x11, resources = Mock(), Mock(), Mock()
+        channel.receive.side_effect = [
+            {"op": "armed"},
+            {"op": "input", "received_ns": 51_000_000},
+        ]
+        x11.key.return_value = 50_000_000
+        with patch.object(runner, "wait_pixel", return_value=53_000_000) as pixel:
+            self.assertEqual(
+                runner.input_sample(channel, x11, 1, [4, 5], [41, 83, 167], resources, 1),
+                dict(
+                    child_ms=1, pixel_ms=3,
+                    injected_ns=50_000_000, observed_ns=53_000_000,
+                ),
+            )
+            pixel.assert_called_once_with(x11, 1, [4, 5], [41, 83, 167], resources, 1)
+        channel.receive.side_effect = [{"op": "wrong"}]
+        x11.key.reset_mock()
+        with self.assertRaisesRegex(ValueError, "arm"):
+            runner.input_sample(channel, x11, 1, [4, 5], [41, 83, 167], resources, 1)
+        x11.key.assert_not_called()
+        channel.receive.side_effect = [
+            {"op": "armed"},
+            {"op": "input", "received_ns": 51_000_000},
+        ]
+        with patch.object(runner, "wait_pixel", side_effect=TimeoutError("witness")):
+            with self.assertRaisesRegex(TimeoutError, "witness"):
+                runner.input_sample(channel, x11, 1, [4, 5], [41, 83, 167], resources, 1)
 
     def test_payloads_are_deterministic_complete_utf8_and_cover_budget(self):
         for kind in ["ascii", "unicode", "sgr", "tui"]:
@@ -297,6 +348,26 @@ class Reports(Temporary):
             if row["metric"] == "startup_ready_ms" and row["terminal"] == "aura"
         )
         self.assertEqual(ready["p50"], 2)
+
+    def test_paused_and_continuous_input_stay_separate_and_missing_stays_missing(self):
+        manifest = self.manifest()
+        metric = "key_to_observed_pixel_after_pause_ms"
+        old = [row for row in report.aggregate(manifest) if row["metric"] == metric]
+        self.assertTrue(all(row["p50"] is None and row["n"] == 0 for row in old))
+        manifest["trials"][1]["metrics"].update(
+            {"key_to_observed_pixel_ms": [8, 10], metric: [2, 3, 4]}
+        )
+        rows = report.aggregate(manifest)
+        paused = next(
+            row for row in rows
+            if row["terminal"] == "aura" and row["metric"] == metric
+        )
+        burst = next(
+            row for row in rows
+            if row["terminal"] == "aura" and row["metric"] == "key_to_observed_pixel_ms"
+        )
+        self.assertEqual((paused["n"], paused["p50"]), (3, 3))
+        self.assertEqual((burst["n"], burst["p50"]), (2, 8))
 
     def manifest(self):
         measured = dict(

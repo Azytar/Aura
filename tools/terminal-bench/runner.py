@@ -172,6 +172,31 @@ def wait_pixel(x11, window, point, rgb, resources, timeout):
     raise TimeoutError(f"presented witness {rgb} not observed")
 
 
+def input_sample(channel, x11, window, point, rgb, resources, timeout):
+    channel.send(dict(op="input", rgb=rgb))
+    if channel.receive().get("op") != "armed":
+        raise ValueError("helper did not arm the input sample")
+    before = x11.key()
+    reply = channel.receive()
+    if reply.get("op") != "input":
+        raise ValueError("incorrect input acknowledgement")
+    pixel_time = wait_pixel(x11, window, point, rgb, resources, timeout)
+    return dict(
+        child_ms=(reply["received_ns"] - before) / 1e6,
+        pixel_ms=(pixel_time - before) / 1e6,
+        injected_ns=before,
+        observed_ns=pixel_time,
+    )
+
+
+def input_color(index):
+    return [
+        29 + index % 101,
+        67 + (index * 37) % 151,
+        31 + (index * 53) % 191,
+    ]
+
+
 def trial(
     entry, identity, directory, config, settings, display, x11, expected_font_hash=None
 ):
@@ -375,32 +400,35 @@ def trial(
             result["metrics"]["resize_ack_ms"] = resize
             child_samples, observed = [], []
             phase = resources.begin()
+            point = [width - max(1, cw // 2), height - max(1, ch // 2)]
             for index in range(settings["input_samples"]):
-                rgb = [
-                    29 + index % 101,
-                    67 + (index * 37) % 151,
-                    31 + (index * 53) % 191,
-                ]
-                channel.send(dict(op="input", rgb=rgb))
-                if channel.receive().get("op") != "armed":
-                    raise ValueError("helper did not arm the input sample")
-                before = x11.key()
-                reply = channel.receive()
-                if reply.get("op") != "input":
-                    raise ValueError("incorrect input acknowledgement")
-                child_samples.append((reply["received_ns"] - before) / 1e6)
-                pixel_time = wait_pixel(
-                    x11,
-                    window,
-                    [width - max(1, cw // 2), height - max(1, ch // 2)],
-                    rgb,
-                    resources,
+                sample = input_sample(
+                    channel, x11, window, point, input_color(index), resources,
                     settings["timeout"],
                 )
-                observed.append((pixel_time - before) / 1e6)
+                child_samples.append(sample["child_ms"])
+                observed.append(sample["pixel_ms"])
             result["phases"]["input"] = resources.end(phase)
             result["metrics"]["key_to_child_ms"] = child_samples
             result["metrics"]["key_to_observed_pixel_ms"] = observed
+            phase = resources.begin()
+            paused, gaps = [], []
+            previous_witness = sample["observed_ns"]
+            for index in range(settings["paused_input_samples"]):
+                # The pause follows the previous observed witness and stays
+                # outside the injection-to-pixel clock. It is not proof of idle.
+                time.sleep(settings["input_pause_seconds"])
+                sample = input_sample(
+                    channel, x11, window, point,
+                    input_color(settings["input_samples"] + index), resources,
+                    settings["timeout"],
+                )
+                paused.append(sample["pixel_ms"])
+                gaps.append((sample["injected_ns"] - previous_witness) / 1e6)
+                previous_witness = sample["observed_ns"]
+            result["phases"]["input_after_pause"] = resources.end(phase)
+            result["metrics"]["key_to_observed_pixel_after_pause_ms"] = paused
+            result["input_after_pause_gaps_ms"] = gaps
             phase = resources.begin()
             channel.request("load_start", timeout=settings["timeout"])
             loaded_samples = []
@@ -420,7 +448,7 @@ def trial(
                 sum(
                     phase["cpu_seconds"]
                     for name, phase in result["phases"].items()
-                    if name != "idle"
+                    if name not in ("idle", "input_after_pause")
                 )
             ]
             result["metrics"]["sampled_peak_rss_mib"] = [resources.peak / 1048576]

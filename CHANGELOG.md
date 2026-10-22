@@ -27,6 +27,10 @@ per commit.
   workloads, retains provenance and failures, and produces private per-metric
   tables and charts. Harness unit/failure tests run in CI; timing campaigns
   and their artifacts remain outside GitHub.
+- Benchmark input reports distinguish continuous keys from keys injected after
+  a 50 ms pause following the previous observed witness; old runs keep this
+  additional metric missing. `--payload-mib` sets a recorded, bounded output
+  budget for longer throughput trials without changing input or resize settings.
 
 ### Fixed
 

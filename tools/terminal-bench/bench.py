@@ -57,6 +57,10 @@ def main():
     execution.add_argument("--repetitions", type=int)
     execution.add_argument("--warmups", type=int)
     execution.add_argument(
+        "--payload-mib", type=int,
+        help="override each output budget (1..256 MiB); retained in settings",
+    )
+    execution.add_argument(
         "--baseline", help="terminal ID for per-metric relative deltas"
     )
     rendering = actions.add_parser(
@@ -93,6 +97,10 @@ def main():
             raise ValueError(
                 "repetitions: 1..100, warmups: 0..10, timeout: 1..120 seconds"
             )
+        if args.payload_mib is not None:
+            if not 1 <= args.payload_mib <= 256:
+                raise ValueError("payload-mib must be in 1..256")
+            settings["payload_bytes"] = args.payload_mib * 1024 * 1024
         if args.baseline and args.baseline not in {
             entry["id"] for entry in config["terminal"]
         }:
