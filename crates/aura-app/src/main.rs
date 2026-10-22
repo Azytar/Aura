@@ -508,10 +508,15 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                     key_kind,
                                     key.detail,
                                 ) {
-                                    // Typing belongs to the application now; a
-                                    // lingering highlight would confuse it with
-                                    // fresh output, and the echo must be visible
-                                    // instead of landing under a scrolled view.
+                                    // Typing clears selection/scroll and restores
+                                    // blinking. Otherwise let the child's output
+                                    // request the frame, without queuing a stale
+                                    // cursor repaint ahead of its response.
+                                    invalidated |= (!cursor_blink_on
+                                        && terminal.modes().cursor_visible
+                                        && terminal.modes().cursor_blink)
+                                        || terminal.selection().is_some()
+                                        || terminal.viewport_offset() != 0;
                                     terminal.clear_selection();
                                     terminal.jump_to_bottom();
                                     input.push(&bytes);
@@ -519,7 +524,6 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                         entry.2 = true;
                                     }
                                     cursor_blink_on = true;
-                                    invalidated = true;
                                 }
                             }
                             Event::ButtonPress(button) => {

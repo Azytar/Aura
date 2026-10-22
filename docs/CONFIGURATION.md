@@ -108,6 +108,9 @@ or arguments, Aura keeps its configured interactive login-shell selection.
 a short initial coalescing delay. Input and PTY processing continue between
 repaints; an idle terminal does not poll for frames. This is a ceiling, not a
 promise of presented frames or display latency. The setting supports live reload.
+Typing alone does not repaint an unchanged, visible cursor. Removing a selection,
+returning to the live view or restoring a hidden blink phase still repaints even
+when the application has disabled echo; application output schedules its own frame.
 
 ## Fonts and text
 

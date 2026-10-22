@@ -43,6 +43,9 @@ per commit.
 
 ### Fixed
 
+- Typing avoids repainting an already visible cursor before the child's
+  response. Clearing a selection, returning from history and restarting a
+  hidden cursor blink phase still repaint without requiring child echo.
 - Real X11 focus moves during keyboard grabs restore the filled text cursor
   and application focus reports. Temporary grabs and focus moves to a child
   window do not change the terminal's logical focus.

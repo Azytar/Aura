@@ -131,6 +131,7 @@ cargo test --locked   # Includes GPU readback assertions
 # Dedicated X11 display: checks resize/zoom geometry and pixel round trips.
 python3 tests/x11_resize.py target/release/aura
 python3 tests/x11_focus.py target/release/aura
+python3 tests/x11_typing.py target/release/aura
 python3 tests/x11_pointer_settings.py target/release/aura
 ```
 
