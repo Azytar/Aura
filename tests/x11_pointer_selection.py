@@ -13,7 +13,7 @@ import tempfile
 import time
 from unittest.mock import patch
 
-from x11_daily_use import capture, run, wait_for
+from x11_daily_use import run, wait_for
 from x11_protocols import Fixture
 
 
@@ -186,6 +186,43 @@ def history_selection(root, binary):
             "mousedown",
             "1",
         )
+        run("xdotool", "mousemove", "--window", fixture.window, "0", "0")
+
+        def copied_text():
+            run("xdotool", "key", "ctrl+shift+c")
+            return run("xclip", "-o", "-selection", "clipboard", timeout=2)
+
+        def partly_scrolled():
+            text = copied_text()
+            first = text.split(b"\n", 1)[0]
+            return (
+                text
+                if first.startswith(b"line") and 20 <= int(first[4:]) <= 40
+                else None
+            )
+
+        wait_for(partly_scrolled, "edge drag did not advance into retained history")
+        run("xdotool", "mouseup", "1")
+        released = run("xclip", "-o", "-selection", "primary", timeout=2)
+        assert not released.startswith(b"line000"), (
+            "release check reached the history limit"
+        )
+        time.sleep(0.2)  # An inactive drag must leave its copied endpoint stable.
+        assert copied_text() == released, (
+            "selection kept advancing after button release"
+        )
+        # Restore the live viewport before testing the complete history range.
+        run("xdotool", "key", "ctrl+shift+End")
+        run(
+            "xdotool",
+            "mousemove",
+            "--window",
+            fixture.window,
+            "0",
+            str(cell * 10 + cell // 2),
+            "mousedown",
+            "1",
+        )
         # A wheel event while button 1 remains held must not end the drag.
         run("xdotool", "click", "4")
         run("xdotool", "mousemove", "--window", fixture.window, "0", "0")
@@ -211,9 +248,6 @@ def history_selection(root, binary):
         assert primary.startswith(b"line000\nline001\n") and b"line057" in primary, (
             primary
         )
-        before = capture(fixture.window, root / "released-before.xwd")
-        time.sleep(0.2)  # Negative check: released drags must stop the repeating timer.
-        assert capture(fixture.window, root / "released-after.xwd") == before
         run(
             "xdotool",
             "mousemove",
@@ -251,7 +285,7 @@ def history_selection(root, binary):
 
 
 def main():
-    for tool in ["xdotool", "xdpyinfo", "xrdb", "xclip", "xwd", "magick"]:
+    for tool in ["xdotool", "xdpyinfo", "xrdb", "xclip"]:
         if not shutil.which(tool):
             print(f"SKIP: {tool}")
             return 77
