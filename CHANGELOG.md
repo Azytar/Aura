@@ -30,6 +30,13 @@ per commit.
 
 ### Fixed
 
+- Printable UTF-8 spans batch independent ASCII and Han ideographs within a
+  row. Combining/contextual scalars, insert mode, graphics sets and wraps retain
+  scalar handling; wide pairs, hyperlinks and underline colors stay consistent.
+- Overwritten wide edges use direct partner checks without temporary iteration.
+  Constant hyperlink and underline-color ranges reuse occupied prefixes and
+  reserve missing slots together, preserving canonical empty storage.
+
 - Repeated scalar glyphs use a bounded front cache before font-face resolution.
   Font, style, fallback and atlas changes invalidate it with the main glyph cache.
 - Shift-started local selections keep drag ownership through button release,

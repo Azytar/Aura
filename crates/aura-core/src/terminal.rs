@@ -644,18 +644,7 @@ impl Terminal {
         let mut parser = std::mem::take(&mut self.parser);
         parser.feed_spans(bytes, |input| match input {
             crate::parser::Input::Ascii(text) => self.put_ascii(text, &mut replies),
-            crate::parser::Input::Text(text) => {
-                let graphics = if self.use_g1 {
-                    self.g1_dec_graphics
-                } else {
-                    self.g0_dec_graphics
-                };
-                for ch in text.chars() {
-                    let ch = if graphics { dec_graphic(ch) } else { ch };
-                    self.put_char(ch);
-                    self.preceding_char = Some(ch);
-                }
-            }
+            crate::parser::Input::Text(text) => self.put_text(text),
             crate::parser::Input::Event(event) => self.dispatch(event, &mut replies),
         });
         self.parser = parser;
@@ -1016,6 +1005,59 @@ impl Terminal {
             b'n' if csi.param(0, 0) == 5 => replies.extend_from_slice(b"\x1b[0n"),
             b'n' if csi.param(0, 0) == 6 => self.report_cursor(replies, false),
             _ => {}
+        }
+    }
+
+    /// Batch independent scalars within a row; joins, wrapping and terminal
+    /// modes retain scalar dispatch before attempting another span.
+    fn put_text(&mut self, mut text: &str) {
+        let graphics = if self.use_g1 {
+            self.g1_dec_graphics
+        } else {
+            self.g0_dec_graphics
+        };
+        while let Some(ch) = text.chars().next() {
+            if crate::grid::plain_text_width(ch).is_some()
+                && !graphics
+                && !self.insert_mode
+                && !self.pending_wrap
+                && !self.last_printed.is_some_and(|(_, row, column)| {
+                    self.active_grid().stored_grapheme(row, column).is_some()
+                })
+            {
+                let cursor = self.cursor();
+                let cell = Cell::new(
+                    0,
+                    self.rendition.fg,
+                    self.rendition.bg,
+                    CellFlags::from_bits_retain(self.rendition.flags),
+                );
+                let link = self.current_hyperlink;
+                let underline = (self.rendition.underline_color != DEFAULT_COLOR)
+                    .then_some(self.rendition.underline_color);
+                if let Some(written) = self.active_grid_mut().write_plain_text(
+                    cursor.row,
+                    cursor.column,
+                    text,
+                    cell,
+                    link,
+                    underline,
+                ) {
+                    self.last_printed =
+                        Some((self.grid.active_screen(), cursor.row, written.last_column));
+                    self.preceding_char = Some(written.last_char);
+                    self.active_grid_mut()
+                        .advance_printed_cursor(written.end_column);
+                    self.pending_wrap =
+                        self.modes.auto_wrap && written.end_column >= self.active_grid().width();
+                    text = &text[written.bytes..];
+                    continue;
+                }
+            }
+            text = &text[ch.len_utf8()..];
+            let ch = if graphics { dec_graphic(ch) } else { ch };
+            self.put_char(ch);
+            self.preceding_char = Some(ch);
         }
     }
 
@@ -1778,6 +1820,67 @@ mod tests {
             terminal.preceding_char = Some(ch);
         } else {
             terminal.dispatch(event, replies);
+        }
+    }
+
+    #[test]
+    fn plain_text_han_ranges_have_independent_double_width_scalars() {
+        for range in [0x3400..=0x4dbf, 0x4e00..=0x9fff, 0xf900..=0xfaff] {
+            for value in range {
+                let ch = char::from_u32(value).unwrap();
+                assert_eq!(crate::grid::plain_text_width(ch), Some(2));
+                assert_eq!(UnicodeWidthChar::width(ch), Some(2), "U+{value:04X}");
+                assert_eq!(
+                    format!("a{ch}a").graphemes(true).count(),
+                    3,
+                    "U+{value:04X}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn utf8_row_runs_match_scalar_writes_through_chunking_and_wide_edges() {
+        fn scalar(t: &mut Terminal, bytes: &[u8]) -> Vec<u8> {
+            let mut replies = Vec::new();
+            let mut parser = std::mem::take(&mut t.parser);
+            parser.feed(bytes, |event| dispatch_scalar(t, event, &mut replies));
+            t.parser = parser;
+            replies
+        }
+        let capped = format!("界e{}abcdefgh漢字", "\u{301}".repeat(127));
+        let scenarios = [
+            "\x1b[38;2;12;34;56;48;5;4;4:3;58:5:2m\x1b]8;;https://example.org\x1b\\界abcdefghijklmnop漢字e\u{301}ab界\r\n漢字abcdefghijklmnopqrstuv\x1b[3b\x1b[6n",
+            "界\u{fe0f}ab漢\u{200d}a字🇵🇪👩‍💻क्षمَرْحَبًاabcdefghijklmnop漢字",
+            "\u{3400}\u{4dbf}\u{4e00}\u{9fff}\u{f900}\u{faff}abcdefgh漢字",
+            "\x1b[?7l界abcdef漢字abcdefghijklmnop\x1b[?7h界abcdefghijklmnop漢字",
+            "界abc漢字\r\x1b[4h漢abcdefghijklmnop\x1b[4l字abcdefghijklmnop\x1b(0界lqk漢abcdefghijklmnop\x1b(B字abcdefghijklmnop",
+            "\x1b[?1049h界abcdefghijklmnop漢字\x1b[?1049l界abcdefghijklmnop漢字\r\n界abcdefghijklmnop漢字",
+            capped.as_str(),
+        ];
+        for (width, height) in [(1, 1), (2, 2), (7, 3), (17, 4)] {
+            for chunk_size in [1, 2, 3, 7, 64, 4096] {
+                for input in scenarios {
+                    let mut actual = terminal(width, height);
+                    actual.set_scrollback_limit(8);
+                    let mut expected = actual.clone();
+                    for _ in 0..height + 10 {
+                        assert_eq!(
+                            actual.process(b"prefill\r\n"),
+                            scalar(&mut expected, b"prefill\r\n")
+                        );
+                    }
+                    actual.scroll_view_up(3);
+                    expected.scroll_view_up(3);
+                    for chunk in input.as_bytes().chunks(chunk_size) {
+                        assert_eq!(actual.process(chunk), scalar(&mut expected, chunk));
+                        assert_eq!(
+                            actual, expected,
+                            "{width}x{height}, chunk={chunk_size}, input={input:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

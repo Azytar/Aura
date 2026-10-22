@@ -29,11 +29,30 @@ output. Record the effective setting when comparing builds; a changed rate is
 not evidence of faster GPU presentation. Keep collected measurements private.
 
 The sustained core workloads write approximately 1 MiB of line-oriented ASCII,
-wide/combining Unicode or SGR text per iteration, eight times. Each terminal uses
-an 80x24 grid and either zero or 10,000 history rows, filled outside the timer.
+wide/combining Unicode, mixed Han/kana/Hangul CJK, linked Unicode with colored
+underline, or SGR text per iteration, eight times. A linked row-rewrite case
+addresses the first visible row repeatedly, with a Han ideograph and 77 ASCII
+cells (79 columns total), an OSC 8 link and colored underline; it avoids wrapping
+and retains history while exercising replacement of occupied metadata. Each
+terminal uses an 80x24 grid and either zero or 10,000 history rows, filled outside
+the timer.
 Payload construction is also outside the timer. Each iteration asserts that
 the configured history length remains retained. These cases isolate processing
 and recycling from PTY backpressure, font rasterization and GPU work.
+The CJK case exercises both batched Han scalars and kana/Hangul fallback. The
+linked case repeats one OSC 8 URL and resets its colored underline on each line,
+so metadata work stays visible without growing a table of unique URLs. Compare
+builds with the same updated harness and retain exact byte counts.
+
+The UTF-8 row writer batches printable ASCII and the independent double-width
+Han ranges U+3400–U+4DBF, U+4E00–U+9FFF and U+F900–U+FAFF. Other scalars, stored
+clusters, graphics sets, insert mode and row-edge handling use scalar dispatch.
+Differential tests compare complete terminal state and replies under fragmented
+input; an exhaustive check verifies these Han widths and grapheme boundaries
+against the Unicode libraries. This path does not replace contextual shaping.
+Hyperlink and underline-color ranges overwrite occupied prefixes directly and
+resize once for missing slots. Clearing a last value still releases storage;
+ASCII and UTF-8 writers share the same range assignment.
 
 Current core output labels report the exact byte counts for CSI, UTF-8 and
 large-output fixtures; older approximate labels remain in the historical tables.

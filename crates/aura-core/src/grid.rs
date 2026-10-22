@@ -92,6 +92,24 @@ pub struct Cursor {
     pub row: usize,
 }
 
+/// Known independent scalars; extending marks retain the scalar path.
+#[inline]
+pub(crate) fn plain_text_width(ch: char) -> Option<usize> {
+    match ch as u32 {
+        0x20..=0x7e => Some(1),
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff => Some(2),
+        _ => None,
+    }
+}
+
+/// Result of writing one row-local run of independent scalars.
+pub(crate) struct TextWrite {
+    pub bytes: usize,
+    pub end_column: usize,
+    pub last_column: usize,
+    pub last_char: char,
+}
+
 /// Canonical metadata prefix: trailing empty entries never retain storage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Sidecar<T>(Vec<Option<T>>);
@@ -122,6 +140,24 @@ impl<T> Sidecar<T> {
         // Only removing the final entry can shorten a canonical prefix.
         if column + 1 == self.0.len() && self.0[column].is_none() {
             self.trim();
+        }
+    }
+    /// Replaces copied metadata while retaining an occupied prefix's buffer.
+    #[inline]
+    fn fill_range(&mut self, range: Range<usize>, value: Option<T>)
+    where
+        T: Copy,
+    {
+        if let Some(value) = value {
+            if range.is_empty() {
+                return;
+            }
+            if range.end > self.0.len() {
+                self.0.resize_with(range.end, || None);
+            }
+            self.0[range].fill(Some(value));
+        } else {
+            self.clear_range(range);
         }
     }
     fn clear(&mut self) {
@@ -194,18 +230,18 @@ impl Row {
     /// Clear only the partners outside an overwritten range. Pairs wholly
     /// inside it are replaced together by the caller.
     fn clear_wide_edges(&mut self, start: usize, end: usize) {
-        let left = if self.cells[start].is_wide_spacer() {
-            start.checked_sub(1)
-        } else {
-            None
-        };
-        let right =
-            (self.cells[end - 1].is_wide_leading() && end < self.cells.len()).then_some(end);
-        for column in [left, right].into_iter().flatten() {
+        if start != 0 && self.cells[start].is_wide_spacer() {
+            let column = start - 1;
             self.cells[column] = Cell::EMPTY;
             self.graphemes.set(column, None);
             self.hyperlinks.set(column, None);
             self.underline_colors.set(column, None);
+        }
+        if end < self.cells.len() && self.cells[end - 1].is_wide_leading() {
+            self.cells[end] = Cell::EMPTY;
+            self.graphemes.set(end, None);
+            self.hyperlinks.set(end, None);
+            self.underline_colors.set(end, None);
         }
     }
 
@@ -743,25 +779,71 @@ impl Grid {
         let target = self.row_mut(row).expect("validated row");
         target.clear_wide_edges(start, end);
         target.graphemes.clear_range(start..end);
-        target.hyperlinks.clear_range(start..end);
-        target.underline_colors.clear_range(start..end);
+        target.hyperlinks.fill_range(start..end, link);
+        target.underline_colors.fill_range(start..end, underline);
         for (target, &byte) in target.cells[start..end].iter_mut().zip(bytes) {
             *target = Cell {
                 content: u32::from(byte),
                 ..cell
             };
         }
-        if link.is_some() {
-            for column in start..end {
-                target.hyperlinks.set(column, link);
+        target.dirty = true;
+    }
+
+    /// Writes printable ASCII and Han ideographs without crossing a row edge.
+    /// Other scalars and a wide character that cannot fit remain unconsumed.
+    pub(crate) fn write_plain_text(
+        &mut self,
+        row: usize,
+        start: usize,
+        text: &str,
+        cell: Cell,
+        link: Option<u32>,
+        underline: Option<u32>,
+    ) -> Option<TextWrite> {
+        debug_assert!(row < self.height && start < self.width);
+        let mut end = start;
+        let mut written = None;
+        for (offset, ch) in text.char_indices() {
+            let Some(width) = plain_text_width(ch) else {
+                break;
+            };
+            if width > self.width - end {
+                break;
             }
+            written = Some(TextWrite {
+                bytes: offset + ch.len_utf8(),
+                end_column: end + width,
+                last_column: end,
+                last_char: ch,
+            });
+            end += width;
         }
-        if underline.is_some() {
-            for column in start..end {
-                target.underline_colors.set(column, underline);
+        let written = written?;
+        let target = self.row_mut(row).expect("validated row");
+        target.clear_wide_edges(start, end);
+        target.graphemes.clear_range(start..end);
+        target.hyperlinks.fill_range(start..end, link);
+        target.underline_colors.fill_range(start..end, underline);
+        let mut column = start;
+        for ch in text[..written.bytes].chars() {
+            let mut leading = Cell {
+                content: ch as u32,
+                ..cell
+            };
+            if !ch.is_ascii() {
+                leading.flags |= CellFlags::WIDE_LEADING.bits();
+                target.cells[column + 1] = Cell {
+                    content: 0,
+                    flags: cell.flags | CellFlags::WIDE_SPACER.bits(),
+                    ..cell
+                };
             }
+            target.cells[column] = leading;
+            column += if ch.is_ascii() { 1 } else { 2 };
         }
         target.dirty = true;
+        Some(written)
     }
 
     /// Writes as many ordinary cells as fit, returning the number written.
@@ -1863,6 +1945,50 @@ mod tests {
                         sparse.is_clear_from(at),
                         dense[at..].iter().all(Option::is_none)
                     );
+                    if dense.iter().all(Option::is_none) {
+                        prop_assert_eq!(sparse.0.capacity(), 0);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn sidecar_range_fills_match_dense_model_and_reuse_owned_prefix() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let mut sparse = Sidecar::new();
+        sparse.fill_range(0..80, Some(1u32));
+        let buffer = sparse.0.as_ptr();
+        sparse.fill_range(0..80, Some(2));
+        assert_eq!(sparse.0.as_ptr(), buffer);
+        sparse.fill_range(0..80, None);
+        assert_eq!(sparse.0.capacity(), 0);
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases: 1024,
+                failure_persistence: None,
+                ..Config::default()
+            },
+            TestRng::from_seed(RngAlgorithm::ChaCha, &[0xa7; 32]),
+        );
+        let operations = prop::collection::vec(
+            (0usize..32, 0usize..33, prop::option::of(any::<u32>())),
+            1..128,
+        );
+        runner
+            .run(&operations, |operations| {
+                let mut sparse = Sidecar::new();
+                let mut dense = [None; 32];
+                for (start, count, value) in operations {
+                    let end = start + count.min(32 - start);
+                    sparse.fill_range(start..end, value);
+                    dense[start..end].fill(value);
+                    for (column, value) in dense.iter().enumerate() {
+                        prop_assert_eq!(sparse.get(column), value.as_ref());
+                    }
+                    prop_assert!(sparse.0.last().is_none_or(Option::is_some));
                     if dense.iter().all(Option::is_none) {
                         prop_assert_eq!(sparse.0.capacity(), 0);
                     }

@@ -65,6 +65,21 @@ fn main() {
         for (name, block) in [
             ("ASCII", format!("{}\r\n", "x".repeat(79))),
             ("Unicode", format!("{}\r\n", "ab界e\u{301}".repeat(15))),
+            ("CJK", format!("{}\r\n", "漢字かなカナ한글".repeat(4))),
+            (
+                "Unicode links",
+                format!(
+                    "\x1b]8;;https://example.org\x1b\\\x1b[4:3;58:5:2m{}\x1b[0m\x1b]8;;\x1b\\\r\n",
+                    "ab界e\u{301}".repeat(15)
+                ),
+            ),
+            (
+                "linked row rewrite",
+                format!(
+                    "\x1b[H\x1b]8;;https://example.org\x1b\\\x1b[4:3;58:5:2m漢{}\x1b[0m\x1b]8;;\x1b\\",
+                    "a".repeat(77)
+                ),
+            ),
             (
                 "SGR",
                 "\x1b[38;2;12;171;52mcolored\x1b[0m plain\r\n".to_owned(),
