@@ -846,6 +846,81 @@ impl Grid {
         Some(written)
     }
 
+    // Keep cluster byte-offset work out of ordinary ASCII/Han row writes.
+    #[inline(never)]
+    pub(crate) fn write_accented_text(
+        &mut self,
+        row: usize,
+        start: usize,
+        text: &str,
+        cell: Cell,
+        link: Option<u32>,
+        underline: Option<u32>,
+    ) -> Option<TextWrite> {
+        debug_assert!(row < self.height && start < self.width);
+        let mut end = start;
+        let mut written: Option<TextWrite> = None;
+        for (offset, ch) in text.char_indices() {
+            let Some(width) = plain_text_width(ch) else {
+                if ('\u{300}'..='\u{36f}').contains(&ch)
+                    && let Some(previous) = written.as_mut()
+                    && previous.last_char.is_ascii()
+                {
+                    previous.bytes = offset + ch.len_utf8();
+                    previous.last_char = ch;
+                    continue;
+                }
+                break;
+            };
+            if width > self.width - end {
+                break;
+            }
+            written = Some(TextWrite {
+                bytes: offset + ch.len_utf8(),
+                end_column: end + width,
+                last_column: end,
+                last_char: ch,
+            });
+            end += width;
+        }
+        let written = written?;
+        let target = self.row_mut(row).expect("validated row");
+        target.clear_wide_edges(start, end);
+        target.graphemes.clear_range(start..end);
+        target.hyperlinks.fill_range(start..end, link);
+        target.underline_colors.fill_range(start..end, underline);
+        let mut column = start;
+        let mut chars = text[..written.bytes].chars();
+        while let Some(ch) = chars.next() {
+            let mut leading = Cell {
+                content: ch as u32,
+                ..cell
+            };
+            if !ch.is_ascii() {
+                if ('\u{300}'..='\u{36f}').contains(&ch) {
+                    // The validated prefix only includes a mark directly
+                    // after a one-byte ASCII base written in this batch.
+                    let end = written.bytes - chars.as_str().len();
+                    target.graphemes.set(
+                        column - 1,
+                        Some(text[end - ch.len_utf8() - 1..end].to_owned()),
+                    );
+                    continue;
+                }
+                leading.flags |= CellFlags::WIDE_LEADING.bits();
+                target.cells[column + 1] = Cell {
+                    content: 0,
+                    flags: cell.flags | CellFlags::WIDE_SPACER.bits(),
+                    ..cell
+                };
+            }
+            target.cells[column] = leading;
+            column += if ch.is_ascii() { 1 } else { 2 };
+        }
+        target.dirty = true;
+        Some(written)
+    }
+
     /// Writes as many ordinary cells as fit, returning the number written.
     pub fn write_range(&mut self, row: usize, start: usize, cells: &[Cell]) -> usize {
         if row >= self.height || start >= self.width {

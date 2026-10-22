@@ -71,11 +71,15 @@ so metadata work stays visible without growing a table of unique URLs. Compare
 builds with the same updated harness and retain exact byte counts.
 
 The UTF-8 row writer batches printable ASCII and the independent double-width
-Han ranges U+3400–U+4DBF, U+4E00–U+9FFF and U+F900–U+FAFF. Other scalars, stored
-clusters, graphics sets, insert mode and row-edge handling use scalar dispatch.
+Han ranges U+3400–U+4DBF, U+4E00–U+9FFF and U+F900–U+FAFF. An ASCII base followed
+by one U+0300–U+036F diacritic can remain in the same row batch, storing its exact
+UTF-8 cluster. Additional marks, other scalars, existing clusters, graphics sets,
+insert mode and row-edge handling retain scalar dispatch.
 Differential tests compare complete terminal state and replies under fragmented
 input; an exhaustive check verifies these Han widths and grapheme boundaries
-against the Unicode libraries. This path does not replace contextual shaping.
+against the Unicode libraries. ASCII/diacritic combinations are also compared
+exhaustively with scalar writes, including REP and cursor-query replies. This
+path does not replace contextual shaping.
 Hyperlink and underline-color ranges overwrite occupied prefixes directly and
 resize once for missing slots. Clearing a last value still releases storage;
 ASCII and UTF-8 writers share the same range assignment.

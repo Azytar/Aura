@@ -1035,14 +1035,25 @@ impl Terminal {
                 let link = self.current_hyperlink;
                 let underline = (self.rendition.underline_color != DEFAULT_COLOR)
                     .then_some(self.rendition.underline_color);
-                if let Some(written) = self.active_grid_mut().write_plain_text(
-                    cursor.row,
-                    cursor.column,
-                    text,
-                    cell,
-                    link,
-                    underline,
-                ) {
+                // A short probe keeps ordinary runs on their existing writer.
+                // CC/CD introduce U+0300..U+037F; the marked writer validates
+                // the cluster. A later mark still takes scalar fallback.
+                let bytes = text.as_bytes();
+                // Eight high bits mean this prefix has no ASCII base; do not
+                // scan every byte of a plain CJK run looking for an accent.
+                let may_have_ascii = bytes.len() < 8
+                    || u64::from_ne_bytes(bytes[..8].try_into().expect("eight-byte prefix"))
+                        & 0x8080_8080_8080_8080
+                        != 0x8080_8080_8080_8080;
+                let accented =
+                    may_have_ascii && bytes.iter().take(8).any(|byte| byte & 0xfe == 0xcc);
+                let grid = self.active_grid_mut();
+                let written = if accented {
+                    grid.write_accented_text(cursor.row, cursor.column, text, cell, link, underline)
+                } else {
+                    grid.write_plain_text(cursor.row, cursor.column, text, cell, link, underline)
+                };
+                if let Some(written) = written {
                     self.last_printed =
                         Some((self.grid.active_screen(), cursor.row, written.last_column));
                     self.preceding_char = Some(written.last_char);
@@ -1856,6 +1867,14 @@ mod tests {
             "\x1b[?7l界abcdef漢字abcdefghijklmnop\x1b[?7h界abcdefghijklmnop漢字",
             "界abc漢字\r\x1b[4h漢abcdefghijklmnop\x1b[4l字abcdefghijklmnop\x1b(0界lqk漢abcdefghijklmnop\x1b(B字abcdefghijklmnop",
             "\x1b[?1049h界abcdefghijklmnop漢字\x1b[?1049l界abcdefghijklmnop漢字\r\n界abcdefghijklmnop漢字",
+            "界ab界e\u{301}ab界e\u{301}\u{308}ab界e\u{301}\x1b[3b\x1b[6n\r\nab界e\u{301}ab界e\u{301}",
+            // Marks at and beyond the short probe boundary retain scalar fallback.
+            "界aaae\u{301}ab界e\u{301}",
+            "界aaaae\u{301}ab界e\u{301}",
+            "界aaaaaaaaaaae\u{301}ab界e\u{301}",
+            "界aaaaaaaaaaaae\u{301}ab界e\u{301}",
+            "界a\u{371}abcdefghijklmnop漢字e\u{301}",
+            "\x1b[38;2;12;34;56;4:3;58:5:2m\x1b]8;;https://example.org\x1b\\界ab界e\u{301}ab界e\u{301}\r\nab界e\u{301}\x1b[3b\x1b[6n",
             capped.as_str(),
         ];
         for (width, height) in [(1, 1), (2, 2), (7, 3), (17, 4)] {
@@ -1896,6 +1915,29 @@ mod tests {
                 Parser::new().feed(input.as_bytes(), |event| {
                     dispatch_scalar(&mut expected, event, &mut Vec::new())
                 });
+                assert_eq!(actual, expected, "base={base}, mark={mark:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn batched_ascii_diacritics_preserve_full_scalar_state_and_repeat_character() {
+        for base in b' '..=b'~' {
+            for mark in 0x300..=0x36f {
+                let mark = char::from_u32(mark).unwrap();
+                // Han enters the UTF-8 row writer; REP checks its last scalar,
+                // including a combining mark at the end of the batched run.
+                let input = format!("界{}{mark}\x1b[2b\x1b[6n", base as char);
+                let mut actual = terminal(8, 2);
+                let replies = actual.process(input.as_bytes());
+                let mut expected = terminal(8, 2);
+                let mut scalar_replies = Vec::new();
+                let mut parser = std::mem::take(&mut expected.parser);
+                parser.feed(input.as_bytes(), |event| {
+                    dispatch_scalar(&mut expected, event, &mut scalar_replies)
+                });
+                expected.parser = parser;
+                assert_eq!(replies, scalar_replies);
                 assert_eq!(actual, expected, "base={base}, mark={mark:?}");
             }
         }

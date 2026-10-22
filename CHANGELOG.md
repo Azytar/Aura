@@ -46,6 +46,9 @@ per commit.
 - Typing avoids repainting an already visible cursor before the child's
   response. Clearing a selection, returning from history and restarting a
   hidden cursor blink phase still repaint without requiring child echo.
+- UTF-8 row writes batch ASCII bases with one U+0300–U+036F combining mark,
+  preserving scalar fallback for additional marks, complex clusters and
+  row boundaries, including links, decorations and repeated characters.
 - Real X11 focus moves during keyboard grabs restore the filled text cursor
   and application focus reports. Temporary grabs and focus moves to a child
   window do not change the terminal's logical focus.
