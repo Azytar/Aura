@@ -36,6 +36,8 @@ per commit.
 - Overwritten wide edges use direct partner checks without temporary iteration.
   Constant hyperlink and underline-color ranges reuse occupied prefixes and
   reserve missing slots together, preserving canonical empty storage.
+- Host query properties refresh once per bounded PTY drain instead of once per
+  read, preserving replies across resets, configuration reloads and resize.
 
 - Repeated scalar glyphs use a bounded front cache before font-face resolution.
   Font, style, fallback and atlas changes invalidate it with the main glyph cache.

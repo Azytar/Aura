@@ -27,6 +27,10 @@ Native comparisons additionally exercise render coalescing. `window.max_fps`
 sets a render-call ceiling while the event loop continues to service input and
 output. Record the effective setting when comparing builds; a changed rate is
 not evidence of faster GPU presentation. Keep collected measurements private.
+The `AURA_PERF` `parse` interval covers `Terminal::process`; refreshing host
+query properties once before the bounded PTY drain is outside that interval.
+Older builds refreshed those properties inside each read's parse interval, so
+compare whole-workload time and CPU when evaluating that change.
 
 The sustained core workloads write approximately 1 MiB of line-oriented ASCII,
 wide/combining Unicode, mixed Han/kana/Hangul CJK, linked Unicode with colored

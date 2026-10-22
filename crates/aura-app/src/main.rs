@@ -741,13 +741,15 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 2 => {
+                    // Window, font and configuration stay fixed during this
+                    // bounded drain; RIS preserves the terminal's host metadata.
+                    update_host_properties(&mut terminal, &config, &font, last_winsize);
                     for _ in 0..16 {
                         match pty.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(length) => {
                                 last_mouse_report = None;
                                 let started = stats.start();
-                                update_host_properties(&mut terminal, &config, &font, last_winsize);
                                 let replies = terminal.process(&buffer[..length]);
                                 stats.finish("parse", started);
                                 for request in terminal.take_clipboard_requests() {
@@ -1809,7 +1811,7 @@ fn update_host_properties(terminal: &mut Terminal, config: &AppConfig, font: &Fo
     terminal.set_host_properties(aura_core::HostProperties {
         foreground: palette.foreground,
         background: palette.background,
-        cursor: config.colors.cursor_color(),
+        cursor: config.colors.cursor.unwrap_or(palette.foreground),
         ansi: palette.ansi,
         cell_pixels: [
             metrics.width.min(u16::MAX as u32) as u16,

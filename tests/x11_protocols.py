@@ -4,6 +4,7 @@ import ctypes
 import ctypes.util
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -141,6 +142,8 @@ def main():
         try:
             expected = [b"\x1b[?1003;1$y", b"\x1b[?9999;0$y", b"\x1b]10;rgb:", b"\x1b[4;", b"\x1b[6;", b"\x1b[8;8;20t", b"\x1bP0+r4d73\x1b\\"]
             wait_for(lambda: all(part in fixture.data() for part in expected), "missing host capability replies")
+            cell_reply = re.search(rb"\x1b\[6;(\d+);(\d+)t", fixture.data())
+            assert cell_reply and all(int(value) > 0 for value in cell_reply.groups())
             fixture.emit(b"\x1b[?25l\x1b[?2026h\x1b[48;2;17;34;51m\x1b[2J", "HELD")
             # The client deliberately never closes the batch. The host's bounded
             # recovery must eventually present the new background and clear mode.
@@ -152,6 +155,15 @@ def main():
             fixture.emit(b"\x1b[?2026$p", "SYNC_QUERY")
             wait_for(lambda: b"\x1b[?2026;2$y" in fixture.data(), "expired synchronized mode remained active")
             print("PASS host color/size/mode/termcap replies and stalled synchronized-output recovery")
+            start = len(fixture.data())
+            fixture.emit(b"\x1bc\x1b]10;?\x07\x1b[16t\x1b[18t", "RESET_QUERIES")
+            wait_for(
+                lambda: all(value in fixture.data()[start:] for value in [
+                    b"\x1b]10;rgb:d8d8/d8d8/d8d8", cell_reply.group(), b"\x1b[8;8;20t",
+                ]),
+                "reset lost host color or geometry replies",
+            )
+            print("PASS host color/cell/window query metadata survives RIS")
             fixture.emit(b"\x1b[>31u\x1b[?u", "KEYBOARD")
             wait_for(lambda: b"\x1b[?31u" in fixture.data(), "keyboard negotiation failed")
             start = len(fixture.data())
