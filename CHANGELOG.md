@@ -23,6 +23,10 @@ per commit.
 
 ### Added
 
+- `tools/benchmark.sh` detects installed terminals and fonts, validates runtime
+  requirements, runs isolated comparisons and displays median bars in the
+  console and a simple browser report. Optional real-Neovim editing/navigation
+  checks, saved-run reports and all measurements remain outside Git checkouts.
 - An independent multi-terminal benchmark harness runs controlled Linux/X11
   workloads, retains provenance and failures, and produces private per-metric
   tables and charts. Harness unit/failure tests run in CI; timing campaigns

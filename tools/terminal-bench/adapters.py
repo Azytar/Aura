@@ -1,6 +1,7 @@
 """Isolated X11 launch configurations; no user configuration is read or edited."""
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,7 +15,8 @@ def identify(entry):
     binary = str(Path(binary).resolve())
     flag = "-version" if entry["kind"] == "xterm" else "--version"
     try:
-        result = subprocess.run([binary, flag], capture_output=True, timeout=10)
+        result = subprocess.run([binary, flag], capture_output=True, timeout=10,
+                                env=dict(os.environ, NVIM_LOG_FILE=os.devnull))
         version = (
             (result.stdout + result.stderr).decode(errors="replace").strip()[:4096]
         )

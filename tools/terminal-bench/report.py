@@ -53,7 +53,8 @@ def cohort(row, policy):
     )
 
 
-def aggregate(manifest, baseline=None):
+def aggregate(manifest, baseline=None, *, metrics=None):
+    metrics = METRICS if metrics is None else metrics
     if manifest.get("schema") != 1:
         raise ValueError("unsupported run schema")
     trials = manifest["trials"]
@@ -69,7 +70,7 @@ def aggregate(manifest, baseline=None):
     ) or ["unavailable"]
     rows = []
     for group in groups:
-        for metric in METRICS:
+        for metric in metrics:
             for entry in manifest["config"]["terminal"]:
                 name = entry["id"]
                 all_trials = [row for row in trials if row["terminal"] == name]
@@ -101,8 +102,8 @@ def aggregate(manifest, baseline=None):
                         kind=entry["kind"],
                         cohort=group,
                         metric=metric,
-                        unit=METRICS[metric][1],
-                        better="higher" if METRICS[metric][2] else "lower",
+                        unit=metrics[metric][1],
+                        better="higher" if metrics[metric][2] else "lower",
                         status=status,
                         trials=len(valid),
                         failed_trials=failed,

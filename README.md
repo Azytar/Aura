@@ -180,6 +180,20 @@ nightly fuzzing, including measured budgets and validation limits.
 
 ## Comparative benchmarks
 
+Run the Bash entry point; it detects installed emulators and the font, shows
+median bars in the terminal and opens a simple HTML report:
+
+```sh
+./tools/benchmark.sh --quick           # functional smoke on its own Xvfb
+./tools/benchmark.sh --nvim            # standard campaign + real Neovim fixture
+```
+
+Use `--build` if Aura needs compiling, `--no-open` on a headless machine, or
+`--report /path/to/previous/run` to display saved results without measuring again.
+Results default to `${XDG_STATE_HOME:-~/.local/state}/aura/benchmarks/`, outside
+Git checkouts. Python 3.11+, Xvfb, XTest/X11, Fontconfig, xdotool and at least
+two installed emulators are required; Neovim is optional.
+
 The [multi-terminal harness](docs/TERMINAL_BENCHMARKS.md) automates controlled
 Linux/X11 workloads and generates per-metric tables and charts. It records actual
 geometry, versions, hashes, warmups and failed trials. Measurements and generated

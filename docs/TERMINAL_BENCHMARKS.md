@@ -12,6 +12,58 @@ to overwrite an existing run or report. It makes no network requests.
 
 ## Run
 
+### One command
+
+From any working directory, invoke `tools/benchmark.sh` by its path. No Python
+editing or TOML setup is needed:
+
+```sh
+./tools/benchmark.sh --quick
+./tools/benchmark.sh --nvim
+./tools/benchmark.sh --quick --output /path/outside-checkout/run-001 --no-open
+./tools/benchmark.sh --report /path/outside-checkout/run-001
+```
+
+The script requires Python 3.11+, Fontconfig (`fc-match`), `xdotool`, X11/XTest
+libraries and Xvfb. Install Aura and at least one of Alacritty, Kitty, WezTerm or
+xterm. It reports missing tools; it does not install packages. `--nvim` also
+requires Neovim with the Lua autocmd/highlight APIs (tested with 0.10.4).
+
+Aura is selected from `target/release/aura`, then `PATH`; `--aura PATH` overrides
+this. `--build` explicitly runs `cargo build --release --locked` before timing
+(Rust and `glslc` must already be installed). Binaries are not rebuilt implicitly.
+Other installed emulators and the actual Fontconfig regular face are detected.
+Missing emulators are listed as omissions; an installed emulator that cannot
+run is an error. Binary versions and hashes, generated config, omissions, raw
+trials and reports are saved together. A failed trial produces a nonzero exit
+status and stays visible; missing measurements never become zero.
+
+The default is the `standard` profile on an owned Xvfb. `--quick` is a shorter
+functional check. `--nvim` adds a separate real-editor campaign after the native
+one. Both use the selected repetition/warmup counts; no campaigns run concurrently.
+`--repetitions`, `--warmups` and `--payload-mib` override the native settings;
+the last does not change the Neovim fixture. `--font FAMILY` selects another
+Fontconfig face; `--config FILE` uses the full advanced configuration instead.
+
+The default comparison uses equal grids (`--geometry-policy grid`), so xterm
+can appear beside GPU renderers despite different cell pixel sizes. The report
+labels that distinction; use `--geometry-policy cell` for strict pixel cohorts.
+For a real GPU, pass a **dedicated** `--display :N`. That changes focus and
+injects input on the named server. Without it, the script owns a virtual display
+and leaves the desktop's focus and keyboard map alone. Driver inventories still
+need checking; an existing display is not physical-GPU certification.
+
+Outputs default to `${XDG_STATE_HOME:-~/.local/state}/aura/benchmarks/<unique-id>/`.
+`--output` must name a new directory outside every checkout, including symlinks.
+Nothing is overwritten. Bars are printed directly in the terminal; the default
+browser opens the simple HTML/SVG report when a graphical session is available.
+`--no-open` leaves the console bars and files. Each chart uses linear median
+bars from zero; p95/p99, ranges and sample counts are expandable. CSV, JSON and
+the full native report remain available. `--report DIR` creates a new view of
+the same preserved measurements and needs no display or emulator installation.
+
+### Advanced Python interface
+
 Build Aura first, then review `tools/terminal-bench/example.toml`. Relative
 executable/font paths resolve against that file, not the current directory.
 Available adapters are Aura, Alacritty, Kitty, WezTerm and xterm. Versions that
@@ -130,6 +182,23 @@ can be excluded. A startup change can move allocations across that boundary;
 use a separate whole-process resource probe for lifetime peak comparisons.
 
 ## Workloads and correctness boundaries
+
+The optional real-Neovim fixture opens a deterministic 2,001-line buffer without
+personal configuration, plugins, LSP or swap files. Each injected `a` must update
+the first buffer line exactly and produce a fresh color in its status line,
+observed with XGetImage. Quick runs use eight letters per cadence; standard runs
+use twenty. The continuous and 50 ms paused cases remain separate. Startup ends
+at the initial status-line witness and includes editor startup and geometry
+normalization. An explicit title handshake discovers the window independently
+of terminfo's title support.
+
+These are instrumented editor observations, including the Lua callback, control
+file I/O and polling. They do not certify glyph scanout or natural typing latency
+with a user's plugins. Page-down/page-up verify viewport `topline`, not cursor
+row (overlapping pages can move the cursor forward during page-up). Search must
+reach the unique target line. Navigation checks are outside the edit clocks.
+Neovim uses its own fresh processes, logs, source hashes, events and manifest;
+its samples are never pooled with the synthetic helper's measurements.
 
 Every repetition starts a fresh emulator and raw helper with echo disabled.
 Font/config paths and child arguments are explicit; personal dotfiles and

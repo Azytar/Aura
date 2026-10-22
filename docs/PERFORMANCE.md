@@ -12,6 +12,11 @@ new measurements outside the checkout.
 For automated comparisons across Aura, Alacritty, Kitty, WezTerm and xterm,
 see [the multi-terminal harness](TERMINAL_BENCHMARKS.md). Its reproducible
 workloads generate private HTML/CSV/JSON/SVG artifacts outside Git checkouts.
+`./tools/benchmark.sh` automates discovery and displays linear median bars in
+the terminal and browser; `--nvim` adds a separate instrumented real-editor
+fixture with exact input, status-line pixel witnesses and viewport/search checks.
+Editor startup and edit clocks include editor and fixture overhead; these
+samples remain separate from native helper clocks and core microbenchmarks.
 The tables below are historical internal benchmarks, distinct from that harness.
 
 Printable-output changes should be compared with separate baseline/candidate
