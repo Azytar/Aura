@@ -105,7 +105,9 @@ coordinates. Shift gives local selection back to Aura. Enhanced keyboard
 sequences are negotiated by the application; ordinary shell input keeps its
 legacy encoding. The pointer hides while typing and returns on motion;
 `[mouse]` and `[cursor]` customize that behavior and cursor timing.
-The text cursor restores its focused shape after window-manager keyboard grabs.
+The mouse pointer follows Xcursor overrides, desktop XSettings and GTK3/GTK4
+theme/size defaults, including live desktop updates. The text cursor restores
+its focused shape after window-manager keyboard grabs.
 
 ## Layout
 
@@ -129,6 +131,7 @@ cargo test --locked   # Includes GPU readback assertions
 # Dedicated X11 display: checks resize/zoom geometry and pixel round trips.
 python3 tests/x11_resize.py target/release/aura
 python3 tests/x11_focus.py target/release/aura
+python3 tests/x11_pointer_settings.py target/release/aura
 ```
 
 `cargo test` runs the GPU readback suite as part of the normal run. It prints a

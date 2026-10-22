@@ -7,6 +7,7 @@ mod keyboard;
 mod mouse;
 mod perf;
 mod pointer;
+mod pointer_settings;
 mod signals;
 mod sync;
 
@@ -339,13 +340,18 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         Some(event) => Some(event),
                         None => connection.poll_for_event()?,
                     } {
+                        if pointer_cursor.handle_event(&connection, screen_index, &event)? {
+                            continue;
+                        }
                         match event {
                             Event::ClientMessage(message)
                                 if message.data.as_data32()[0] == delete_window =>
                             {
                                 running = false
                             }
-                            Event::DestroyNotify(_) => running = false,
+                            Event::DestroyNotify(event) if event.window == window => {
+                                running = false
+                            }
                             // The server sends this when the keymap changes;
                             // without a refetch every key would mistranslate.
                             Event::MappingNotify(_)
@@ -840,6 +846,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                     if config.general.live_config_reload && config_watcher.changed() {
                         reload_pending = true;
                     }
+                    pointer_cursor.poll_settings(&connection, screen_index)?;
                 }
                 4 => running = false,
                 5 => {

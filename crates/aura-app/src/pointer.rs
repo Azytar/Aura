@@ -2,12 +2,16 @@ use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, CreateGCAux, FontWrapper};
 use x11rb::xcb_ffi::XCBConnection;
 
+use crate::pointer_settings::{Settings, Values};
+
 /// Session-themed cursors, with the X11 cursor font as a fallback.
 pub struct Pointer {
     text: u32,
     arrow: u32,
     invisible: u32,
     current: u32,
+    settings: Settings,
+    values: Values,
 }
 
 impl Pointer {
@@ -16,7 +20,9 @@ impl Pointer {
         screen: usize,
         window: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let resources = x11rb::resource_manager::new_from_default(connection)?;
+        let mut settings = Settings::new(connection, screen)?;
+        let values = settings.read(connection)?;
+        let resources = values.database();
         let cursors = x11rb::cursor::Handle::new(connection, screen, &resources)?.reply()?;
         let text = load_cursor(connection, &cursors, "xterm", 152)?;
         let arrow = load_cursor(connection, &cursors, "left_ptr", 68)?;
@@ -45,7 +51,54 @@ impl Pointer {
             arrow,
             invisible,
             current: 0,
+            settings,
+            values,
         })
+    }
+
+    pub fn handle_event(
+        &mut self,
+        connection: &XCBConnection,
+        screen: usize,
+        event: &x11rb::protocol::Event,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.settings.handles(event) {
+            self.reload(connection, screen)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn poll_settings(
+        &mut self,
+        connection: &XCBConnection,
+        screen: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.settings.files_changed() {
+            self.reload(connection, screen)?;
+        }
+        Ok(())
+    }
+
+    fn reload(
+        &mut self,
+        connection: &XCBConnection,
+        screen: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let values = self.settings.read(connection)?;
+        if values != self.values {
+            let resources = values.database();
+            let cursors = x11rb::cursor::Handle::new(connection, screen, &resources)?.reply()?;
+            let text = load_cursor(connection, &cursors, "xterm", 152)?;
+            let arrow = load_cursor(connection, &cursors, "left_ptr", 68)?;
+            connection.free_cursor(self.text)?;
+            connection.free_cursor(self.arrow)?;
+            self.text = text;
+            self.arrow = arrow;
+            self.values = values;
+        }
+        Ok(())
     }
 
     pub fn update(

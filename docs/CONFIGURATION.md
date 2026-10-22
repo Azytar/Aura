@@ -69,11 +69,22 @@ Releasing that button stops the scroll; wheel events can be used during the drag
 A selection started with Shift retains local ownership until button release,
 including edge autoscroll, even if Shift is released first.
 
-The mouse pointer loads the X11 session theme at startup: `XCURSOR_THEME` and
-`XCURSOR_SIZE` override `Xcursor.theme` and `Xcursor.size` from Xresources.
-Theme search follows `XCURSOR_PATH` or the standard icon directories. Missing
-or malformed cursor images use a visible core cursor. These settings affect the
-mouse pointer; `colors.cursor` and `[cursor]` configure the terminal's text cursor.
+The mouse pointer follows the session's theme and size. For each setting,
+explicit `XCURSOR_THEME` / `XCURSOR_SIZE` take precedence over Xresources
+(`Xcursor.theme` / `Xcursor.size`), then XSettings (`Gtk/CursorThemeName` /
+`Gtk/CursorThemeSize`), then GTK defaults (`gtk-cursor-theme-name` /
+`gtk-cursor-theme-size` in the `[Settings]` section). GTK defaults are read from
+`gtk-3.0/settings.ini` and `gtk-4.0/settings.ini` under `$XDG_CONFIG_HOME`
+(otherwise `~/.config`), `$XDG_CONFIG_DIRS` (otherwise `/etc/xdg`), and `/etc`,
+in that order; GTK3 precedes GTK4 within each location.
+
+Xresources/XSettings updates apply through X11 events. GTK files use the existing
+one-second configuration tick, including atomic file replacement; changing the
+desktop pointer does not require restarting Aura or enabling TOML live reload.
+No environment queries or theme loads run per keypress/frame. Theme search
+follows `XCURSOR_PATH` or standard icon directories. Missing/malformed settings
+and images retain a visible fallback. These settings affect the mouse pointer;
+`colors.cursor` and `[cursor]` configure the terminal's text cursor.
 
 ## Shell and environment
 
