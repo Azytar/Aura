@@ -3,6 +3,32 @@ use aura_core::{MouseTracking, Terminal};
 use aura_text::CellMetrics;
 use x11rb::protocol::xproto::KeyButMask;
 
+/// Edge drags must also work at a screen boundary, where X11 cannot report a
+/// pointer outside a maximized window. Use one cell inside each text edge.
+pub(crate) fn selection_scroll(
+    y: i16,
+    window_height: u16,
+    padding_y: u32,
+    cell_height: u32,
+) -> Option<(i8, usize)> {
+    let y = i64::from(y);
+    let top = i64::from(padding_y);
+    let bottom = i64::from(window_height) - top;
+    if bottom <= top {
+        return None;
+    }
+    let cell = i64::from(cell_height.max(1));
+    let zone = cell.min((bottom - top) / 2).max(1);
+    let (direction, distance) = if y < top + zone {
+        (-1, (top - y).max(0))
+    } else if y >= bottom - zone {
+        (1, (y - bottom).max(0))
+    } else {
+        return None;
+    };
+    Some((direction, 1 + (distance / cell).min(3) as usize))
+}
+
 /// Shift always gives selection to the terminal, including in a mouse-aware TUI.
 pub(crate) fn mouse_modes(terminal: &Terminal, state: KeyButMask) -> aura_core::Modes {
     let mut modes = terminal.modes();
@@ -114,6 +140,21 @@ pub(crate) fn mouse_report(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selection_scroll_reaches_history_at_zero_padding_screen_edges() {
+        assert_eq!(super::selection_scroll(0, 240, 0, 20), Some((-1, 1)));
+        assert_eq!(super::selection_scroll(19, 240, 0, 20), Some((-1, 1)));
+        assert_eq!(super::selection_scroll(20, 240, 0, 20), None);
+        assert_eq!(super::selection_scroll(219, 240, 0, 20), None);
+        assert_eq!(super::selection_scroll(220, 240, 0, 20), Some((1, 1)));
+        assert_eq!(super::selection_scroll(239, 240, 0, 20), Some((1, 1)));
+        assert_eq!(super::selection_scroll(-80, 250, 5, 20), Some((-1, 4)));
+        assert_eq!(super::selection_scroll(325, 250, 5, 20), Some((1, 4)));
+        assert_eq!(super::selection_scroll(5, 20, 0, 20), Some((-1, 1)));
+        assert_eq!(super::selection_scroll(15, 20, 0, 20), Some((1, 1)));
+        assert_eq!(super::selection_scroll(0, 0, 0, 0), None);
+    }
+
     use super::*;
     #[test]
     fn hover_pixels_releases_and_selection_override() {

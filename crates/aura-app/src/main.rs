@@ -264,7 +264,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     ));
     let mut reload_pending = false;
     let mut last_typing = std::time::Instant::now();
-    let mut pointer_cursor = pointer::Pointer::new(&connection, window)?;
+    let mut pointer_cursor = pointer::Pointer::new(&connection, screen_index, window)?;
     let mut pointer_hidden = false;
     let mut input = input::Input::default();
     let mut watching_write = false;
@@ -583,11 +583,13 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                             }
                             Event::ButtonRelease(button) => {
                                 last_mouse_report = None;
-                                // Release always ends the local drag, even if the
-                                // application enabled mouse tracking mid-gesture.
-                                selection_anchor = None;
-                                if autoscroll_dir.take().is_some() {
-                                    set_autoscroll_timer(autoscroll_timer, false)?;
+                                // Only releasing the selecting button ends a drag.
+                                // Wheel releases must leave its anchor and timer alive.
+                                if button.detail == 1 {
+                                    selection_anchor = None;
+                                    if autoscroll_dir.take().is_some() {
+                                        set_autoscroll_timer(autoscroll_timer, false)?;
+                                    }
                                 }
                                 if mouse_modes(&terminal, button.state).mouse_tracking
                                     == MouseTracking::Off
@@ -595,7 +597,9 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                     // Own the PRIMARY selection like any X11
                                     // client, so other applications can paste
                                     // the highlighted text with a middle click.
-                                    if let Some(text) = terminal.selection_text() {
+                                    if button.detail == 1
+                                        && let Some(text) = terminal.selection_text()
+                                    {
                                         clipboard.set_text(
                                             &connection,
                                             window,
@@ -657,20 +661,16 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                     && terminal.selection().is_some()
                                     && let Some(anchor) = selection_anchor
                                 {
-                                    // Dragging past the top or bottom edge scrolls
-                                    // the view. The repeating tick keeps scrolling
-                                    // while the pointer rests outside, so a still
-                                    // hand never stalls a long selection.
-                                    let padding_y = config.window.padding_y as i32;
-                                    let bottom = i32::from(last_winsize.pixel_height) - padding_y;
-                                    let y = i32::from(motion.event_y);
-                                    let direction = if y < padding_y {
-                                        Some(-1)
-                                    } else if y >= bottom {
-                                        Some(1)
-                                    } else {
-                                        None
-                                    };
+                                    // A text-edge hot zone also works when a
+                                    // maximized window reaches the screen edge.
+                                    // The timer continues without more motion.
+                                    let direction = mouse::selection_scroll(
+                                        motion.event_y,
+                                        last_winsize.pixel_height,
+                                        config.window.padding_y,
+                                        configured_metrics(&font, &config).height,
+                                    )
+                                    .map(|(direction, _)| direction);
                                     if direction != autoscroll_dir {
                                         set_autoscroll_timer(
                                             autoscroll_timer,
@@ -826,18 +826,13 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         && terminal.selection().is_some()
                     {
                         let metrics = configured_metrics(&font, &config);
-                        let padding_y = config.window.padding_y as i32;
-                        let bottom = i32::from(last_winsize.pixel_height) - padding_y;
-                        // The further the pointer sits outside, the faster the
-                        // tick drags the view along, like Alacritty's velocity.
-                        let distance = if direction < 0 {
-                            padding_y - i32::from(pointer.1)
-                        } else {
-                            i32::from(pointer.1) - bottom
-                        };
-                        let cell = i32::try_from(metrics.height.max(1)).unwrap_or(i32::MAX);
-                        let extra = (distance / cell).clamp(0, 3);
-                        let lines = 1 + extra as usize;
+                        let lines = mouse::selection_scroll(
+                            pointer.1,
+                            last_winsize.pixel_height,
+                            config.window.padding_y,
+                            metrics.height,
+                        )
+                        .map_or(1, |(_, lines)| lines);
                         if direction < 0 {
                             terminal.scroll_view_up(lines);
                         } else {
@@ -1357,7 +1352,7 @@ fn epoll_add(epoll: i32, fd: i32, token: u64, flags: u32) -> io::Result<()> {
 }
 
 /// Starts or stops the repeating tick that keeps an edge drag scrolling while
-/// the pointer rests outside the viewport. Motion events alone stop arriving
+/// the pointer rests near or outside the viewport. Motion events stop arriving
 /// as soon as the hand stands still or the pointer reaches a screen edge.
 fn set_autoscroll_timer(fd: i32, enabled: bool) -> io::Result<()> {
     let nanos = if enabled { 16_000_000 } else { 0 };

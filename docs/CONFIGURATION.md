@@ -63,6 +63,16 @@ Without a matching local binding, enhanced keyboard encoding is negotiated by
 the application. Plain shells retain legacy input. Shift also bypasses application
 mouse tracking for local selection; ordinary hover/motion reports remain opt-in.
 
+Holding the left button in the first or last text row scrolls the selection
+through retained history, even when the pointer cannot leave the screen.
+Releasing that button stops the scroll; wheel events can be used during the drag.
+
+The mouse pointer loads the X11 session theme at startup: `XCURSOR_THEME` and
+`XCURSOR_SIZE` override `Xcursor.theme` and `Xcursor.size` from Xresources.
+Theme search follows `XCURSOR_PATH` or the standard icon directories. Missing
+or malformed cursor images use a visible core cursor. These settings affect the
+mouse pointer; `colors.cursor` and `[cursor]` configure the terminal's text cursor.
+
 ## Shell and environment
 
 ```toml

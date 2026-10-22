@@ -21,7 +21,7 @@ as-raw-xcb-connection = "1.0"
 base64 = "0.22.1"
 libc = "0.2"
 toml = "0.9"
-x11rb = { version = "0.14.0", features = ["as-raw-xcb-connection", "allow-unsafe-code", "xkb"] }
+x11rb = { version = "0.14.0", features = ["as-raw-xcb-connection", "allow-unsafe-code", "cursor", "xkb"] }
 xkbcommon = { version = "0.8.0", features = ["x11"], default-features = false }
 
 [lints]

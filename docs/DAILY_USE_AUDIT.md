@@ -41,6 +41,11 @@ bash tests/e2e_shell_smoke.sh target/release/aura
 ./target/release/aura --doctor
 ```
 
+For current pointer-theme and history-selection regressions, also run
+`python3 tests/x11_pointer_selection.py target/release/aura` on a dedicated
+X11 display. It checks exact themed cursor images and selection drags at a
+screen edge without padding, including stationary scrolling and wheel events.
+
 - 166 runner cases passed, including 15 Vulkan readback tests. Four optional
   FiraCode Nerd Font checks return early because that font is absent; those
   four checks are not claimed as executed coverage. CJK and color emoji

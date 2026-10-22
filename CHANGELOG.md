@@ -30,6 +30,11 @@ per commit.
 
 ### Fixed
 
+- Mouse pointers load the session's Xcursor theme and size instead of using
+  fixed white core cursors. Missing or malformed themes retain a visible fallback.
+- Selection drags scroll retained history from inside the top and bottom text
+  edges, including zero-padding windows at screen boundaries. Wheel releases
+  no longer end a drag while the selecting button remains held.
 - CSI digit runs avoid repeated byte dispatch while preserving parameter
   saturation, sequence limits and fragmented input. Parser string storage is
   allocated only when needed; printed cells avoid redundant cursor-row updates.

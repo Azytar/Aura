@@ -1,8 +1,8 @@
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, CreateGCAux};
+use x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt, CreateGCAux, FontWrapper};
 use x11rb::xcb_ffi::XCBConnection;
 
-/// Core X11 cursors need neither XFixes nor an additional native dependency.
+/// Session-themed cursors, with the X11 cursor font as a fallback.
 pub struct Pointer {
     text: u32,
     arrow: u32,
@@ -13,30 +13,13 @@ pub struct Pointer {
 impl Pointer {
     pub fn new(
         connection: &XCBConnection,
+        screen: usize,
         window: u32,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let font = connection.generate_id()?;
-        connection.open_font(font, b"cursor")?.check()?;
-        let text = connection.generate_id()?;
-        let arrow = connection.generate_id()?;
-        for (cursor, character) in [(text, 152), (arrow, 68)] {
-            connection
-                .create_glyph_cursor(
-                    cursor,
-                    font,
-                    font,
-                    character,
-                    character + 1,
-                    65535,
-                    65535,
-                    65535,
-                    0,
-                    0,
-                    0,
-                )?
-                .check()?;
-        }
-        connection.close_font(font)?;
+        let resources = x11rb::resource_manager::new_from_default(connection)?;
+        let cursors = x11rb::cursor::Handle::new(connection, screen, &resources)?.reply()?;
+        let text = load_cursor(connection, &cursors, "xterm", 152)?;
+        let arrow = load_cursor(connection, &cursors, "left_ptr", 68)?;
         let pixmap = connection.generate_id()?;
         let gc = connection.generate_id()?;
         connection.create_pixmap(1, pixmap, window, 1, 1)?.check()?;
@@ -89,4 +72,37 @@ impl Pointer {
         }
         Ok(())
     }
+}
+
+fn load_cursor(
+    connection: &XCBConnection,
+    cursors: &x11rb::cursor::Handle,
+    name: &str,
+    shape: u16,
+) -> Result<u32, Box<dyn std::error::Error>> {
+    if let Ok(cursor) = cursors.load_cursor(connection, name)
+        && cursor != x11rb::NONE
+    {
+        return Ok(cursor);
+    }
+    // Missing or malformed themes and servers without RENDER still need a
+    // visible pointer. Match the traditional black foreground/white outline.
+    let font = FontWrapper::open_font(connection, b"cursor")?;
+    let cursor = connection.generate_id()?;
+    connection
+        .create_glyph_cursor(
+            cursor,
+            font.font(),
+            font.font(),
+            shape,
+            shape + 1,
+            0,
+            0,
+            0,
+            u16::MAX,
+            u16::MAX,
+            u16::MAX,
+        )?
+        .check()?;
+    Ok(cursor)
 }
