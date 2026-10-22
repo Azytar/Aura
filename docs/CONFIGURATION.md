@@ -107,6 +107,9 @@ fallback families use the same discovery; fallback preserves the primary grid.
 
 `colors.cursor` overrides the block, bar and underline paint. With no override,
 the cursor uses the effective cell foreground. Unfocused windows show a steady
-hollow cursor. `cursor.blink_interval_ms` sets the interval; typing restarts it.
+hollow cursor. Regaining logical focus restores the configured shape, including
+window-manager focus moves during keyboard grabs. Temporary grabs and focus
+moves to a child do not show an unfocused cursor or emit focus reports.
+`cursor.blink_interval_ms` sets the interval; typing restarts it.
 After `cursor.blink_timeout_ms` of inactivity the cursor stays visible; zero
 disables that timeout. Applications can still select cursor shape and blinking.

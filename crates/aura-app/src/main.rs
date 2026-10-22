@@ -33,6 +33,17 @@ use x11rb::protocol::xproto::{
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::xcb_ffi::XCBConnection;
 
+fn logical_focus_event(
+    mode: x11rb::protocol::xproto::NotifyMode,
+    detail: x11rb::protocol::xproto::NotifyDetail,
+) -> bool {
+    use x11rb::protocol::xproto::{NotifyDetail, NotifyMode};
+    // GRAB/UNGRAB are temporary routing changes. WHILE_GRABBED still records
+    // real focus moves made by a window manager during a shortcut grab.
+    matches!(mode, NotifyMode::NORMAL | NotifyMode::WHILE_GRABBED)
+        && detail != NotifyDetail::INFERIOR
+}
+
 fn main() {
     let opts = match arguments() {
         Ok(opts) => opts,
@@ -353,7 +364,8 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                 pointer_hidden = false;
                             }
                             Event::FocusIn(event)
-                                if event.mode == x11rb::protocol::xproto::NotifyMode::NORMAL =>
+                                if event.event == window
+                                    && logical_focus_event(event.mode, event.detail) =>
                             {
                                 if let Some(bytes) = terminal.focus_report(true) {
                                     input.push(bytes);
@@ -365,7 +377,8 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                 invalidated = true;
                             }
                             Event::FocusOut(event)
-                                if event.mode == x11rb::protocol::xproto::NotifyMode::NORMAL =>
+                                if event.event == window
+                                    && logical_focus_event(event.mode, event.detail) =>
                             {
                                 renderer.set_focused(false);
                                 invalidated = true;

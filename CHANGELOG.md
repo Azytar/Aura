@@ -43,6 +43,9 @@ per commit.
 
 ### Fixed
 
+- Real X11 focus moves during keyboard grabs restore the filled text cursor
+  and application focus reports. Temporary grabs and focus moves to a child
+  window do not change the terminal's logical focus.
 - Desktop benchmark windows are withdrawn from tiling/maximization policy
   before pinning the requested grid. Initial PTY sizes and fractional pixel
   tails no longer cause premature rejection; exact PTY/client geometry and
