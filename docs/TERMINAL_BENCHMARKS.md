@@ -20,13 +20,15 @@ editing or TOML setup is needed:
 ```sh
 ./tools/benchmark.sh --quick
 ./tools/benchmark.sh --nvim
+./tools/benchmark.sh --current-session --nvim
 ./tools/benchmark.sh --quick --output /path/outside-checkout/run-001 --no-open
 ./tools/benchmark.sh --report /path/outside-checkout/run-001
 ```
 
 The script requires Python 3.11+, Fontconfig (`fc-match`), `xdotool`, X11/XTest
-libraries and Xvfb. Install Aura and at least one of Alacritty, Kitty, WezTerm or
-xterm. It reports missing tools; it does not install packages. `--nvim` also
+libraries and Xvfb (unless using an existing session). Install Aura and at least
+one of Alacritty, Kitty, WezTerm or xterm. It reports missing tools; it does not
+install packages. `--nvim` also
 requires Neovim with the Lua autocmd/highlight APIs (tested with 0.10.4).
 
 Aura is selected from `target/release/aura`, then `PATH`; `--aura PATH` overrides
@@ -48,17 +50,47 @@ Fontconfig face; `--config FILE` uses the full advanced configuration instead.
 The default comparison uses equal grids (`--geometry-policy grid`), so xterm
 can appear beside GPU renderers despite different cell pixel sizes. The report
 labels that distinction; use `--geometry-policy cell` for strict pixel cohorts.
-For a real GPU, pass a **dedicated** `--display :N`. That changes focus and
-injects input on the named server. Without it, the script owns a virtual display
-and leaves the desktop's focus and keyboard map alone. Driver inventories still
-need checking; an existing display is not physical-GPU certification.
+Use `--current-session` from your desktop to inherit `DISPLAY` (X11 or
+XWayland) and its driver environment, without creating Xvfb. `--display :N`
+selects an explicit server instead; the two options are mutually exclusive.
+Wayland without an accessible XWayland `DISPLAY` fails with instructions;
+there is no silent fallback to software. This tests X11 clients under your
+compositor, not native Wayland clients.
+When X11 authentication uses the original `~/.Xauthority` without an explicit
+`XAUTHORITY`, the launcher preserves that path before isolating client homes.
+It never copies or records cookies and respects an explicit `XAUTHORITY`.
+
+These modes open isolated test windows, change focus and inject input. Leave
+them focused and do not interact during the campaign. Before each key/chord,
+the harness briefly grabs the X server, checks the owned window still has
+focus, injects and releases the server. Focus loss aborts the campaign; no
+further test keys are sent. Focus checks precede the input timestamp; delivery
+and release overhead remain in the observation. The prior focus is restored
+when its window survives and focus is still owned by the trial. User modifiers
+are not cleared and the keyboard map is never changed; layouts/modifiers that
+produce different bytes fail validation. Desktop load, compositor, scaling,
+occlusion and power state affect results: keep them stable across repetitions.
+
+Without either option, the script owns an Xvfb and leaves the desktop alone.
+Xvfb is a virtual display; it does not itself force every graphics API onto
+the CPU. Use the recorded probes to identify software drivers such as llvmpipe.
+The GL probe renderer, Vulkan enumerated device names/types and selected driver
+override variables are saved privately. Software, hardware, mixed and unknown
+inventories are distinct. Missing probes stay unknown. Vulkan enumeration does
+not prove which device an emulator selected; `DISPLAY` does not certify a
+physical GPU. xterm remains a classic Xlib reference. This harness neither
+forces a GPU nor measures GPU execution time, VRAM or physical scanout.
 
 Outputs default to `${XDG_STATE_HOME:-~/.local/state}/aura/benchmarks/<unique-id>/`.
 `--output` must name a new directory outside every checkout, including symlinks.
 Nothing is overwritten. Bars are printed directly in the terminal; the default
 browser opens the simple HTML/SVG report when a graphical session is available.
 `--no-open` leaves the console bars and files. Each chart uses linear median
-bars from zero; p95/p99, ranges and sample counts are expandable. CSV, JSON and
+bars from zero on white, Aura blue and references gray, with values and units
+visible. `overview.svg` combines the charts into one exportable image and labels
+the environment/profile; the same style is used for software and GPU sessions.
+Partial bars have an asterisk; missing samples stay missing. p95/p99, ranges
+and sample counts are expandable. CSV, JSON and
 the full native report remain available. `--report DIR` creates a new view of
 the same preserved measurements and needs no display or emulator installation.
 

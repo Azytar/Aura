@@ -17,6 +17,14 @@ the terminal and browser; `--nvim` adds a separate instrumented real-editor
 fixture with exact input, status-line pixel witnesses and viewport/search checks.
 Editor startup and edit clocks include editor and fixture overhead; these
 samples remain separate from native helper clocks and core microbenchmarks.
+`--current-session` reuses the desktop's X11/XWayland `DISPLAY` and driver
+environment; the default still owns an Xvfb for software checks. Every key/chord
+verifies focus atomically before delivery; this guard precedes the input clock,
+while delivery/release overhead remains included. Keep the desktop idle and
+unobscured. Light median bars and `overview.svg` use the same renderer for both
+modes. Reports identify GL probe renderers and Vulkan device inventories,
+including mixed or unknown results; they do not attest per-process GPU selection.
+Do not pool desktop GPU and Xvfb/software samples into one campaign.
 The tables below are historical internal benchmarks, distinct from that harness.
 
 Printable-output changes should be compared with separate baseline/candidate

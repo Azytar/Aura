@@ -17,6 +17,8 @@ import daily
 import quickstart
 import report
 import simple_report
+import runner
+from x11 import FocusLostError, X11
 
 
 class Fixture(unittest.TestCase):
@@ -42,6 +44,40 @@ class Fixture(unittest.TestCase):
 
 
 class Entry(Fixture):
+    def test_current_session_requires_display_without_silent_xvfb_fallback(self):
+        with (patch.dict(os.environ, {'DISPLAY': ''}),
+              patch.object(quickstart, 'discover', return_value=(self.config, [])),
+              patch.object(quickstart.shutil, 'which', return_value='/bin/true'),
+              patch.object(quickstart, 'preflight', return_value={}),
+              patch.object(quickstart.runner, 'run') as execute,
+              contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors):
+            self.assertEqual(quickstart.main(['--current-session', '--output', str(self.root/'run')]), 1)
+        execute.assert_not_called()
+        self.assertIn('DISPLAY', errors.getvalue())
+        self.assertFalse((self.root/'run').exists())
+
+    def test_current_session_uses_inherited_display_for_both_campaigns(self):
+        with (patch.dict(os.environ, DISPLAY=':123'),
+              patch.object(quickstart, 'discover', return_value=(self.config, [])),
+              patch.object(quickstart.shutil, 'which', return_value='/bin/true'),
+              patch.object(quickstart, 'preflight', return_value={}),
+              patch.object(quickstart, 'dependencies') as dependencies,
+              patch.object(quickstart.adapters, 'identify', return_value=dict(status='available')),
+              patch.object(quickstart.runner, 'run', return_value=dict(status='complete')) as native,
+              patch.object(quickstart.daily, 'run', return_value=dict(status='complete')) as editor,
+              patch.object(quickstart.report, 'render'), patch.object(quickstart, 'show_report'),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertEqual(quickstart.main(['--current-session', '--nvim', '--output', str(self.root/'run')]), 0)
+        dependencies.assert_called_once_with(False, True)
+        for command in [native, editor]:
+            self.assertEqual(command.call_args.kwargs['display'], ':123')
+            self.assertFalse(command.call_args.kwargs['xvfb'])
+        self.assertEqual(native.call_args.kwargs['environment'], 'unknown')
+
+    def test_session_modes_are_mutually_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            quickstart.parser().parse_args(['--current-session', '--display', ':123'])
+
     def test_bash_help_works_outside_checkout_and_without_import_dependencies(self):
         folder = self.root / 'working directory with spaces'
         folder.mkdir()
@@ -170,6 +206,16 @@ class Entry(Fixture):
 
 
 class Presentation(Fixture):
+    def test_light_chart_uses_same_scale_colors_and_marks_partial_data(self):
+        rows = [dict(terminal=k, kind=k, status='partial' if k == 'aura' else 'complete', p50=1)
+                for k in ['aura', 'alacritty']]
+        document = ET.fromstring(simple_report.svg(rows, 'CPU < GPU', 'ms', False))
+        rects = list(document.iter('{http://www.w3.org/2000/svg}rect'))
+        self.assertEqual([r.attrib['fill'] for r in rects], ['#ffffff', '#4169ff', '#e7e7e7'])
+        self.assertEqual(rects[1].attrib['height'], rects[2].attrib['height'])
+        self.assertIn('1.000 *', ''.join(document.itertext()))
+        self.assertIn('CPU < GPU', ''.join(document.itertext()))
+
     def test_simple_bars_scale_by_median_not_outliers_and_missing_stays_missing(self):
         rows = [dict(terminal=k, kind=k, status='complete', p50=v, max=10000, min=0)
                 for k, v in [('aura', 10), ('alacritty', 20)]]
@@ -201,6 +247,9 @@ class Presentation(Fixture):
         self.assertIn('#', printed.getvalue())
         self.assertIn('Detalles y percentiles', path.read_text())
         self.assertIn('Neovim fixture', path.read_text())
+        overview = ET.parse(path.parent/'overview.svg')
+        self.assertGreater(len(list(overview.iter('{http://www.w3.org/2000/svg}svg'))), 2)
+        self.assertIn('Xvfb propio / pantalla virtual', path.read_text())
         with self.assertRaises(FileExistsError):
             simple_report.render(source, path.parent)
 
@@ -244,3 +293,68 @@ class Editor(Fixture):
         with self.assertRaisesRegex(ValueError, 'complete native run'):
             daily.run(path, self.root / 'editor', {})
         self.assertFalse((self.root / 'editor').exists())
+
+
+class Session(unittest.TestCase):
+    def test_default_xauthority_path_survives_home_isolation_without_copying_cookies(self):
+        with tempfile.TemporaryDirectory(prefix='aura-authority-') as folder:
+            home = Path(folder)
+            (home/'.Xauthority').touch()
+            with patch.dict(os.environ, HOME=str(home)):
+                os.environ.pop('XAUTHORITY', None)
+                environment = runner.display_environment(':123', HOME='/isolated/home')
+                self.assertEqual(environment['XAUTHORITY'], str(home/'.Xauthority'))
+                self.assertEqual(environment['HOME'], '/isolated/home')
+                self.assertNotIn('XAUTHORITY', os.environ)
+                os.environ['XAUTHORITY'] = '/explicit/authority'
+                self.assertEqual(runner.display_environment(':123')['XAUTHORITY'], '/explicit/authority')
+
+    def test_device_inventory_distinguishes_software_hardware_mixed_and_unknown(self):
+        gl = 'OpenGL renderer string: AMD Radeon\n    Accelerated: yes\n'
+        self.assertEqual(runner.renderer_inventory('gl', gl, 0)['classification'], 'hardware')
+        self.assertEqual(runner.renderer_inventory('gl', gl.replace('AMD Radeon', 'llvmpipe'), 0)['classification'], 'software')
+        self.assertEqual(runner.renderer_inventory('gl', gl, 1)['classification'], 'unknown')
+        gpu = 'deviceName = Radeon\ndeviceType = PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\n'
+        cpu = 'deviceName = llvmpipe\ndeviceType = PHYSICAL_DEVICE_TYPE_CPU\n'
+        for text, expected in [(gpu,'hardware'), (cpu,'software'), (gpu+cpu,'mixed'), ('','unknown')]:
+            self.assertEqual(runner.renderer_inventory('vulkan', text, 0)['classification'], expected)
+        label = simple_report.environment_label(dict(xvfb=False, vulkan=runner.renderer_inventory('vulkan', gpu+cpu, 0)))
+        self.assertIn('mixed', label)
+        self.assertNotIn('Xvfb propio', label)
+
+    def connection(self, focused):
+        connection = X11.__new__(X11)
+        connection.x, connection.xt = Mock(), Mock()
+        connection.display, connection.target, connection.keycode = 1, 42, 38
+        connection.previous_focus = 12
+        connection.focused, connection.sync = Mock(return_value=focused), Mock()
+        return connection
+
+    def test_focus_loss_sends_no_keys_and_always_releases_server(self):
+        connection = self.connection(99)
+        with self.assertRaises(FocusLostError):
+            connection.key()
+        connection.xt.XTestFakeKeyEvent.assert_not_called()
+        connection.x.XUngrabServer.assert_called_once_with(1)
+        connection.restore_focus()
+        connection.x.XSetInputFocus.assert_not_called()
+
+    def test_delivery_failure_releases_server_and_prior_focus_is_restored_only_when_owned(self):
+        connection = self.connection(42)
+        connection.xt.XTestFakeKeyEvent.return_value = 0
+        with self.assertRaisesRegex(RuntimeError, 'injection'):
+            connection.key()
+        connection.x.XUngrabServer.assert_called_once_with(1)
+        connection.restore_focus()
+        connection.x.XSetInputFocus.assert_called_once_with(1, 12, 2, 0)
+        self.assertIsNone(connection.target)
+
+    def test_chord_failure_releases_pressed_modifier_and_server(self):
+        connection = self.connection(42)
+        connection.x.XKeysymToKeycode.side_effect = [37, 41]
+        connection.xt.XTestFakeKeyEvent.side_effect = [1, 0, 1]
+        with self.assertRaisesRegex(RuntimeError, 'injection'):
+            connection.keys('ctrl+f')
+        self.assertEqual([call.args[1:3] for call in connection.xt.XTestFakeKeyEvent.call_args_list],
+                         [(37, True), (41, True), (37, False)])
+        connection.x.XUngrabServer.assert_called_once_with(1)

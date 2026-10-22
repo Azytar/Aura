@@ -20,7 +20,7 @@ from xml.sax.saxutils import escape
 import adapters
 from common import outside_checkout, require_hash, sha256
 from resources import Resources
-from x11 import X11
+from x11 import FocusLostError, X11
 
 HERE = Path(__file__).resolve().parent
 
@@ -197,9 +197,21 @@ def input_color(index):
     ]
 
 
+def display_environment(display, **isolated):
+    env = dict(os.environ, DISPLAY=display)
+    # Xlib normally finds this through HOME. Preserve only its path before
+    # isolating client homes; never copy or record the authentication cookies.
+    authority = Path.home() / '.Xauthority'
+    if 'XAUTHORITY' not in env and authority.is_file():
+        env['XAUTHORITY'] = str(authority)
+    env.update(isolated)
+    return env
+
+
 def trial(
     entry, identity, directory, config, settings, display, x11, expected_font_hash=None
 ):
+    x11.begin_trial()
     directory.mkdir()
     for name in ["home", "config", "data", "cache", "state"]:
         (directory / name).mkdir()
@@ -226,9 +238,8 @@ def trial(
             entry.get("cell_spacing", [0, 0]),
         )
         result["command"] = command
-        environment = dict(
-            os.environ,
-            DISPLAY=display,
+        environment = display_environment(
+            display,
             HOME=str(directory / "home"),
             XDG_CONFIG_HOME=str(directory / "config"),
             XDG_DATA_HOME=str(directory / "data"),
@@ -453,6 +464,7 @@ def trial(
             ]
             result["metrics"]["sampled_peak_rss_mib"] = [resources.peak / 1048576]
             result["resource_samples"] = resources.samples
+            x11.restore_focus()
             channel.request("quit")
             try:
                 exit_code = process.wait(timeout=3)
@@ -476,8 +488,11 @@ def trial(
             EOFError,
             subprocess.SubprocessError,
         ) as error:
+            if isinstance(error, FocusLostError):
+                raise
             result["error"] = str(error)
         finally:
+            x11.restore_focus()
             if connection:
                 connection.close()
             server.close()
@@ -491,6 +506,11 @@ def inventory(display, output):
         python=sys.version.split()[0],
         cpu_count=os.cpu_count(),
         display=display,
+        session_type=os.environ.get('XDG_SESSION_TYPE', 'unknown'),
+        driver_overrides={key: os.environ[key] for key in [
+            'LIBGL_ALWAYS_SOFTWARE', 'GALLIUM_DRIVER', 'MESA_LOADER_DRIVER_OVERRIDE',
+            'VK_ICD_FILENAMES', 'VK_DRIVER_FILES', 'DRI_PRIME',
+            '__NV_PRIME_RENDER_OFFLOAD', '__GLX_VENDOR_LIBRARY_NAME'] if key in os.environ},
         resource_scope="observed terminal process tree; helper and X server excluded after readiness",
         resource_sampling_ms=10,
         clock_ticks_per_second=os.sysconf("SC_CLK_TCK"),
@@ -525,9 +545,33 @@ def inventory(display, output):
                     for v in ["llvmpipe", "lavapipe", "software rasterizer"]
                 ),
             )
+            values[name].update(renderer_inventory(name, text, reply.returncode))
         except (OSError, subprocess.TimeoutExpired) as error:
             values[name] = dict(error=str(error))
     return values
+
+
+def renderer_inventory(api, text, exit_code):
+    """GL selected probe renderer versus Vulkan enumeration, never process attestation."""
+    if api == 'gl':
+        names = [line.split(':', 1)[1].strip() for line in text.splitlines()
+                 if line.strip().startswith('OpenGL renderer string:')]
+        software = any(word in ' '.join(names).lower() for word in
+                       ['llvmpipe', 'lavapipe', 'softpipe', 'software', 'swrast'])
+        accelerated = any(line.strip().lower() == 'accelerated: yes' for line in text.splitlines())
+        classification = ('software' if software else 'hardware' if accelerated else 'unknown')
+    else:
+        names = [line.split('=', 1)[1].strip() for line in text.splitlines()
+                 if line.strip().startswith('deviceName') and '=' in line]
+        types = [line.split('=', 1)[1].strip() for line in text.splitlines()
+                 if line.strip().startswith('deviceType') and '=' in line]
+        cpu = any(t.endswith('_CPU') for t in types)
+        gpu = any(t.endswith(('_DISCRETE_GPU', '_INTEGRATED_GPU')) for t in types)
+        classification = 'mixed' if cpu and gpu else 'hardware' if gpu else 'software' if cpu else 'unknown'
+    if exit_code or not names:
+        classification = 'unknown'
+    return dict(renderers=names, classification=classification,
+                scope='probe renderer' if api == 'gl' else 'enumerated devices; selection by each emulator unverified')
 
 
 def run(

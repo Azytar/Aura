@@ -186,13 +186,22 @@ median bars in the terminal and opens a simple HTML report:
 ```sh
 ./tools/benchmark.sh --quick           # functional smoke on its own Xvfb
 ./tools/benchmark.sh --nvim            # standard campaign + real Neovim fixture
+./tools/benchmark.sh --current-session --nvim  # current desktop X11/XWayland
 ```
 
 Use `--build` if Aura needs compiling, `--no-open` on a headless machine, or
 `--report /path/to/previous/run` to display saved results without measuring again.
 Results default to `${XDG_STATE_HOME:-~/.local/state}/aura/benchmarks/`, outside
 Git checkouts. Python 3.11+, Xvfb, XTest/X11, Fontconfig, xdotool and at least
-two installed emulators are required; Neovim is optional.
+two installed emulators are required; Neovim is optional. Xvfb is unnecessary
+with `--current-session`, which inherits `DISPLAY` and the graphics drivers.
+Leave its test windows focused and do not type during the campaign; losing
+focus cancels input. It restores the previous focus when possible and never
+changes the keyboard map. Native Wayland-only sessions are not supported yet.
+The light report includes labeled bars, visible values and a combined
+`overview.svg`; GPU and software runs use the same chart style. Renderer probes
+distinguish software, hardware, mixed and unknown inventories without certifying
+the device chosen by each emulator.
 
 The [multi-terminal harness](docs/TERMINAL_BENCHMARKS.md) automates controlled
 Linux/X11 workloads and generates per-metric tables and charts. It records actual

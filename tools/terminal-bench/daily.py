@@ -12,8 +12,8 @@ import uuid
 import adapters
 from common import outside_checkout, require_hash, sha256
 from resources import Resources
-from runner import display_session, input_color, inventory, save, stop, wait_pixel, window_for
-from x11 import X11
+from runner import display_environment, display_session, input_color, inventory, save, stop, wait_pixel, window_for
+from x11 import FocusLostError, X11
 
 HERE = Path(__file__).resolve().parent
 
@@ -39,6 +39,7 @@ def wait_event(path, predicate, resources, process, timeout, after=0):
 
 
 def trial(entry, identity, directory, native, nvim, display, x11):
+    x11.begin_trial()
     directory.mkdir()
     for name in ['home', 'config', 'data', 'cache', 'state']:
         (directory / name).mkdir()
@@ -50,7 +51,7 @@ def trial(entry, identity, directory, native, nvim, display, x11):
                               [nvim['binary'], '--noplugin', '-n', '-u', str(directory.parent / 'nvim_fixture.lua'),
                                '-i', 'NONE', str(directory.parent / 'fixture.rs')], title,
                               entry.get('cell_spacing', [0, 0]))
-    env = dict(os.environ, DISPLAY=display, HOME=str(directory / 'home'),
+    env = display_environment(display, HOME=str(directory / 'home'),
                XDG_CONFIG_HOME=str(directory / 'config'), XDG_DATA_HOME=str(directory / 'data'),
                XDG_CACHE_HOME=str(directory / 'cache'), XDG_STATE_HOME=str(directory / 'state'),
                FONTCONFIG_FILE=str(Path(native['font_config_path'])), LANG='C.UTF-8', LC_ALL='C.UTF-8',
@@ -117,9 +118,7 @@ def trial(entry, identity, directory, native, nvim, display, x11):
         result['paused_gaps_ms'] = gaps
         if any(g < 50 for g in gaps):
             raise ValueError('requested input pause not reached')
-        def keys(*values):
-            subprocess.run(['xdotool', 'key', *values], env=env, check=True, timeout=5,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        keys = x11.keys
         before = len(events(path))
         keys('Escape', 'ctrl+f')
         down = wait_event(path, lambda e: e['op'] == 'cursor' and e['top'] > 1,
@@ -129,13 +128,14 @@ def trial(entry, identity, directory, native, nvim, display, x11):
         up = wait_event(path, lambda e: e['op'] == 'cursor' and e['top'] < down['top'],
                         resources, process, timeout, before)
         before = len(events(path))
-        subprocess.run(['xdotool', 'type', '--clearmodifiers', '/fn benchmark_target'], env=env,
-                       check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # Explicit keysyms avoid changing the session's keymap or modifiers.
+        keys('slash', 'f', 'n', 'space', *list('benchmark'), 'shift+minus', *list('target'))
         keys('Return')
         found = wait_event(path, lambda e: e['op'] == 'cursor' and e['text'] == 'fn benchmark_target() {}',
                            resources, process, timeout, before)
         result['navigation'] = dict(page_down_top=down['top'], page_up_top=up['top'], search_line=found['row'])
-        keys('Escape', 'colon', 'q', 'a', 'exclam', 'Return')
+        keys('Escape', 'shift+semicolon', 'q', 'a', 'shift+1', 'Return')
+        x11.restore_focus()
         if process.wait(timeout=timeout):
             raise RuntimeError('terminal exited unsuccessfully after Neovim')
         require_hash(identity['binary'], identity['sha256'])
@@ -143,8 +143,11 @@ def trial(entry, identity, directory, native, nvim, display, x11):
         require_hash(config['font_file'], native['font_sha256'])
         result.update(status='ok', checks=dict(exact_buffer=True, observed_witness=True, navigation=True))
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as error:
+        if isinstance(error, FocusLostError):
+            raise
         result['error'] = str(error)
     finally:
+        x11.restore_focus()
         stop(process)
     return result
 

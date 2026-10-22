@@ -23,6 +23,11 @@ per commit.
 
 ### Added
 
+- Benchmark launcher `--current-session` reuses the desktop X11/XWayland display
+  and driver environment, with focus-checked input and best-effort focus restore.
+  Reports record GL renderer/Vulkan device inventories and use light median
+  bars with visible values and an exportable overview for both software and
+  existing-session runs. Physical GPU selection and scanout remain unverified.
 - `tools/benchmark.sh` detects installed terminals and fonts, validates runtime
   requirements, runs isolated comparisons and displays median bars in the
   console and a simple browser report. Optional real-Neovim editing/navigation

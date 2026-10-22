@@ -2,6 +2,7 @@
 
 import ctypes as C
 import ctypes.util
+from contextlib import contextmanager
 import time
 
 
@@ -25,6 +26,10 @@ class Image(C.Structure):
     ]
 
 
+class FocusLostError(RuntimeError):
+    pass
+
+
 class X11:
     def __init__(self, display):
         self.x = C.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
@@ -35,6 +40,9 @@ class X11:
             "XSync": ([C.c_void_p, C.c_int], C.c_int),
             "XFlush": ([C.c_void_p], C.c_int),
             "XSetInputFocus": ([C.c_void_p, C.c_ulong, C.c_int, C.c_ulong], C.c_int),
+            "XGetInputFocus": ([C.c_void_p, C.POINTER(C.c_ulong), C.POINTER(C.c_int)], C.c_int),
+            "XGrabServer": ([C.c_void_p], C.c_int),
+            "XUngrabServer": ([C.c_void_p], C.c_int),
             "XStringToKeysym": ([C.c_char_p], C.c_ulong),
             "XKeysymToKeycode": ([C.c_void_p, C.c_ulong], C.c_ubyte),
             "XResizeWindow": ([C.c_void_p, C.c_ulong, C.c_uint, C.c_uint], C.c_int),
@@ -83,6 +91,8 @@ class X11:
         self.x.XSetErrorHandler.argtypes = [C.c_void_p]
         self.x.XSetErrorHandler.restype = C.c_void_p
         self.previous_handler = self.x.XSetErrorHandler(self.callback)
+        self.target = None
+        self.previous_focus = None
         self.keycode = self.x.XKeysymToKeycode(
             self.display, self.x.XStringToKeysym(b"a")
         )
@@ -105,14 +115,78 @@ class X11:
     def focus(self, window):
         self.x.XSetInputFocus(self.display, window, 2, 0)
         self.sync()
+        self.target = window
+
+    def focused(self):
+        window, revert = C.c_ulong(), C.c_int()
+        self.x.XGetInputFocus(self.display, C.byref(window), C.byref(revert))
+        self.sync()
+        return window.value
+
+    def begin_trial(self):
+        # Capture before launch: a window manager may focus newly mapped clients.
+        self.previous_focus, self.target = self.focused(), None
+
+    @contextmanager
+    def input_guard(self):
+        # Keep focus verification and delivery atomic with respect to other X
+        # clients. Never hold the server across sleeps, polling or subprocesses.
+        self.x.XGrabServer(self.display)
+        try:
+            if self.target is None or self.focused() != self.target:
+                raise FocusLostError('benchmark window lost focus; campaign input cancelled')
+            yield
+            self.sync()
+        finally:
+            self.x.XUngrabServer(self.display)
+            self.x.XFlush(self.display)
+
+    def restore_focus(self):
+        try:
+            if self.previous_focus is not None and self.target is not None:
+                self.x.XGrabServer(self.display)
+                try:
+                    if self.focused() == self.target:
+                        self.x.XSetInputFocus(self.display, self.previous_focus, 2, 0)
+                        self.sync()
+                finally:
+                    self.x.XUngrabServer(self.display)
+                    self.x.XFlush(self.display)
+        except RuntimeError:
+            # The previous window may have closed. Do not steal another focus.
+            pass
+        finally:
+            self.target, self.previous_focus = None, None
 
     def key(self):
-        started = time.monotonic_ns()
-        for pressed in (True, False):
-            if not self.xt.XTestFakeKeyEvent(self.display, self.keycode, pressed, 0):
-                raise RuntimeError("XTest key injection unavailable")
-        self.x.XFlush(self.display)
+        with self.input_guard():
+            # Guard round-trip is outside the input clock, on every emulator.
+            started = time.monotonic_ns()
+            try:
+                self._event(self.keycode, True)
+            finally:
+                self._event(self.keycode, False)
         return started
+
+    def _event(self, code, pressed):
+        if not self.xt.XTestFakeKeyEvent(self.display, code, pressed, 0):
+            raise RuntimeError('XTest key injection unavailable')
+
+    def keys(self, *chords):
+        for chord in chords:
+            names = chord.replace('ctrl+', 'Control_L+').replace('shift+', 'Shift_L+').split('+')
+            codes = [self.x.XKeysymToKeycode(self.display, self.x.XStringToKeysym(name.encode())) for name in names]
+            if not all(codes):
+                raise ValueError(f'X11 keymap cannot encode {chord}')
+            with self.input_guard():
+                pressed = []
+                try:
+                    for code in codes:
+                        self._event(code, True)
+                        pressed.append(code)
+                finally:
+                    for code in reversed(pressed):
+                        self._event(code, False)
 
     def geometry(self, window):
         root, x, y = C.c_ulong(), C.c_int(), C.c_int()

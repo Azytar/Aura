@@ -26,7 +26,9 @@ def parser():
     cli.add_argument('--aura', help='ruta al binario Aura; por defecto target/release/aura o PATH')
     cli.add_argument('--build', action='store_true', help='compilar Aura en release antes de medir')
     cli.add_argument('--font', help='familia Fontconfig; por defecto DejaVu Sans Mono o su sustituta disponible')
-    cli.add_argument('--display', help='X11 DEDICADO, p. ej. :1; por defecto crea su propio Xvfb')
+    session = cli.add_mutually_exclusive_group()
+    session.add_argument('--display', help='servidor X11 específico, p. ej. :1')
+    session.add_argument('--current-session', action='store_true', help='usar DISPLAY de tu escritorio y sus drivers; abre ventanas e inyecta teclas')
     cli.add_argument('--geometry-policy', choices=['grid', 'cell'], default='grid', help='grid: mismas columnas; cell: mismas dimensiones de celda')
     cli.add_argument('--nvim', action='store_true', help='añadir escritura, paginado y búsqueda en Neovim real (requiere nvim)')
     cli.add_argument('--no-open', action='store_true', help='mostrar barras en consola y guardar HTML, sin abrir navegador')
@@ -148,6 +150,10 @@ def main(argv=None):
             print(f'Omitido: {item["terminal"]} ({item["reason"]})')
         if args.list:
             return 0
+        if args.current_session:
+            args.display = os.environ.get('DISPLAY')
+            if not args.display:
+                raise ValueError('--current-session necesita DISPLAY accesible (X11 o XWayland). Ejecuta desde tu escritorio; Wayland nativo aún no está soportado.')
         dependencies(not args.display, args.nvim)
         if args.nvim and (config['columns'] < 12 or config['rows'] < 8):
             raise ValueError('La prueba Neovim necesita al menos 12 columnas y 8 filas.')
@@ -163,11 +169,11 @@ def main(argv=None):
         runner.save(session / 'launcher.json', dict(arguments=vars(args) | {'output': str(session), 'config': str(args.config) if args.config else None, 'report': None}, omissions=omissions, identities=identities))
         print(f'\nResultados privados: {session}\nPerfil {profile}: {settings["repetitions"]} repeticiones + {settings["warmups"]} calentamientos.', flush=True)
         if not args.display:
-            print('Xvfb propio: renderizado por software; no clasifica GPU físicas.', flush=True)
+            print('Xvfb propio: pantalla virtual; consulta los renderers detectados en el informe.', flush=True)
         else:
-            print(f'Usando X11 dedicado {args.display}; la prueba cambiará el foco e inyectará teclas.', flush=True)
+            print(f'Usando X11 {args.display}; abre ventanas de prueba e inyecta teclas. No interactúes durante la campaña; perder el foco falla la prueba.', flush=True)
         manifest = runner.run(config, settings, session / 'native', display=args.display, xvfb=not args.display,
-                              environment='unknown' if args.display else 'software', geometry_policy=args.geometry_policy)
+                              environment='unknown', geometry_policy=args.geometry_policy)
         report.render(session / 'native/run.json', session / 'native/report')
         success = manifest['status'] == 'complete'
         if args.nvim and success:
