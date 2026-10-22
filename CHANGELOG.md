@@ -30,6 +30,10 @@ per commit.
 
 ### Fixed
 
+- CSI digit runs avoid repeated byte dispatch while preserving parameter
+  saturation, sequence limits and fragmented input. Parser string storage is
+  allocated only when needed; printed cells avoid redundant cursor-row updates.
+
 - Uniform default backgrounds without visible decorations, a cursor or a
   selection use the attachment clear directly, avoiding a redundant draw while
   preserving colored-to-default transitions and pixel output.

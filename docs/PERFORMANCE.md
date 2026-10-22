@@ -1,5 +1,14 @@
 # Performance
 
+For Unicode and style investigations, profile the parser/core independently
+from the native terminal. Keep payload construction and history prefill outside
+the workload timer, use the same retained-history capacity, and preserve exact
+binary hashes and every repetition. CPU samples and allocation profiles explain
+costs; instrumented runs must not be used as uninstrumented throughput results.
+Native profiles include the graphics driver: llvmpipe executes shaders on the
+CPU and cannot establish physical-GPU bottlenecks. Keep these profiles and all
+new measurements outside the checkout.
+
 For automated comparisons across Aura, Alacritty, Kitty, WezTerm and xterm,
 see [the multi-terminal harness](TERMINAL_BENCHMARKS.md). Its reproducible
 workloads generate private HTML/CSV/JSON/SVG artifacts outside Git checkouts.

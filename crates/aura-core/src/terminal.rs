@@ -1033,17 +1033,17 @@ impl Terminal {
             return;
         }
         while let Some((&first, rest)) = text.split_first() {
-            // Resolve delayed wrap and the preceding Unicode cluster through
-            // the scalar path before writing an ordinary run in one row.
-            self.put_char(first as char);
-            self.preceding_char = Some(first as char);
-            text = rest;
-            if self.pending_wrap || text.is_empty() {
-                continue;
-            }
-            if let Some((_, row, column)) = self.last_printed
-                && self.active_grid().stored_grapheme(row, column).is_some()
+            // Only delayed wraps and stored clusters need the scalar path.
+            // Ordinary runs, including short runs between Unicode scalars,
+            // can write their first column with the rest of the row span.
+            if self.pending_wrap
+                || self.last_printed.is_some_and(|(_, row, column)| {
+                    self.active_grid().stored_grapheme(row, column).is_some()
+                })
             {
+                self.put_char(first as char);
+                self.preceding_char = Some(first as char);
+                text = rest;
                 continue;
             }
             let cursor = self.cursor();
@@ -1068,7 +1068,7 @@ impl Terminal {
             let end = cursor.column + count;
             self.last_printed = Some((self.grid.active_screen(), cursor.row, end - 1));
             self.preceding_char = Some(text[count - 1] as char);
-            self.set_cursor(end, cursor.row);
+            self.active_grid_mut().advance_printed_cursor(end);
             self.pending_wrap = self.modes.auto_wrap && end >= self.active_grid().width();
             text = &text[count..];
         }
@@ -1243,7 +1243,8 @@ impl Terminal {
         self.last_printed = Some((self.grid.active_screen(), cursor.row, cursor.column));
         // Even with delayed wrap the cursor names the last occupied column,
         // not the leading half. DSR, backspace and relative moves use it.
-        self.set_cursor(cursor.column + 2, cursor.row);
+        self.active_grid_mut()
+            .advance_printed_cursor(cursor.column + 2);
         self.pending_wrap = self.modes.auto_wrap && cursor.column + 2 >= self.active_grid().width();
     }
 
@@ -1289,7 +1290,8 @@ impl Terminal {
                 self.pending_wrap = true;
             }
         } else {
-            self.set_cursor(cursor.column + 1, cursor.row);
+            self.active_grid_mut()
+                .advance_printed_cursor(cursor.column + 1);
         }
     }
 

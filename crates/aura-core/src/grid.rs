@@ -119,7 +119,10 @@ impl<T> Sidecar<T> {
         if let Some(slot) = self.0.get_mut(column) {
             *slot = value;
         }
-        self.trim();
+        // Only removing the final entry can shorten a canonical prefix.
+        if column + 1 == self.0.len() && self.0[column].is_none() {
+            self.trim();
+        }
     }
     fn clear(&mut self) {
         self.0 = Vec::new();
@@ -316,6 +319,11 @@ impl Grid {
         self.cursor
     }
 
+    /// Advances within a row already dirtied by a printed cell or span.
+    pub(crate) fn advance_printed_cursor(&mut self, column: usize) {
+        self.cursor.column = column.min(self.width - 1);
+    }
+
     /// Sets the cursor, clamping each coordinate to the visible grid.
     pub fn set_cursor(&mut self, column: usize, row: usize) {
         let old_row = self.cursor.row;
@@ -324,9 +332,11 @@ impl Grid {
             row: row.min(self.height - 1),
         };
         self.row_mut(old_row).expect("stored cursor row").dirty = true;
-        self.row_mut(self.cursor.row)
-            .expect("clamped cursor row")
-            .dirty = true;
+        if self.cursor.row != old_row {
+            self.row_mut(self.cursor.row)
+                .expect("clamped cursor row")
+                .dirty = true;
+        }
     }
 
     pub fn move_cursor(&mut self, columns: isize, rows: isize) {

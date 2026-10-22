@@ -82,7 +82,7 @@ impl Default for Parser {
             escape_intermediate_len: 0,
             csi: Csi::default(),
             csi_bytes: 0,
-            string: Vec::with_capacity(128),
+            string: Vec::new(),
             string_overflow: false,
             is_dcs: false,
             string_utf8_remaining: 0,
@@ -159,6 +159,37 @@ impl Parser {
                     offset += text.len();
                     continue;
                 }
+            }
+            if self.state == State::Ground
+                && self.utf8_len == 0
+                && bytes[offset..].starts_with(b"\x1b[")
+            {
+                self.begin_escape();
+                self.begin_csi();
+                offset += 2;
+                continue;
+            }
+            if matches!(self.state, State::CsiEntry | State::CsiParam)
+                && bytes[offset].is_ascii_digit()
+                && self.csi_bytes < CSI_MAX_BYTES
+            {
+                if self.csi.param_count == 0 {
+                    self.csi.param_count = 1;
+                }
+                let index = self.csi.param_count as usize - 1;
+                let mut value = self.csi.params[index];
+                let end = bytes.len().min(offset + CSI_MAX_BYTES - self.csi_bytes);
+                while offset < end && bytes[offset].is_ascii_digit() {
+                    value = value
+                        .saturating_mul(10)
+                        .saturating_add(u16::from(bytes[offset] - b'0'));
+                    self.csi_bytes += 1;
+                    offset += 1;
+                }
+                self.csi.params[index] = value;
+                self.csi.present[index] = true;
+                self.state = State::CsiParam;
+                continue;
             }
             let input = bytes[offset];
             offset += 1;
@@ -572,6 +603,36 @@ impl Parser {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn csi_runs_preserve_saturation_limits_controls_and_partial_state() {
+        for digits in [1, 5, 6, 126, 127, 128, 129, 160] {
+            for tail in ["m", ";2:3m", "\x08;4m", "\x18X", "\x1b[0m"] {
+                let input = format!("\x1b[?{}{}", "9".repeat(digits), tail);
+                for size in [1, 2, 3, 17, 256] {
+                    let mut actual = Parser::new();
+                    let mut reference = Parser::new();
+                    for chunk in input.as_bytes().chunks(size) {
+                        let mut observed = Vec::new();
+                        actual.feed(chunk, |event| observed.push(event));
+                        let mut expected = Vec::new();
+                        for &byte in chunk {
+                            if let Some(event) = reference.advance_byte(byte) {
+                                expected.push(event);
+                            }
+                            while let Some(byte) = reference.replay_byte.take() {
+                                if let Some(event) = reference.advance_byte(byte) {
+                                    expected.push(event);
+                                }
+                            }
+                        }
+                        assert_eq!(observed, expected, "digits={digits}, chunk={size}");
+                        assert_eq!(actual, reference, "digits={digits}, chunk={size}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn printable_spans_match_bytewise_parser_on_arbitrary_input() {
         use proptest::prelude::*;
