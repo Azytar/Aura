@@ -49,6 +49,19 @@ Native comparisons additionally exercise render coalescing. `window.max_fps`
 sets a render-call ceiling while the event loop continues to service input and
 output. Record the effective setting when comparing builds; a changed rate is
 not evidence of faster GPU presentation. Keep collected measurements private.
+
+Background rendering selects full-screen shading for dense painted grids and
+instanced cell quads for sparse ones. Both paths share one pipeline, avoiding
+a separate first-use pipeline compilation when opening a dense TUI. Sparse
+palette, selection and inverse/faint colors are resolved in the vertex stage;
+default undecorated cells emit degenerate geometry. Empty and hidden text cells
+also emit degenerate geometry instead of rasterizing a placeholder before discard.
+The attachment is still cleared every frame.
+Compare sparse cursor/selection traffic with dense colored TUI output; reduced
+fragment work can trade against more vertex work. Exact readback tests cover
+dense and sparse grids, erasure and custom palettes, including padding and
+spacing. Keep software-renderer results separate from physical GPU results.
+
 The `AURA_PERF` `parse` interval covers `Terminal::process`; refreshing host
 query properties once before the bounded PTY drain is outside that interval.
 Older builds refreshed those properties inside each read's parse interval, so

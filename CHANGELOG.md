@@ -43,6 +43,11 @@ per commit.
 
 ### Fixed
 
+- Background rendering keeps full-screen shading for dense grids and resolves
+  sparse backgrounds per cell, skipping pixels covered by the attachment clear.
+  Cursors and selections retain full-frame clearing, exact decoration pixel
+  positions and custom palettes.
+  Empty and hidden glyphs also avoid rasterization before fragment discard.
 - Typing avoids repainting an already visible cursor before the child's
   response. Clearing a selection, returning from history and restarting a
   hidden cursor blink phase still repaint without requiring child echo.

@@ -160,10 +160,10 @@ or synchronised.
    interpreted as a command.
 6. Every `unsafe` block carries a `SAFETY` comment, and
    `unsafe_op_in_unsafe_fn` is denied workspace-wide.
-7. The renderer's push-constant block is declared identically in all three
-   shader stages and mirrored by a `size_of`/`offset_of` test in Rust. Layout
-   drift between stages has already caused one bug; do not let it happen
-   again.
+7. The renderer's push-constant block is declared identically in every
+   shader stage that uses it and mirrored by a `size_of`/`offset_of` test in
+   Rust. Layout drift between stages has already caused one bug; do not let
+   it happen again.
 
 ## What is not here
 

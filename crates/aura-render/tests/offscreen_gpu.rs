@@ -69,6 +69,126 @@ fn cell_backgrounds_cover_odd_grids_exactly_with_padding_and_spacing() {
 }
 
 #[test]
+fn sparse_backgrounds_and_erasure_keep_every_default_pixel_with_custom_palettes() {
+    if !require_gpu() {
+        return;
+    }
+    for size in [9.0, 18.0, 36.0] {
+        let mut font = Font::load(None, size).unwrap();
+        let metrics = font.metrics();
+        let (columns, rows) = (37, 11);
+        let (cw, ch) = (metrics.width + 1, metrics.height + 2);
+        let (width, height) = (cw * columns as u32 + 8, ch * rows as u32 + 10);
+        let mut terminal = Terminal::new(columns, rows).unwrap();
+        terminal.process(b"\x1b[?25l");
+        let mut renderer = OffscreenRenderer::new(width, height).unwrap();
+        renderer.set_padding(4, 5);
+        renderer.set_cell_spacing(1, 2);
+        let occupied = [(0, 0), (5, 19), (10, 36)];
+        for background in [[13, 27, 41], [57, 39, 21]] {
+            let mut palette = aura_config::Palette::DARK;
+            palette.background =
+                u32::from_be_bytes([0, background[0], background[1], background[2]]);
+            renderer.set_palette(palette);
+            terminal.process(b"\x1b[42m\x1b[2J");
+            let dense = renderer.render(&mut terminal, &mut font).unwrap();
+            for y in 0..height {
+                for x in 0..width {
+                    let rgb = if x >= 4 && y >= 5 && x < width - 4 && y < height - 5 {
+                        [0, 205, 0]
+                    } else {
+                        background
+                    };
+                    let offset = ((y * width + x) * 4) as usize;
+                    assert_eq!(&dense[offset..offset + 4], [rgb[0], rgb[1], rgb[2], 255]);
+                }
+            }
+            for erased in [false, true] {
+                terminal.process(b"\x1b[0m\x1b[2J");
+                if !erased {
+                    for (row, col) in occupied {
+                        // Hidden decorations leave a solid explicit background.
+                        terminal.process(
+                            format!("\x1b[{};{}H\x1b[8;4;48;2;7;89;123mX", row + 1, col + 1)
+                                .as_bytes(),
+                        );
+                    }
+                }
+                let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+                for y in 0..height {
+                    for x in 0..width {
+                        let in_grid = x >= 4 && y >= 5 && x < width - 4 && y < height - 5;
+                        let painted = !erased
+                            && in_grid
+                            && occupied
+                                .contains(&(((y - 5) / ch) as usize, ((x - 4) / cw) as usize));
+                        let rgb = if painted { [7, 89, 123] } else { background };
+                        let offset = ((y * width + x) * 4) as usize;
+                        assert_eq!(
+                            &pixels[offset..offset + 4],
+                            [rgb[0], rgb[1], rgb[2], 255],
+                            "size={size}, background={background:?}, erased={erased}, pixel={x},{y}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn curly_underline_pixel_phase_matches_in_sparse_and_dense_backgrounds() {
+    if !require_gpu() {
+        return;
+    }
+    for size in [9.0, 18.0, 36.0] {
+        let mut font = Font::load(None, size).unwrap();
+        let metrics = font.metrics();
+        let (cw, ch) = (metrics.width + 1, metrics.height + 2);
+        let (width, height) = (cw * 6 + 8, ch * 2 + 10);
+        let mut renderer = OffscreenRenderer::new(width, height).unwrap();
+        renderer.set_padding(4, 5);
+        renderer.set_cell_spacing(1, 2);
+        for dense in [false, true] {
+            let mut terminal = Terminal::new(6, 2).unwrap();
+            terminal.process(b"\x1b[?25l");
+            if dense {
+                terminal.process(b"\x1b[44m\x1b[2J");
+            }
+            terminal.process(b"\x1b[1;1H\x1b[4:3;58:2::17:34:51m ");
+            let pixels = renderer.render(&mut terminal, &mut font).unwrap();
+            let band = (ch / 16).max(1) as i32;
+            for y in 0..height {
+                for x in 0..width {
+                    let in_grid = x >= 4 && y >= 5 && x < width - 4 && y < height - 5;
+                    let mut rgb = if dense && in_grid {
+                        [0, 0, 238]
+                    } else {
+                        [24, 24, 24]
+                    };
+                    if x >= 4 && x < 4 + cw && y >= 5 && y < 5 + ch {
+                        // Integer triangle-wave oracle: keep the original
+                        // pixel phase, rather than shifting to sample centers.
+                        let local = (x - 4) as i32;
+                        let bottom = (ch - (y - 5)) as i32;
+                        let wave = 3 * band + 2 * (local % (6 * band) - 3 * band).abs();
+                        if 3 * bottom > wave && 3 * bottom <= wave + 3 * band {
+                            rgb = [17, 34, 51];
+                        }
+                    }
+                    let offset = ((y * width + x) * 4) as usize;
+                    assert_eq!(
+                        &pixels[offset..offset + 4],
+                        [rgb[0], rgb[1], rgb[2], 255],
+                        "size={size}, dense={dense}, pixel={x},{y}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn renders_terminal_cells_and_reads_back_expected_colors() {
     if !require_gpu() {
         eprintln!("skipped: no Vulkan 1.3 graphics device available");

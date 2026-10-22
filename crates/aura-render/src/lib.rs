@@ -73,6 +73,8 @@ struct PushGrid {
     padding_x: u32,
     padding_y: u32,
     cursor_color: u32,
+    background_color: u32,
+    background_dense: u32,
 }
 
 /// Maps a DECSCUSR cursor shape to the push-constant encoding.
@@ -175,7 +177,7 @@ struct FrameDraw {
     instances: u32,
     extent: vk::Extent2D,
     background_color: u32,
-    draw_background: bool,
+    draw_background: Option<BackgroundMode>,
     final_layout: vk::ImageLayout,
     readback: Option<vk::Buffer>,
 }
@@ -662,7 +664,7 @@ impl OffscreenRenderer {
             vk::BufferUsageFlags::TRANSFER_DST,
         )?;
         let selection_color = pack_rgb(self.palette.selection);
-        let push = PushGrid {
+        let mut push = PushGrid {
             cols: cols as u32,
             rows: rows as u32,
             cell_width: metrics.width.saturating_add_signed(self.spacing[0]).max(1) as f32,
@@ -689,7 +691,11 @@ impl OffscreenRenderer {
             padding_x: self.padding[0],
             padding_y: self.padding[1],
             cursor_color: self.cursor_color.unwrap_or(u32::MAX),
+            background_color: pack_rgb(self.palette.background),
+            background_dense: 0,
         };
+        let draw_background = background_mode(&cells, &push, pack_rgb(self.palette.background));
+        push.background_dense = u32::from(draw_background == Some(BackgroundMode::Dense));
         record_frame(
             &self.device,
             frame,
@@ -703,7 +709,7 @@ impl OffscreenRenderer {
                 instances: count as u32,
                 extent: self.extent,
                 background_color: pack_rgb(self.palette.background),
-                draw_background: needs_background(&cells, &push, pack_rgb(self.palette.background)),
+                draw_background,
                 final_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 readback: Some(readback.handle),
             },
@@ -1043,7 +1049,7 @@ impl Renderer {
         timings.upload = started.map(|start| start.elapsed());
         let started = measure.then(std::time::Instant::now);
         let selection_color = pack_rgb(self.palette.selection);
-        let push = PushGrid {
+        let mut push = PushGrid {
             cols: width as u32,
             rows: height as u32,
             cell_width: font
@@ -1080,7 +1086,12 @@ impl Renderer {
             padding_x: self.padding[0],
             padding_y: self.padding[1],
             cursor_color: self.cursor_color.unwrap_or(u32::MAX),
+            background_color: pack_rgb(self.palette.background),
+            background_dense: 0,
         };
+        let draw_background =
+            background_mode(&self.gpu_cells, &push, pack_rgb(self.palette.background));
+        push.background_dense = u32::from(draw_background == Some(BackgroundMode::Dense));
         record_frame(
             &self.device,
             frame,
@@ -1094,11 +1105,7 @@ impl Renderer {
                 instances: count as u32,
                 extent: self.extent,
                 background_color: pack_rgb(self.palette.background),
-                draw_background: needs_background(
-                    &self.gpu_cells,
-                    &push,
-                    pack_rgb(self.palette.background),
-                ),
+                draw_background,
                 final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                 readback: None,
             },
@@ -2237,11 +2244,8 @@ fn create_pipeline(
             .name(entry),
     ];
     let vertex = vk::PipelineVertexInputStateCreateInfo::default();
-    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(if blend {
-        vk::PrimitiveTopology::TRIANGLE_STRIP
-    } else {
-        vk::PrimitiveTopology::TRIANGLE_LIST
-    });
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
     let viewport = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);
@@ -2577,24 +2581,39 @@ fn destroy_buffer(device: &Device, buffer: Buffer) {
     }
 }
 
-/// The attachment clear already paints a uniform default background. Keep
-/// the shader for every case that can add a different color or decoration.
-fn needs_background(cells: &[GpuCell], push: &PushGrid, background: u32) -> bool {
-    if push.cursor_visible != 0 || push.selection_start != u32::MAX {
-        return true;
-    }
-    cells.iter().any(|cell| {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackgroundMode {
+    Sparse,
+    Dense,
+}
+
+/// Keep sparse fragment work local, without instancing an entire colored TUI.
+fn background_mode(cells: &[GpuCell], push: &PushGrid, background: u32) -> Option<BackgroundMode> {
+    let mut painted = 0;
+    for (index, cell) in cells.iter().enumerate() {
         let flags = CellFlags::from_bits_retain(cell.flags);
         let color = if flags.contains(CellFlags::INVERSE) {
             cell.fg
         } else {
             cell.bg
         };
-        color != background
+        let index = index as u32;
+        if color != background
             || (!flags.contains(CellFlags::HIDDEN)
                 && (flags.contains(CellFlags::UNDERLINE)
                     || flags.contains(CellFlags::STRIKETHROUGH)))
-    })
+            || (push.cursor_visible != 0 && index == push.cursor)
+            || (push.selection_start != u32::MAX
+                && index >= push.selection_start
+                && index <= push.selection_end)
+        {
+            painted += 1;
+            if painted > cells.len() / 4 {
+                return Some(BackgroundMode::Dense);
+            }
+        }
+    }
+    (painted != 0).then_some(BackgroundMode::Sparse)
 }
 
 fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), String> {
@@ -2690,9 +2709,14 @@ fn record_frame(device: &Device, frame: &Frame, draw: &FrameDraw) -> Result<(), 
             0,
             bytemuck::bytes_of(push),
         );
-        if *draw_background {
+        if let Some(mode) = draw_background {
             device.cmd_bind_pipeline(frame.command, vk::PipelineBindPoint::GRAPHICS, *background);
-            device.cmd_draw(frame.command, 3, 1, 0, 0);
+            let count = if *mode == BackgroundMode::Dense {
+                1
+            } else {
+                *instances
+            };
+            device.cmd_draw(frame.command, 4, count, 0, 0);
         }
         device.cmd_bind_pipeline(frame.command, vk::PipelineBindPoint::GRAPHICS, *text);
         device.cmd_draw(frame.command, 4, *instances, 0, 0);
@@ -2828,7 +2852,7 @@ mod tests {
         assert_eq!(std::mem::offset_of!(GpuGlyph, uv), 0);
         assert_eq!(std::mem::offset_of!(GpuGlyph, size_bearing), 16);
         assert_eq!(std::mem::offset_of!(GpuGlyph, bearing_advance), 32);
-        assert_eq!(size_of::<PushGrid>(), 64);
+        assert_eq!(size_of::<PushGrid>(), 72);
         assert_eq!(std::mem::offset_of!(PushGrid, cols), 0);
         assert_eq!(std::mem::offset_of!(PushGrid, rows), 4);
         assert_eq!(std::mem::offset_of!(PushGrid, cell_width), 8);
@@ -2845,6 +2869,8 @@ mod tests {
         assert_eq!(std::mem::offset_of!(PushGrid, padding_x), 52);
         assert_eq!(std::mem::offset_of!(PushGrid, padding_y), 56);
         assert_eq!(std::mem::offset_of!(PushGrid, cursor_color), 60);
+        assert_eq!(std::mem::offset_of!(PushGrid, background_color), 64);
+        assert_eq!(std::mem::offset_of!(PushGrid, background_dense), 68);
     }
 
     #[test]
