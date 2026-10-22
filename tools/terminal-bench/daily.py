@@ -12,7 +12,7 @@ import uuid
 import adapters
 from common import outside_checkout, require_hash, sha256
 from resources import Resources
-from runner import display_environment, display_session, input_color, inventory, save, stop, wait_pixel, window_for
+from runner import display_environment, display_session, input_color, inventory, save, stop, trial_progress, wait_pixel, window_for
 from x11 import FocusLostError, X11
 
 HERE = Path(__file__).resolve().parent
@@ -61,7 +61,7 @@ def trial(entry, identity, directory, native, nvim, display, x11):
     for name in ['WAYLAND_DISPLAY', 'AURA_PERF', 'AURA_DEBUG_KEYBOARD', 'WEZTERM_UNIX_SOCKET',
                  'KITTY_LISTEN_ON', 'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'WINDOWID']:
         env.pop(name, None)
-    result = dict(terminal=entry['id'], status='failed', metrics={}, phases={}, command=command)
+    result = dict(terminal=entry['id'], status='failed', stage='startup', metrics={}, phases={}, command=command)
     process = None
     try:
         require_hash(identity['binary'], identity['sha256'])
@@ -73,30 +73,43 @@ def trial(entry, identity, directory, native, nvim, display, x11):
                                        start_new_session=True)
         resources = Resources(process.pid)
         ready = wait_event(path, lambda e: e['op'] == 'ready', resources, process, timeout)
-        if ready['text'] != '' or not ready['mode'].startswith('i') or [ready['columns'], ready['rows']] != [config['columns'], config['rows']]:
+        if ready['text'] != '' or not ready['mode'].startswith('i'):
             raise ValueError(f'Neovim initial state differs: {ready}')
         resources.exclude.add(ready['pid'])
         resources.ticks = {key: value for key, value in resources.ticks.items() if key[0] != ready['pid']}
         resources.peak = 0
+        result['stage'] = 'window_geometry'
         window = window_for(title, display, resources, timeout)
         result['initial_window_pixels'] = x11.geometry(window)
+        result['initial_editor_grid'] = [ready['columns'], ready['rows']]
+        x11.prepare_window(window, timeout)
         # Reuse measured raw-PTY geometry, not guessed font-name metrics.
         reference = next(t for t in native['trials'] if t['terminal'] == entry['id'] and t['status'] == 'ok')
         cw, ch = reference['cell_pixels']
         width, height = cw * config['columns'], ch * config['rows']
-        if x11.geometry(window) != [width, height]:
-            x11.resize(window, width, height)
-            x11.sync()
+        # Force a distinct grid, then require fresh VimResized acknowledgements.
+        # A startup title/ready event cannot confirm the final editor geometry.
+        probe = config['columns'] + 1
+        if x11.geometry(window)[0] == cw * probe:
+            probe = config['columns'] - 1
+        for columns in [probe, config['columns']]:
+            before = len(events(path))
+            x11.resize(window, cw * columns, height)
+            wait_event(path, lambda e: e['op'] == 'geometry' and [e['columns'], e['rows']] == [columns, config['rows']],
+                       resources, process, timeout, before)
         if x11.geometry(window) != [width, height]:
             raise ValueError('window geometry normalization failed')
         result['cell_pixels'] = [cw, ch]
+        result['window_policy'] = reference.get('window_policy', 'owned override-redirect client')
         x11.focus(window)
+        result['stage'] = 'startup_witness'
         point = [width - max(1, cw // 2), height - 2 * ch + ch // 2]
         observed = wait_pixel(x11, window, point, [41, 83, 167], resources, timeout)
         result['metrics']['nvim_startup_ms'] = [(observed - started) / 1e6]
         index, gaps = 0, []
         samples = 8 if settings['profile'] == 'quick' else 20
         for name, pause in [('continuous', 0), ('after_pause', .05)]:
+            result['stage'] = 'input_' + name
             values, phase = [], resources.begin()
             for _ in range(samples):
                 if pause:
@@ -119,6 +132,7 @@ def trial(entry, identity, directory, native, nvim, display, x11):
         if any(g < 50 for g in gaps):
             raise ValueError('requested input pause not reached')
         keys = x11.keys
+        result['stage'] = 'navigation'
         before = len(events(path))
         keys('Escape', 'ctrl+f')
         down = wait_event(path, lambda e: e['op'] == 'cursor' and e['top'] > 1,
@@ -134,6 +148,7 @@ def trial(entry, identity, directory, native, nvim, display, x11):
         found = wait_event(path, lambda e: e['op'] == 'cursor' and e['text'] == 'fn benchmark_target() {}',
                            resources, process, timeout, before)
         result['navigation'] = dict(page_down_top=down['top'], page_up_top=up['top'], search_line=found['row'])
+        result['stage'] = 'shutdown'
         keys('Escape', 'shift+semicolon', 'q', 'a', 'shift+1', 'Return')
         x11.restore_focus()
         if process.wait(timeout=timeout):
@@ -142,6 +157,7 @@ def trial(entry, identity, directory, native, nvim, display, x11):
         require_hash(nvim['binary'], nvim['sha256'])
         require_hash(config['font_file'], native['font_sha256'])
         result.update(status='ok', checks=dict(exact_buffer=True, observed_witness=True, navigation=True))
+        result['stage'] = 'complete'
     except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as error:
         if isinstance(error, FocusLostError):
             raise
@@ -167,6 +183,7 @@ def run(native_path, output, nvim, display=None, xvfb=True):
     manifest = dict(schema=1, created_utc=datetime.now(timezone.utc).isoformat(), config=native['config'],
                     settings=native['settings'], geometry_policy=native['geometry_policy'],
                     terminal_identities=native['terminal_identities'], nvim=nvim, trials=[], status='running',
+                    window_policy='owned override-redirect client; tiling and decorations excluded',
                     source_native_sha256=sha256(native_path), fixture_sha256=sha256(output / 'fixture.rs'),
                     source_sha256={p.name: sha256(p) for p in output.iterdir() if p.is_file()},
                     methodology='Instrumented real Neovim; exact buffer + fresh status-line witness. '
@@ -186,14 +203,19 @@ def run(native_path, output, nvim, display=None, xvfb=True):
                             require_hash(output / name, expected)
                         manifest['active_trial'] = dict(terminal=entry['id'], round=index)
                         save(output / 'run.json', manifest)
-                        result = trial(entry, native['terminal_identities'][entry['id']], output / f'trial-{index:03}-{entry["id"]}', native, nvim, selected, x11)
+                        directory = output / f'trial-{index:03}-{entry["id"]}'
+                        result = trial(entry, native['terminal_identities'][entry['id']], directory, native, nvim, selected, x11)
                         for name, expected in manifest['source_sha256'].items():
                             require_hash(output / name, expected)
-                        result.update(round=index, warmup=index < native['settings']['warmups'])
+                        result.update(round=index, warmup=index < native['settings']['warmups'], directory=directory.name)
                         manifest['trials'].append(result)
                         manifest.pop('active_trial', None)
                         save(output / 'run.json', manifest)
-                        print(f'Neovim: {entry["id"]} round={index} {result["status"]}', flush=True)
+                        trial_progress(result, directory, prefix='Neovim: ')
+                    if index < native['settings']['warmups'] and any(t['status'] != 'ok' for t in manifest['trials']):
+                        manifest['stopped_after_failed_warmup'] = True
+                        print('Calentamiento Neovim fallido: se detiene la campaña.', flush=True)
+                        break
             finally:
                 x11.close()
         manifest['status'] = 'complete' if all(t['status'] == 'ok' for t in manifest['trials']) else 'failed'

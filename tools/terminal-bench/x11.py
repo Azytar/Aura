@@ -30,6 +30,17 @@ class FocusLostError(RuntimeError):
     pass
 
 
+class WindowAttributes(C.Structure):
+    _fields_ = [
+        ('background_pixmap', C.c_ulong), ('background_pixel', C.c_ulong),
+        ('border_pixmap', C.c_ulong), ('border_pixel', C.c_ulong),
+        ('bit_gravity', C.c_int), ('win_gravity', C.c_int), ('backing_store', C.c_int),
+        ('backing_planes', C.c_ulong), ('backing_pixel', C.c_ulong), ('save_under', C.c_int),
+        ('event_mask', C.c_long), ('do_not_propagate_mask', C.c_long),
+        ('override_redirect', C.c_int), ('colormap', C.c_ulong), ('cursor', C.c_ulong),
+    ]
+
+
 class X11:
     def __init__(self, display):
         self.x = C.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
@@ -43,6 +54,15 @@ class X11:
             "XGetInputFocus": ([C.c_void_p, C.POINTER(C.c_ulong), C.POINTER(C.c_int)], C.c_int),
             "XGrabServer": ([C.c_void_p], C.c_int),
             "XUngrabServer": ([C.c_void_p], C.c_int),
+            "XDefaultScreen": ([C.c_void_p], C.c_int),
+            "XWithdrawWindow": ([C.c_void_p, C.c_ulong, C.c_int], C.c_int),
+            "XChangeWindowAttributes": ([C.c_void_p, C.c_ulong, C.c_ulong, C.POINTER(WindowAttributes)], C.c_int),
+            "XMapRaised": ([C.c_void_p, C.c_ulong], C.c_int),
+            "XMoveWindow": ([C.c_void_p, C.c_ulong, C.c_int, C.c_int], C.c_int),
+            "XInternAtom": ([C.c_void_p, C.c_char_p, C.c_int], C.c_ulong),
+            "XFree": ([C.c_void_p], C.c_int),
+            "XQueryTree": ([C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_ulong), C.POINTER(C.POINTER(C.c_ulong)), C.POINTER(C.c_uint)], C.c_int),
+            "XGetWindowProperty": ([C.c_void_p, C.c_ulong, C.c_ulong, C.c_long, C.c_long, C.c_int, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_int), C.POINTER(C.c_ulong), C.POINTER(C.c_ulong), C.POINTER(C.POINTER(C.c_ubyte))], C.c_int),
             "XStringToKeysym": ([C.c_char_p], C.c_ulong),
             "XKeysymToKeycode": ([C.c_void_p, C.c_ulong], C.c_ubyte),
             "XResizeWindow": ([C.c_void_p, C.c_ulong, C.c_uint, C.c_uint], C.c_int),
@@ -187,6 +207,58 @@ class X11:
                 finally:
                     for code in reversed(pressed):
                         self._event(code, False)
+
+    def parent(self, window):
+        root, parent, count = C.c_ulong(), C.c_ulong(), C.c_uint()
+        children = C.POINTER(C.c_ulong)()
+        try:
+            result = self.x.XQueryTree(self.display, window, C.byref(root), C.byref(parent), C.byref(children), C.byref(count))
+            self.sync()
+            if not result:
+                raise RuntimeError('cannot query benchmark window parent')
+            return root.value, parent.value
+        finally:
+            if children:
+                self.x.XFree(children)
+
+    def window_state(self, window):
+        atom = self.x.XInternAtom(self.display, b'WM_STATE', True)
+        if not atom:
+            return None
+        actual, count, remaining = C.c_ulong(), C.c_ulong(), C.c_ulong()
+        format = C.c_int()
+        data = C.POINTER(C.c_ubyte)()
+        try:
+            result = self.x.XGetWindowProperty(self.display, window, atom, 0, 2, False, atom,
+                        C.byref(actual), C.byref(format), C.byref(count), C.byref(remaining), C.byref(data))
+            self.sync()
+            if result:
+                raise RuntimeError('cannot read benchmark window WM_STATE')
+            if actual.value == atom and format.value == 32 and count.value:
+                return C.cast(data, C.POINTER(C.c_ulong))[0]
+            return None
+        finally:
+            if data:
+                self.x.XFree(data)
+
+    def prepare_window(self, window, timeout):
+        # Withdraw only the owned client through ICCCM. Wait for a reparenting
+        # WM to release it before remapping outside tiling/maximization policy.
+        self.x.XWithdrawWindow(self.display, window, self.x.XDefaultScreen(self.display))
+        self.sync()
+        deadline = time.monotonic() + timeout
+        while True:
+            root, parent = self.parent(window)
+            if root == parent and self.window_state(window) in (None, 0):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError('window manager did not release the benchmark client')
+            time.sleep(.005)
+        attributes = WindowAttributes(override_redirect=True)
+        self.x.XChangeWindowAttributes(self.display, window, 1 << 9, C.byref(attributes))
+        self.x.XMoveWindow(self.display, window, 0, 0)
+        self.x.XMapRaised(self.display, window)
+        self.sync()
 
     def geometry(self, window):
         root, x, y = C.c_ulong(), C.c_int(), C.c_int()

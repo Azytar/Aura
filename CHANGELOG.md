@@ -43,6 +43,11 @@ per commit.
 
 ### Fixed
 
+- Desktop benchmark windows are withdrawn from tiling/maximization policy
+  before pinning the requested grid. Initial PTY sizes and fractional pixel
+  tails no longer cause premature rejection; exact PTY/client geometry and
+  fresh Neovim resize events remain required. Failures print their stage,
+  cause and log path, and failed warmups stop subsequent measurement rounds.
 - Printable UTF-8 spans batch independent ASCII and Han ideographs within a
   row. Combining/contextual scalars, insert mode, graphics sets and wraps retain
   scalar handling; wide pairs, hyperlinks and underline colors stay consistent.

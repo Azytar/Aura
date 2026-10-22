@@ -291,6 +291,8 @@ def render(source, output, baseline=None):
         for name, value in manifest["terminal_identities"].items()
     )
     source_link = quote(os.path.relpath(source, output))
+    window_notice = (' Ventanas controladas fuera del mosaico; inicio hasta testigo incluye preparación de geometría.'
+                     if manifest.get('window_policy') else '')
     document = """<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Comparación de emuladores</title><style>
 body{font:15px system-ui,sans-serif;background:#080f1c;color:#e2e8f0;margin:24px;line-height:1.5}a{color:#93c5fd}
@@ -298,7 +300,7 @@ h1{margin-bottom:4px}.notice{background:#1e293b;border-left:4px solid #f59e0b;pa
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(370px,1fr));gap:18px}section{background:#101827;border:1px solid #263347;border-radius:8px;padding:10px}
 section h2{font-size:13px;color:#94a3b8;margin:0}svg{display:block;width:100%}.table{overflow:auto}table{border-collapse:collapse;white-space:nowrap}th,td{padding:8px;border-bottom:1px solid #334155;text-align:right}td:first-child,td:nth-child(2){text-align:left}pre{white-space:pre-wrap;overflow-wrap:anywhere}small{color:#94a3b8}[hidden]{display:none!important}</style>"""
     document += f'''<h1>Comparación de emuladores</h1><p>{html.escape(manifest["created_utc"])} · estado: {html.escape(manifest["status"])}</p>
-<div class="notice">{html.escape(warning)}<br>{html.escape(geometry)}<br>La observación X11 incluye captura y sondeo; no mide scanout ni input-to-photon.</div>
+<div class="notice">{html.escape(warning)}<br>{html.escape(geometry)}<br>La observación X11 incluye captura y sondeo; no mide scanout ni input-to-photon.{html.escape(window_notice)}</div>
 <p>Barras: p50; líneas: mínimo–máximo observado, sin intervalo de confianza. p95/p99 usan nearest rank.
 Los warmups y las pruebas fallidas no aportan muestras. Resultados parciales no generan comparación relativa.
 CPU: árbol de procesos observado, sin helper ni servidor X; RSS suma páginas residentes, con páginas compartidas contadas por proceso y muestreo de 10 ms.</p>

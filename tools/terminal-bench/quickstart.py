@@ -116,6 +116,20 @@ def show_report(session, no_open):
     return path
 
 
+def show_failures(session):
+    for name in ['native', 'neovim']:
+        source = outside_checkout(session / name / 'run.json')
+        if not source.is_file():
+            continue
+        manifest = json.loads(source.read_text())
+        if manifest.get('status') != 'complete':
+            print(f'{name}: {manifest.get("status", "unknown")} · {manifest.get("error", "")}', flush=True)
+        for trial in manifest.get('trials', []):
+            if trial['status'] != 'ok':
+                directory = source.parent / trial.get('directory', f'trial-{trial["round"]:03}-{trial["terminal"]}')
+                runner.trial_progress(trial, directory, prefix=name + ': ')
+
+
 def main(argv=None):
     cli = parser()
     args = cli.parse_args(argv)
@@ -123,7 +137,9 @@ def main(argv=None):
         if sys.platform != 'linux':
             raise ValueError('Este benchmark necesita Linux/X11.')
         if args.report:
-            show_report(outside_checkout(args.report), args.no_open)
+            session = outside_checkout(args.report)
+            show_failures(session)
+            show_report(session, args.no_open)
             return 0
         if args.config and (args.aura or args.font or args.build):
             raise ValueError('--config no se combina con --aura, --font ni --build.')

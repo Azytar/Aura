@@ -44,6 +44,24 @@ class Fixture(unittest.TestCase):
 
 
 class Entry(Fixture):
+    def test_saved_report_prints_failure_causes_without_repeating_measurements(self):
+        folder = self.root/'native'
+        folder.mkdir()
+        manifest = self.manifest()
+        manifest['status'] = 'failed'
+        manifest['trials'][0].update(status='failed', stage='window_geometry', error='PTY 142x53 != 80x24')
+        source = folder/'run.json'
+        source.write_text(json.dumps(manifest))
+        original = source.read_bytes()
+        with (patch.object(quickstart, 'show_report'), patch.object(quickstart.runner, 'run') as execute,
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            self.assertEqual(quickstart.main(['--report', str(self.root), '--no-open']), 0)
+        self.assertIn('window_geometry', output.getvalue())
+        self.assertIn('PTY 142x53', output.getvalue())
+        self.assertIn('terminal.log', output.getvalue())
+        self.assertEqual(source.read_bytes(), original)
+        execute.assert_not_called()
+
     def test_current_session_requires_display_without_silent_xvfb_fallback(self):
         with (patch.dict(os.environ, {'DISPLAY': ''}),
               patch.object(quickstart, 'discover', return_value=(self.config, [])),
@@ -296,6 +314,38 @@ class Editor(Fixture):
 
 
 class Session(unittest.TestCase):
+    def test_tiled_grids_and_fractional_tails_are_pinned_before_measurement(self):
+        for columns, rows, width, height, cell in [(142,53,1136,1060,[8,20]),
+                (126,53,1142,1064,[9,20]), (114,53,1142,1064,[10,20])]:
+            with self.subTest(columns=columns):
+                x11, channel = Mock(), Mock()
+                target = [80*cell[0], 24*cell[1]]
+                x11.geometry.side_effect = [[width,height], target]
+                channel.request.side_effect = [dict(size=dict(columns=columns,rows=rows,pixel_width=width,pixel_height=height)),
+                                               dict(size=dict(columns=80,rows=24,pixel_width=target[0],pixel_height=target[1]))]
+                result = runner.prepare_geometry(x11, 42, channel, dict(columns=80,rows=24), 1)
+                self.assertEqual(result['cell_pixels'], cell)
+                self.assertEqual(result['window_pixels'], target)
+                self.assertEqual(result['normalized_pty']['columns'], 80)
+                x11.prepare_window.assert_called_once_with(42,1)
+
+    def test_normalization_rejects_wrong_pty_and_client_geometry(self):
+        for actual_grid, actual_pixels in [([81,24],[640,480]),([80,24],[641,480])]:
+            x11, channel = Mock(), Mock()
+            x11.geometry.side_effect = [[1136,1060], actual_pixels, actual_pixels]
+            channel.request.side_effect = [dict(size=dict(columns=142,rows=53,pixel_width=1136,pixel_height=1060)),
+                                           dict(size=dict(columns=actual_grid[0],rows=actual_grid[1]))]
+            with self.assertRaisesRegex(ValueError, 'normalization failed'):
+                runner.prepare_geometry(x11,42,channel,dict(columns=80,rows=24),1)
+
+    def test_progress_prints_stage_cause_and_log_without_terminal_controls(self):
+        result = dict(terminal='aura',round=0,warmup=True,status='failed',stage='startup',error='bad\x1b[31m config')
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            runner.trial_progress(result, Path('/private/trial'))
+        self.assertIn('[startup]: bad', output.getvalue())
+        self.assertIn('/private/trial/terminal.log', output.getvalue())
+        self.assertNotIn('\x1b', output.getvalue())
+
     def test_default_xauthority_path_survives_home_isolation_without_copying_cookies(self):
         with tempfile.TemporaryDirectory(prefix='aura-authority-') as folder:
             home = Path(folder)
@@ -358,3 +408,38 @@ class Session(unittest.TestCase):
         self.assertEqual([call.args[1:3] for call in connection.xt.XTestFakeKeyEvent.call_args_list],
                          [(37, True), (41, True), (37, False)])
         connection.x.XUngrabServer.assert_called_once_with(1)
+
+
+class Warmups(Fixture):
+    def test_native_failed_warmup_retains_failures_and_stops_before_measured_rounds(self):
+        identities = self.manifest()['terminal_identities']
+        def trial(entry, *args):
+            return dict(terminal=entry['id'], status='failed', stage='window_geometry', error='bad grid',metrics={})
+        with (patch.object(runner.subprocess, 'run', return_value=Mock(returncode=0,stdout=str(self.font).encode())),
+              patch.object(runner.adapters, 'identify_all', return_value=identities),
+              patch.object(runner, 'display_session', return_value=contextlib.nullcontext(':test')),
+              patch.object(runner, 'inventory', return_value={}), patch.object(runner, 'X11'),
+              patch.object(runner, 'trial', side_effect=trial) as execute,
+              contextlib.redirect_stdout(io.StringIO()) as output):
+            result = runner.run(self.config,dict(seed=1,warmups=2,repetitions=7),self.root/'run')
+        self.assertEqual(result['status'],'failed')
+        self.assertTrue(result['stopped_after_failed_warmup'])
+        self.assertEqual(execute.call_count,2)
+        self.assertTrue(all(t['warmup'] and t['error']=='bad grid' for t in result['trials']))
+        self.assertIn('Calentamiento fallido',output.getvalue())
+
+    def test_editor_failed_warmup_retains_failures_and_stops_before_measured_rounds(self):
+        native=self.manifest()
+        native['settings'].update(seed=1,warmups=2,repetitions=7)
+        source=self.root/'native.json';source.write_text(json.dumps(native))
+        def trial(entry,*args):
+            return dict(terminal=entry['id'],status='failed',error='no editor geometry',metrics={})
+        with (patch.object(daily,'display_session',return_value=contextlib.nullcontext(':test')),
+              patch.object(daily,'inventory',return_value={}),patch.object(daily,'X11'),
+              patch.object(daily,'trial',side_effect=trial) as execute,
+              contextlib.redirect_stdout(io.StringIO())):
+            result=daily.run(source,self.root/'editor',dict(version='fixture'))
+        self.assertEqual(result['status'],'failed')
+        self.assertTrue(result['stopped_after_failed_warmup'])
+        self.assertEqual(execute.call_count,2)
+        self.assertTrue(all(t['warmup'] for t in result['trials']))

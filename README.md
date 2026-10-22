@@ -198,6 +198,9 @@ with `--current-session`, which inherits `DISPLAY` and the graphics drivers.
 Leave its test windows focused and do not type during the campaign; losing
 focus cancels input. It restores the previous focus when possible and never
 changes the keyboard map. Native Wayland-only sessions are not supported yet.
+Test windows bypass tiling/maximization rules and verify the requested grid
+before timed workloads. Failed warmups stop the campaign and print the cause
+and log path; `--report DIR` also explains failures from saved runs.
 The light report includes labeled bars, visible values and a combined
 `overview.svg`; GPU and software runs use the same chart style. Renderer probes
 distinguish software, hardware, mixed and unknown inventories without certifying

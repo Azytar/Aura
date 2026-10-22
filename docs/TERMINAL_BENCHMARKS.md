@@ -60,6 +60,23 @@ When X11 authentication uses the original `~/.Xauthority` without an explicit
 `XAUTHORITY`, the launcher preserves that path before isolating client homes.
 It never copies or records cookies and respects an explicit `XAUTHORITY`.
 
+The desktop may initially tile or maximize a new client. The harness records
+that initial PTY/window size, withdraws only its own client through ICCCM, waits
+for the manager to release it, then remaps it as an override-redirect test
+window at the screen origin. This excludes tiling/decorations from geometry
+control without changing desktop rules or other windows. It retains the
+display, drivers and compositor; this is a controlled fixture, not a natural
+managed-window startup measurement. Provisional cell steps come from the
+actual PTY/client dimensions, including fractional tails. The requested grid
+and exact client rectangle must both be confirmed before timed workloads.
+Neovim additionally acknowledges fresh intermediate and final `VimResized`
+events; a startup title or earlier ready event is insufficient.
+
+Failure progress includes its stage, cause and private `terminal.log` path.
+A failed warmup completes that diagnostic round but stops subsequent rounds;
+the run remains failed and its evidence is retained. No measured samples are
+invented. `--report DIR` prints saved failure causes before rendering the report.
+
 These modes open isolated test windows, change focus and inject input. Leave
 them focused and do not interact during the campaign. Before each key/chord,
 the harness briefly grabs the X server, checks the owned window still has

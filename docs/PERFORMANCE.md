@@ -25,6 +25,15 @@ unobscured. Light median bars and `overview.svg` use the same renderer for both
 modes. Reports identify GL probe renderers and Vulkan device inventories,
 including mixed or unknown results; they do not attest per-process GPU selection.
 Do not pool desktop GPU and Xvfb/software samples into one campaign.
+Desktop fixtures record their initial managed geometry, then withdraw/remap
+only owned windows outside tiling rules and confirm the exact requested PTY
+grid and client extent. Cell steps may be inferred from a nonmatching initial
+grid with fractional tails, but the final assertions remain exact. Neovim
+requires fresh resize acknowledgements before edit sampling. Output/input
+workload clocks start after geometry preparation; startup-to-witness clocks
+include that preparation and do not describe natural managed-window startup.
+Failed warmups retain their causes and stop further rounds, rather than
+repeating an invalid campaign or treating missing samples as zero.
 The tables below are historical internal benchmarks, distinct from that harness.
 
 Printable-output changes should be compared with separate baseline/candidate

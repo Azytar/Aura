@@ -208,6 +208,38 @@ def display_environment(display, **isolated):
     return env
 
 
+def prepare_geometry(x11, window, channel, config, timeout):
+    x11.prepare_window(window, timeout)
+    initial = channel.request('geometry')['size']
+    width, height = x11.geometry(window)
+    if initial['columns'] <= 0 or initial['rows'] <= 0:
+        raise ValueError(f'invalid initial PTY geometry: {initial}')
+    # PTYs may report the full client extent, including a fractional cell tail.
+    # These are provisional steps: the exact grid and rectangle below must agree.
+    cw = (initial['pixel_width'] or width) // initial['columns']
+    ch = (initial['pixel_height'] or height) // initial['rows']
+    if cw <= 0 or ch <= 0:
+        raise ValueError(f'cannot infer cell steps from PTY geometry: {initial}')
+    columns, rows = config['columns'], config['rows']
+    target = [cw * columns, ch * rows]
+    x11.resize(window, *target)
+    x11.sync()
+    actual = channel.request('size', expected=[columns, rows], timeout=timeout)['size']
+    if [actual['columns'], actual['rows']] != [columns, rows] or x11.geometry(window) != target:
+        raise ValueError(f'geometry normalization failed: requested {columns}x{rows} / {target}px, PTY {actual}, client {x11.geometry(window)}')
+    return dict(cell_pixels=[cw, ch], window_pixels=target, normalized_pty=actual,
+                window_policy='owned override-redirect client; tiling and decorations excluded')
+
+
+def trial_progress(result, directory, prefix=''):
+    label = f"{prefix}{result['terminal']} round={result['round']} warmup={result['warmup']} {result['status']}"
+    if result['status'] != 'ok':
+        # Keep control characters from terminal logs/errors out of the caller's TTY.
+        error = ''.join(c if c.isprintable() else ' ' for c in result.get('error', 'unknown failure'))
+        label += f" [{result.get('stage', 'unknown stage')}]: {error}\n  Log: {directory / 'terminal.log'}"
+    print(label, flush=True)
+
+
 def trial(
     entry, identity, directory, config, settings, display, x11, expected_font_hash=None
 ):
@@ -215,7 +247,7 @@ def trial(
     directory.mkdir()
     for name in ["home", "config", "data", "cache", "state"]:
         (directory / name).mkdir()
-    result = dict(terminal=entry["id"], status="failed", metrics={}, phases={})
+    result = dict(terminal=entry["id"], status="failed", stage='startup', metrics={}, phases={})
     process = None
     with tempfile.TemporaryDirectory(prefix="aura-bench-control-") as control:
         server = socket.socket(socket.AF_UNIX)
@@ -290,6 +322,7 @@ def trial(
                 if time.monotonic() >= deadline:
                     raise TimeoutError("terminal startup timed out")
             connection, _ = server.accept()
+            result['stage'] = 'handshake'
             channel = Channel(connection, resources, settings["timeout"])
             hello = channel.receive()
             ready = time.monotonic_ns()
@@ -305,53 +338,21 @@ def trial(
                 if key[0] != hello["pid"]
             }
             resources.peak = 0
-            initial = hello["size"]
-            if [initial["columns"], initial["rows"]] != [
-                config["columns"],
-                config["rows"],
-            ]:
-                raise ValueError(
-                    f"initial PTY geometry {initial} does not match requested grid"
-                )
             result["metrics"]["startup_ready_ms"] = [(ready - start) / 1e6]
-            result["initial_pty"] = initial
+            result["initial_pty"] = hello['size']
+            result['stage'] = 'window_geometry'
             window = window_for(title, display, resources, settings["timeout"])
-            width, height = x11.geometry(window)
-            result["initial_window_pixels"] = [width, height]
+            result["initial_window_pixels"] = x11.geometry(window)
             cols, rows = config["columns"], config["rows"]
-            # Kitty can initially leave fractional-cell remainder pixels. Use the
-            # PTY's text extent, pin content top-left, then normalize the client
-            # rectangle before measured work. No font size is changed.
-            text_width, text_height = initial["pixel_width"], initial["pixel_height"]
-            if (
-                text_width
-                and text_height
-                and text_width % cols == 0
-                and text_height % rows == 0
-            ):
-                cw, ch = text_width // cols, text_height // rows
-            elif width % cols == 0 and height % rows == 0:
-                cw, ch = width // cols, height // rows
-            else:
-                raise ValueError("no exact cell geometry; check padding/decorations")
-            width, height = cw * cols, ch * rows
-            if result["initial_window_pixels"] != [width, height]:
-                x11.resize(window, width, height)
-                x11.sync()
-                channel.request(
-                    "size", expected=[cols, rows], timeout=settings["timeout"]
-                )
-            if x11.geometry(window) != [width, height]:
-                raise ValueError(
-                    "window manager did not accept normalized cell geometry"
-                )
-            result["cell_pixels"] = [cw, ch]
-            result["window_pixels"] = [width, height]
+            result.update(prepare_geometry(x11, window, channel, config, settings['timeout']))
+            cw, ch = result['cell_pixels']
+            width, height = result['window_pixels']
             x11.focus(window)
             # PTY readiness can precede the first rendered content. Measure
             # an explicit witness too, and let startup drawing finish before
             # the idle CPU interval begins.
             initial_rgb = [41, 83, 167]
+            result['stage'] = 'startup_witness'
             channel.request("paint", rgb=initial_rgb)
             observed = wait_pixel(
                 x11,
@@ -364,6 +365,7 @@ def trial(
             result["metrics"]["startup_observed_pixel_ms"] = [(observed - start) / 1e6]
             result["checks"]["startup_witness"] = True
             # Every trial starts with the same controlled idle period and no cursor blink.
+            result['stage'] = 'idle'
             phase = resources.begin()
             until = time.monotonic() + settings["idle_seconds"]
             while time.monotonic() < until:
@@ -376,6 +378,7 @@ def trial(
             ]
             result["metrics"]["idle_rss_mib"] = [idle["sampled_peak_rss_mib"]]
             for workload in ["ascii", "unicode", "sgr", "tui"]:
+                result['stage'] = 'output_' + workload
                 phase = resources.begin()
                 reply = channel.request(
                     "output", kind=workload, bytes=settings["payload_bytes"]
@@ -390,9 +393,11 @@ def trial(
                     reply["bytes"] * 1e9 / reply["elapsed_ns"] / 1048576
                 ]
             phase = resources.begin()
+            result['stage'] = 'history_prefill'
             channel.request("prefill", lines=config["history"] + rows)
             result["phases"]["prefill"] = resources.end(phase)
             resize = []
+            result['stage'] = 'resize'
             phase = resources.begin()
             for _ in range(settings["resize_pairs"]):
                 for target in [(cols - 7, rows - 2), (cols, rows)]:
@@ -410,6 +415,7 @@ def trial(
             result["phases"]["resize"] = resources.end(phase)
             result["metrics"]["resize_ack_ms"] = resize
             child_samples, observed = [], []
+            result['stage'] = 'input'
             phase = resources.begin()
             point = [width - max(1, cw // 2), height - max(1, ch // 2)]
             for index in range(settings["input_samples"]):
@@ -424,6 +430,7 @@ def trial(
             result["metrics"]["key_to_observed_pixel_ms"] = observed
             phase = resources.begin()
             paused, gaps = [], []
+            result['stage'] = 'input_after_pause'
             previous_witness = sample["observed_ns"]
             for index in range(settings["paused_input_samples"]):
                 # The pause follows the previous observed witness and stays
@@ -441,6 +448,7 @@ def trial(
             result["metrics"]["key_to_observed_pixel_after_pause_ms"] = paused
             result["input_after_pause_gaps_ms"] = gaps
             phase = resources.begin()
+            result['stage'] = 'input_under_output'
             channel.request("load_start", timeout=settings["timeout"])
             loaded_samples = []
             for _ in range(settings["input_samples"]):
@@ -464,6 +472,7 @@ def trial(
             ]
             result["metrics"]["sampled_peak_rss_mib"] = [resources.peak / 1048576]
             result["resource_samples"] = resources.samples
+            result['stage'] = 'shutdown'
             x11.restore_focus()
             channel.request("quit")
             try:
@@ -480,6 +489,7 @@ def trial(
                 raw_input=True, observed_witness=True, pty_resize=True
             )
             result["status"] = "ok"
+            result['stage'] = 'complete'
         except (
             OSError,
             ValueError,
@@ -632,6 +642,7 @@ def run(
         config=config,
         settings=settings,
         geometry_policy=geometry_policy,
+        window_policy='owned override-redirect client; tiling and decorations excluded',
         terminal_identities=identities,
         trials=[],
         execution_order=[],
@@ -688,10 +699,11 @@ def run(
                         manifest["trials"].append(result)
                         manifest.pop("active_trial", None)
                         save(output / "run.json", manifest)
-                        print(
-                            f"{entry['id']} round={index} warmup={result['warmup']} {result['status']}",
-                            flush=True,
-                        )
+                        trial_progress(result, directory)
+                    if index < settings['warmups'] and any(t['status'] != 'ok' for t in manifest['trials']):
+                        manifest['stopped_after_failed_warmup'] = True
+                        print('Calentamiento fallido: se detiene la campaña; no se publican muestras medidas.', flush=True)
+                        break
             finally:
                 x11.close()
         failed = any(row["status"] != "ok" for row in manifest["trials"])

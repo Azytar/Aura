@@ -44,6 +44,9 @@ vim.api.nvim_create_autocmd('CursorMoved', {callback = function()
             top = vim.fn.line('w0'), text = vim.api.nvim_get_current_line()})
   end
 end})
+vim.api.nvim_create_autocmd('VimResized', {callback = function()
+  if ready then record({op = 'geometry'}) end
+end})
 vim.api.nvim_create_autocmd('InsertEnter', {once = true, callback = function()
   vim.schedule(function()
     -- A discovery handshake independent of terminfo's title capabilities.

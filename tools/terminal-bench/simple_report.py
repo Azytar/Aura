@@ -116,6 +116,8 @@ body{font:15px system-ui,sans-serif;background:#fff;color:#262626;max-width:1440
     document += f'<p>Perfil: {html.escape(profile)}. quick es una comprobación funcional, insuficiente para un ranking estable.</p>'
     document += '<p>El inventario describe las sondas GL y los dispositivos Vulkan disponibles; no certifica el dispositivo elegido por cada emulador. xterm es una referencia Xlib.</p>'
     document += f'<p>{html.escape(geometry)} Observación X11, no input-to-photon. Estado: {html.escape(", ".join(failures))}.</p>'
+    if native.get('window_policy'):
+        document += '<p>Ventanas de prueba controladas fuera del mosaico y las decoraciones del gestor. Las métricas de inicio hasta el testigo incluyen la preparación de geometría; no representan el arranque habitual de una ventana gestionada.</p>'
     document += '<details><summary>Qué miden estas pruebas</summary><p>La salida mide bytes procesados hasta una respuesta ordenada del terminal, no frames presentados. CPU y RSS cubren el árbol del terminal tras preparar el PTY, excluyendo el helper y el servidor X. RSS es un muestreo, no PSS, VRAM ni pico instantáneo garantizado. El informe completo conserva método, geometría, versiones, fallos y todas las repeticiones.</p></details>'
     if daily:
         document += '<p>Neovim real instrumentado: buffer verificado y testigo en la barra de estado; incluye el coste del editor, callback y control. Paginado y búsqueda se verifican fuera del reloj de escritura. Sin plugins/LSP personales.</p>'
@@ -126,6 +128,8 @@ body{font:15px system-ui,sans-serif;background:#fff;color:#262626;max-width:1440
     (output / 'index.html').write_text(document)
     heading = f'<rect width="100%" height="100%" fill="white"/><text x="16" y="26" font-family="sans-serif" font-size="20">Comparación de terminales · {html.escape(profile)} · medianas · Aura azul / referencias gris</text>'
     caption = environment_label(environment) + ' quick: prueba funcional, no ranking. *: parcial.'
+    if native.get('window_policy'):
+        caption += ' Ventanas controladas fuera del mosaico; inicio hasta testigo incluye preparación.'
     lines = textwrap.wrap(caption, width=170)
     for index, line in enumerate(lines):
         heading += f'<text x="16" y="{49+index*17}" font-family="sans-serif" font-size="12">{html.escape(line)}</text>'
