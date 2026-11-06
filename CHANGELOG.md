@@ -43,6 +43,11 @@ per commit.
 
 ### Fixed
 
+- Copying a selection larger than 64 KiB no longer silently leaves the previous
+  X11 clipboard value intact. Ordinary CLIPBOARD and PRIMARY selections use
+  ICCCM `INCR` transfers in bounded chunks when needed, with independent
+  snapshots for concurrent requestors. The existing OSC 52 write cap and
+  configured incoming-paste limit are unchanged.
 - Background rendering keeps full-screen shading for dense grids and resolves
   sparse backgrounds per cell, skipping pixels covered by the attachment clear.
   Cursors and selections retain full-frame clearing, exact decoration pixel

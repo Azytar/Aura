@@ -92,6 +92,10 @@ install -Dm644 aura.desktop /usr/share/applications/aura.desktop
 - `Ctrl+Plus` / `Ctrl+Minus` change the runtime font size by 1.0 px
   (clamped to 6-72 px); `Ctrl+0` restores the configured `font.size`.
 - `Ctrl+Shift+C` copy selection, `Ctrl+Shift+V` paste.
+- Large copies to other X11 applications use incremental (`INCR`) clipboard
+  transfers; copying more than 64 KiB does not silently preserve an older copy.
+  The configured `security.max_paste_bytes` still limits pastes **into** Aura,
+  independently of how much text Aura can copy **out**.
 - `Ctrl+Shift+R` reload configuration; `[keyboard.bindings]` customizes shortcuts.
 - Local mouse selection: click and drag, double click for a word, triple
   click for a line; dragging past an edge scrolls the view. Releasing a

@@ -16,6 +16,8 @@ use keyboard::Keyboard;
 use mouse::{MouseEvent, mouse_modes, mouse_report};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use as_raw_xcb_connection::AsRawXcbConnection;
 use ash::vk;
@@ -28,8 +30,9 @@ use base64::Engine;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConfigureNotifyEvent, ConnectionExt as XprotoExt, CreateWindowAux, EventMask,
-    Gravity, KeyButMask, PropMode, SelectionNotifyEvent, WindowClass,
+    AtomEnum, ChangeWindowAttributesAux, ConfigureNotifyEvent, ConnectionExt as XprotoExt,
+    CreateWindowAux, EventMask, Gravity, KeyButMask, PropMode, Property, PropertyNotifyEvent,
+    SelectionNotifyEvent, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as WrapperExt;
 use x11rb::xcb_ffi::XCBConnection;
@@ -140,7 +143,8 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             .bit_gravity(Gravity::NORTH_WEST)
             .background_pixel(background_pixel)
             .event_mask(
-                EventMask::EXPOSURE
+                EventMask::PROPERTY_CHANGE
+                    | EventMask::EXPOSURE
                     | EventMask::STRUCTURE_NOTIFY
                     | EventMask::KEY_PRESS
                     | EventMask::KEY_RELEASE
@@ -153,7 +157,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     set_title(&connection, window, &config.window.title)?;
     set_window_properties(&connection, window, &geometry, &config.window.class)?;
-    let mut clipboard = Clipboard::new(&connection, config.security.max_paste_bytes)?;
+    let mut clipboard = Clipboard::new(&connection, window, config.security.max_paste_bytes)?;
     connection.change_property32(
         PropMode::REPLACE,
         window,
@@ -744,7 +748,15 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             Event::SelectionRequest(request) => {
-                                clipboard.respond(&connection, request)?;
+                                // The requestor is another process and may
+                                // disappear at any point. Clipboard protocol
+                                // failures must not close the terminal.
+                                if let Err(error) = clipboard.respond(&connection, request) {
+                                    eprintln!("aura: clipboard request failed: {error}");
+                                }
+                            }
+                            Event::PropertyNotify(event) => {
+                                clipboard.advance_transfer(&connection, event);
                             }
                             Event::SelectionNotify(notify)
                                 if notify.property != AtomEnum::NONE.into() =>
@@ -1531,7 +1543,12 @@ fn set_window_properties(
     Ok(())
 }
 
-const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
+// OSC 52 is an escape-sequence channel, not the user's interactive selection.
+const MAX_OSC52_BYTES: usize = 64 * 1024;
+// Keep each ChangeProperty request within even the baseline X11 request limit.
+const SELECTION_CHUNK_BYTES: usize = 32 * 1024;
+const MAX_SELECTION_TRANSFERS: usize = 16;
+const SELECTION_TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn decode_clipboard_payload(encoded: &[u8]) -> Option<Vec<u8>> {
     use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -1539,37 +1556,68 @@ fn decode_clipboard_payload(encoded: &[u8]) -> Option<Vec<u8>> {
         .decode(encoded)
         .or_else(|_| STANDARD_NO_PAD.decode(encoded))
         .ok()?;
-    (decoded.len() <= MAX_CLIPBOARD_BYTES).then_some(decoded)
+    (decoded.len() <= MAX_OSC52_BYTES).then_some(decoded)
+}
+
+struct OutgoingSelection {
+    requestor: u32,
+    property: u32,
+    target: u32,
+    contents: Arc<[u8]>,
+    sent: usize,
+    last_progress: Instant,
+}
+
+impl OutgoingSelection {
+    // The empty range after the last data chunk is the mandatory INCR terminator.
+    fn next_chunk(&mut self) -> std::ops::Range<usize> {
+        let begin = self.sent;
+        self.sent = self
+            .sent
+            .saturating_add(SELECTION_CHUNK_BYTES)
+            .min(self.contents.len());
+        self.last_progress = Instant::now();
+        begin..self.sent
+    }
 }
 
 struct Clipboard {
+    owner_window: u32,
     max_paste_bytes: usize,
     clipboard_atom: u32,
     primary_atom: u32,
     utf8_atom: u32,
     targets_atom: u32,
+    incr_atom: u32,
     property_atom: u32,
-    clipboard_contents: Vec<u8>,
-    primary_contents: Vec<u8>,
+    clipboard_contents: Arc<[u8]>,
+    primary_contents: Arc<[u8]>,
+    outgoing: Vec<OutgoingSelection>,
+    watched_requestors: Vec<(u32, EventMask)>,
 }
 
 impl Clipboard {
     fn new(
         connection: &XCBConnection,
+        owner_window: u32,
         max_paste_bytes: usize,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let atom = |name: &[u8]| -> Result<u32, Box<dyn std::error::Error>> {
             Ok(connection.intern_atom(false, name)?.reply()?.atom)
         };
         Ok(Self {
+            owner_window,
             max_paste_bytes,
             clipboard_atom: atom(b"CLIPBOARD")?,
             primary_atom: AtomEnum::PRIMARY.into(),
             utf8_atom: atom(b"UTF8_STRING")?,
             targets_atom: atom(b"TARGETS")?,
+            incr_atom: atom(b"INCR")?,
             property_atom: atom(b"AURA_CLIPBOARD")?,
-            clipboard_contents: Vec::new(),
-            primary_contents: Vec::new(),
+            clipboard_contents: Arc::from([]),
+            primary_contents: Arc::from([]),
+            outgoing: Vec::new(),
+            watched_requestors: Vec::new(),
         })
     }
 
@@ -1580,19 +1628,15 @@ impl Clipboard {
         selection: u32,
         text: &[u8],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if text.len() > MAX_CLIPBOARD_BYTES {
-            return Ok(());
-        }
-        let contents = if selection == self.clipboard_atom {
-            &mut self.clipboard_contents
-        } else {
-            &mut self.primary_contents
-        };
-        contents.clear();
-        contents.extend_from_slice(text);
+        let contents: Arc<[u8]> = Arc::from(text);
         connection
             .set_selection_owner(window, selection, x11rb::CURRENT_TIME)?
             .check()?;
+        if selection == self.clipboard_atom {
+            self.clipboard_contents = contents;
+        } else {
+            self.primary_contents = contents;
+        }
         Ok(())
     }
 
@@ -1615,10 +1659,11 @@ impl Clipboard {
     }
 
     fn respond(
-        &self,
+        &mut self,
         connection: &XCBConnection,
         request: x11rb::protocol::xproto::SelectionRequestEvent,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.expire_transfers(connection);
         let property = if request.property == AtomEnum::NONE.into() {
             request.target
         } else {
@@ -1626,12 +1671,15 @@ impl Clipboard {
         };
         let supported_selection =
             request.selection == self.clipboard_atom || request.selection == self.primary_atom;
+        let busy_property = self.outgoing.iter().any(|transfer| {
+            transfer.requestor == request.requestor && transfer.property == property
+        });
         let contents = if request.selection == self.clipboard_atom {
-            &self.clipboard_contents
+            Arc::clone(&self.clipboard_contents)
         } else {
-            &self.primary_contents
+            Arc::clone(&self.primary_contents)
         };
-        let accepted = if !supported_selection {
+        let accepted = if !supported_selection || busy_property {
             false
         } else if request.target == self.targets_atom {
             connection.change_property32(
@@ -1643,14 +1691,60 @@ impl Clipboard {
             )?;
             true
         } else if request.target == self.utf8_atom || request.target == AtomEnum::STRING.into() {
-            connection.change_property8(
-                PropMode::REPLACE,
-                request.requestor,
-                property,
-                request.target,
-                contents,
-            )?;
-            true
+            if contents.len() > SELECTION_CHUNK_BYTES {
+                if self.outgoing.len() == MAX_SELECTION_TRANSFERS
+                    || u32::try_from(contents.len()).is_err()
+                {
+                    false
+                } else {
+                    // Event selection is per X11 client. Do not overwrite the
+                    // input masks on Aura's own window when it is the requestor.
+                    if request.requestor != self.owner_window
+                        && !self
+                            .watched_requestors
+                            .iter()
+                            .any(|(window, _)| *window == request.requestor)
+                    {
+                        let previous = connection
+                            .get_window_attributes(request.requestor)?
+                            .reply()?
+                            .your_event_mask;
+                        connection
+                            .change_window_attributes(
+                                request.requestor,
+                                &ChangeWindowAttributesAux::new()
+                                    .event_mask(previous | EventMask::PROPERTY_CHANGE),
+                            )?
+                            .check()?;
+                        self.watched_requestors.push((request.requestor, previous));
+                    }
+                    connection.change_property32(
+                        PropMode::REPLACE,
+                        request.requestor,
+                        property,
+                        self.incr_atom,
+                        &[contents.len() as u32],
+                    )?;
+                    self.outgoing.push(OutgoingSelection {
+                        requestor: request.requestor,
+                        property,
+                        target: request.target,
+                        contents,
+                        sent: 0,
+                        last_progress: Instant::now(),
+                    });
+                    true
+                }
+            } else {
+                connection.change_property8(
+                    PropMode::REPLACE,
+                    request.requestor,
+                    property,
+                    request.target,
+                    &contents,
+                )?;
+                true
+            }
         } else {
             false
         };
@@ -1671,6 +1765,68 @@ impl Clipboard {
             .send_event(false, request.requestor, EventMask::NO_EVENT, notify)?
             .check()?;
         Ok(())
+    }
+
+    fn advance_transfer(&mut self, connection: &XCBConnection, event: PropertyNotifyEvent) {
+        if event.state != Property::DELETE {
+            return;
+        }
+        let Some(index) = self.outgoing.iter().position(|transfer| {
+            transfer.requestor == event.window && transfer.property == event.atom
+        }) else {
+            return;
+        };
+        let transfer = &mut self.outgoing[index];
+        let chunk = transfer.next_chunk();
+        let done = chunk.is_empty();
+        // A requestor can close while a transfer is pending. Its disappearance
+        // must not terminate Aura or invalidate the user's next copy.
+        let successful = match connection.change_property8(
+            PropMode::REPLACE,
+            transfer.requestor,
+            transfer.property,
+            transfer.target,
+            &transfer.contents[chunk],
+        ) {
+            Ok(cookie) => cookie.check().is_ok(),
+            Err(_) => false,
+        };
+        if done || !successful {
+            self.remove_transfer(connection, index);
+        }
+    }
+
+    fn expire_transfers(&mut self, connection: &XCBConnection) {
+        let now = Instant::now();
+        for index in (0..self.outgoing.len()).rev() {
+            if now.duration_since(self.outgoing[index].last_progress) >= SELECTION_TRANSFER_TIMEOUT
+            {
+                self.remove_transfer(connection, index);
+            }
+        }
+    }
+
+    fn remove_transfer(&mut self, connection: &XCBConnection, index: usize) {
+        let requestor = self.outgoing.swap_remove(index).requestor;
+        if requestor != self.owner_window
+            && !self
+                .outgoing
+                .iter()
+                .any(|transfer| transfer.requestor == requestor)
+            && let Some(index) = self
+                .watched_requestors
+                .iter()
+                .position(|(window, _)| *window == requestor)
+        {
+            let (_, previous) = self.watched_requestors.swap_remove(index);
+            // The foreign window may already be destroyed; cleanup is best effort.
+            if let Ok(cookie) = connection.change_window_attributes(
+                requestor,
+                &ChangeWindowAttributesAux::new().event_mask(previous),
+            ) {
+                let _ = cookie.check();
+            }
+        }
     }
 
     fn receive_paste(
@@ -1915,6 +2071,200 @@ mod tests {
     use super::*;
 
     #[test]
+    fn incremental_selection_chunks_cover_every_byte_and_terminate() {
+        for length in [SELECTION_CHUNK_BYTES + 1, 64 * 1024, 2 * 1024 * 1024 + 13] {
+            let bytes: Arc<[u8]> = Arc::from(
+                (0..length)
+                    .map(|index| (index % 251) as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let mut transfer = OutgoingSelection {
+                requestor: 1,
+                property: 2,
+                target: 3,
+                contents: Arc::clone(&bytes),
+                sent: 0,
+                last_progress: Instant::now(),
+            };
+            let mut result = Vec::new();
+            loop {
+                let range = transfer.next_chunk();
+                assert!(range.len() <= SELECTION_CHUNK_BYTES);
+                if range.is_empty() {
+                    break;
+                }
+                result.extend_from_slice(&transfer.contents[range]);
+            }
+            assert_eq!(&result, &*bytes);
+            assert_eq!(transfer.sent, length);
+        }
+    }
+
+    #[test]
+    fn clipboard_serves_large_x11_selection_using_incr() {
+        let (Ok((owner, owner_screen)), Ok((recipient, recipient_screen))) =
+            (XCBConnection::connect(None), XCBConnection::connect(None))
+        else {
+            eprintln!("SKIP: outgoing INCR clipboard integration needs X11");
+            return;
+        };
+        let make_window = |connection: &XCBConnection, screen_index: usize| {
+            let screen = &connection.setup().roots[screen_index];
+            let window = connection.generate_id().unwrap();
+            connection
+                .create_window(
+                    screen.root_depth,
+                    window,
+                    screen.root,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    screen.root_visual,
+                    &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            window
+        };
+        let owner_window = make_window(&owner, owner_screen);
+        let requestor_window = make_window(&recipient, recipient_screen);
+        let mut clipboard = Clipboard::new(&owner, owner_window, 64 * 1024).unwrap();
+        // This test can run on a real desktop. Never replace the user's
+        // CLIPBOARD contents merely to exercise the transfer protocol.
+        clipboard.clipboard_atom = owner
+            .intern_atom(
+                false,
+                format!("AURA_TEST_SELECTION_{}", std::process::id()).as_bytes(),
+            )
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom;
+
+        let next_event = |connection: &XCBConnection, predicate: &dyn Fn(&Event) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(event) = connection.poll_for_event().unwrap()
+                    && predicate(&event)
+                {
+                    break event;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for X11 selection event"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+
+        // Replacing a short copy with a large one must change ownership and
+        // deliver the new bytes; the former 64 KiB cap silently kept the old.
+        clipboard
+            .set_text(&owner, owner_window, clipboard.clipboard_atom, b"old copy")
+            .unwrap();
+        for length in [64 * 1024 + 1, 2 * 1024 * 1024 + 17] {
+            let expected: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+            clipboard
+                .set_text(&owner, owner_window, clipboard.clipboard_atom, &expected)
+                .unwrap();
+            assert_eq!(
+                recipient
+                    .get_selection_owner(clipboard.clipboard_atom)
+                    .unwrap()
+                    .reply()
+                    .unwrap()
+                    .owner,
+                owner_window
+            );
+            recipient
+                .convert_selection(
+                    requestor_window,
+                    clipboard.clipboard_atom,
+                    clipboard.utf8_atom,
+                    clipboard.property_atom,
+                    x11rb::CURRENT_TIME,
+                )
+                .unwrap()
+                .check()
+                .unwrap();
+            let Event::SelectionRequest(request) =
+                next_event(&owner, &|event| matches!(event, Event::SelectionRequest(_)))
+            else {
+                unreachable!()
+            };
+            clipboard.respond(&owner, request).unwrap();
+            let Event::SelectionNotify(notify) = next_event(&recipient, &|event| {
+                matches!(event, Event::SelectionNotify(_))
+            }) else {
+                unreachable!()
+            };
+            assert_eq!(notify.property, clipboard.property_atom);
+            let announcement = recipient
+                .get_property(
+                    false,
+                    requestor_window,
+                    clipboard.property_atom,
+                    AtomEnum::ANY,
+                    0,
+                    1,
+                )
+                .unwrap()
+                .reply()
+                .unwrap();
+            assert_eq!(announcement.type_, clipboard.incr_atom);
+            assert_eq!(announcement.value32().unwrap().next(), Some(length as u32));
+
+            let mut received = Vec::new();
+            loop {
+                recipient
+                    .delete_property(requestor_window, clipboard.property_atom)
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                let Event::PropertyNotify(deleted) = next_event(&owner, &|event| {
+                    matches!(event, Event::PropertyNotify(value)
+                        if value.window == requestor_window
+                            && value.atom == clipboard.property_atom
+                            && value.state == Property::DELETE)
+                }) else {
+                    unreachable!()
+                };
+                clipboard.advance_transfer(&owner, deleted);
+                let response = recipient
+                    .get_property(
+                        false,
+                        requestor_window,
+                        clipboard.property_atom,
+                        AtomEnum::ANY,
+                        0,
+                        SELECTION_CHUNK_BYTES as u32 / 4,
+                    )
+                    .unwrap()
+                    .reply()
+                    .unwrap();
+                assert_eq!(response.type_, clipboard.utf8_atom);
+                assert_eq!(response.bytes_after, 0);
+                if response.value.is_empty() {
+                    break;
+                }
+                received.extend_from_slice(&response.value);
+            }
+            assert_eq!(received, expected);
+            assert!(clipboard.outgoing.is_empty());
+        }
+        owner.destroy_window(owner_window).unwrap().check().unwrap();
+        recipient
+            .destroy_window(requestor_window)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    #[test]
     fn clipboard_pastes_obey_the_configured_limit_without_partial_utf8() {
         let Ok((connection, screen_index)) = XCBConnection::connect(None) else {
             eprintln!("SKIP: configured paste integration needs X11");
@@ -1942,7 +2292,8 @@ mod tests {
         for limit in [4, 80_000] {
             let table = toml::from_str(&format!("[security]\nmax_paste_bytes = {limit}")).unwrap();
             let config = AppConfig::load_from_text(&table).unwrap();
-            let clipboard = Clipboard::new(&connection, config.security.max_paste_bytes).unwrap();
+            let clipboard =
+                Clipboard::new(&connection, window, config.security.max_paste_bytes).unwrap();
             for length in [0, limit, limit + 1, limit + 100] {
                 let bytes = vec![b'a'; length];
                 connection
