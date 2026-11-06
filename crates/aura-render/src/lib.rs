@@ -228,6 +228,7 @@ pub struct Renderer {
     frames: Vec<Frame>,
     frame_index: usize,
     gpu_cells: Vec<GpuCell>,
+    background_coverage: BackgroundCoverage,
     gpu_glyphs: Vec<GpuGlyph>,
     atlas_initialized: bool,
     color_atlas_initialized: bool,
@@ -868,6 +869,7 @@ impl Renderer {
             frames,
             frame_index: 0,
             gpu_cells: Vec::new(),
+            background_coverage: BackgroundCoverage::default(),
             gpu_glyphs: vec![GpuGlyph::zeroed()],
             atlas_initialized: false,
             color_atlas_initialized: false,
@@ -1089,8 +1091,11 @@ impl Renderer {
             background_color: pack_rgb(self.palette.background),
             background_dense: 0,
         };
-        let draw_background =
-            background_mode(&self.gpu_cells, &push, pack_rgb(self.palette.background));
+        let draw_background = self.background_coverage.mode(
+            &self.gpu_cells,
+            &push,
+            pack_rgb(self.palette.background),
+        );
         push.background_dense = u32::from(draw_background == Some(BackgroundMode::Dense));
         record_frame(
             &self.device,
@@ -1180,6 +1185,7 @@ impl Renderer {
         self.gpu_glyphs.clear();
         self.gpu_glyphs.push(GpuGlyph::zeroed());
         self.gpu_cells.clear();
+        self.background_coverage.reset(0);
         self.glyphs_dirty = true;
         self.grid_size = None;
     }
@@ -1318,6 +1324,7 @@ impl Renderer {
                         frame.dirty_rows.fill(true);
                     }
                     self.grid_size = Some((width, height));
+                    self.background_coverage.reset(height);
                     grid_rebuilt = true;
                 }
                 self.gpu_cells.resize(
@@ -1359,6 +1366,12 @@ impl Renderer {
                             .viewport_underline_color(row, column)
                             .map_or(u32::MAX, |value| color(&self.palette, value, true));
                     }
+                    let start = row * width;
+                    self.background_coverage.update_row(
+                        row,
+                        &self.gpu_cells[start..start + width],
+                        pack_rgb(self.palette.background),
+                    );
                 }
                 Ok(())
             })();
@@ -2587,21 +2600,92 @@ enum BackgroundMode {
     Dense,
 }
 
+/// Cached static background coverage. Cursor and selection are dynamic, so a
+/// blink or selection change does not rescan the entire (unchanged) grid.
+#[derive(Default)]
+struct BackgroundCoverage {
+    row_counts: Vec<usize>,
+    total: usize,
+}
+
+impl BackgroundCoverage {
+    fn reset(&mut self, rows: usize) {
+        self.row_counts.clear();
+        self.row_counts.resize(rows, 0);
+        self.total = 0;
+    }
+
+    fn update_row(&mut self, row: usize, cells: &[GpuCell], background: u32) {
+        let painted = cells
+            .iter()
+            .filter(|cell| static_background_painted(cell, background))
+            .count();
+        self.total = self.total - self.row_counts[row] + painted;
+        self.row_counts[row] = painted;
+    }
+
+    fn mode(&self, cells: &[GpuCell], push: &PushGrid, background: u32) -> Option<BackgroundMode> {
+        let threshold = cells.len() / 4;
+        if self.total > threshold {
+            return Some(BackgroundMode::Dense);
+        }
+        let mut painted = self.total;
+        let selection = (push.selection_start != u32::MAX)
+            .then_some(push.selection_start as usize..=push.selection_end as usize)
+            .filter(|range| !range.is_empty() && *range.start() < cells.len());
+        if let Some(selection) = selection.as_ref() {
+            let end = (*selection.end()).min(cells.len() - 1);
+            // Selected cells alone can force dense shading. This also bounds
+            // the per-frame selection scan to at most 25% of the grid.
+            if end - *selection.start() + 1 > threshold {
+                return Some(BackgroundMode::Dense);
+            }
+            for cell in &cells[*selection.start()..=end] {
+                if !static_background_painted(cell, background) {
+                    painted += 1;
+                    if painted > threshold {
+                        return Some(BackgroundMode::Dense);
+                    }
+                }
+            }
+        }
+        if push.cursor_visible != 0 {
+            let cursor = push.cursor as usize;
+            if let Some(cell) = cells.get(cursor)
+                && !selection
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&cursor))
+                && !static_background_painted(cell, background)
+            {
+                painted += 1;
+            }
+        }
+        match painted {
+            0 => None,
+            _ if painted > threshold => Some(BackgroundMode::Dense),
+            _ => Some(BackgroundMode::Sparse),
+        }
+    }
+}
+
+fn static_background_painted(cell: &GpuCell, background: u32) -> bool {
+    let flags = CellFlags::from_bits_retain(cell.flags);
+    let color = if flags.contains(CellFlags::INVERSE) {
+        cell.fg
+    } else {
+        cell.bg
+    };
+    color != background
+        || (!flags.contains(CellFlags::HIDDEN)
+            && (flags.contains(CellFlags::UNDERLINE) || flags.contains(CellFlags::STRIKETHROUGH)))
+}
+
 /// Keep sparse fragment work local, without instancing an entire colored TUI.
 fn background_mode(cells: &[GpuCell], push: &PushGrid, background: u32) -> Option<BackgroundMode> {
     let mut painted = 0;
     for (index, cell) in cells.iter().enumerate() {
-        let flags = CellFlags::from_bits_retain(cell.flags);
-        let color = if flags.contains(CellFlags::INVERSE) {
-            cell.fg
-        } else {
-            cell.bg
-        };
         let index = index as u32;
-        if color != background
-            || (!flags.contains(CellFlags::HIDDEN)
-                && (flags.contains(CellFlags::UNDERLINE)
-                    || flags.contains(CellFlags::STRIKETHROUGH)))
+        if static_background_painted(cell, background)
             || (push.cursor_visible != 0 && index == push.cursor)
             || (push.selection_start != u32::MAX
                 && index >= push.selection_start
@@ -2839,6 +2923,150 @@ pub(crate) fn rows_to_rebuild(height: usize, dirty: Vec<usize>, cache_invalid: b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_background_coverage_matches_full_scan_after_row_updates() {
+        const WIDTH: usize = 37;
+        const HEIGHT: usize = 13;
+        const BACKGROUND: u32 = 0x181818;
+        let mut cells = vec![
+            GpuCell {
+                glyph: u32::MAX,
+                fg: 0xd8d8d8,
+                bg: BACKGROUND,
+                flags: 0,
+                underline_color: u32::MAX,
+            };
+            WIDTH * HEIGHT
+        ];
+        let mut coverage = BackgroundCoverage::default();
+        coverage.reset(HEIGHT);
+        let mut seed = 0x4181_6139_u64;
+        let mut random = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        for iteration in 0..1_200 {
+            if iteration == 600 {
+                // Simulate a font/palette/grid invalidation, rebuilding every row.
+                coverage.reset(HEIGHT);
+                cells.fill(GpuCell {
+                    glyph: u32::MAX,
+                    fg: 0xd8d8d8,
+                    bg: BACKGROUND,
+                    flags: 0,
+                    underline_color: u32::MAX,
+                });
+                for row in 0..HEIGHT {
+                    coverage.update_row(row, &cells[row * WIDTH..(row + 1) * WIDTH], BACKGROUND);
+                }
+            }
+            let row = random() as usize % HEIGHT;
+            for cell in &mut cells[row * WIDTH..(row + 1) * WIDTH] {
+                let choice = random() % 16;
+                cell.fg = if choice == 1 { BACKGROUND } else { 0xd8d8d8 };
+                cell.bg = if choice < 3 { 0x124578 } else { BACKGROUND };
+                cell.flags = match choice {
+                    4 => CellFlags::INVERSE.bits(),
+                    5 => CellFlags::UNDERLINE.bits(),
+                    6 => CellFlags::STRIKETHROUGH.bits(),
+                    7 => CellFlags::HIDDEN.bits() | CellFlags::UNDERLINE.bits(),
+                    _ => 0,
+                };
+            }
+            coverage.update_row(row, &cells[row * WIDTH..(row + 1) * WIDTH], BACKGROUND);
+
+            for selection_kind in 0..7 {
+                let mut push = PushGrid::zeroed();
+                push.selection_start = u32::MAX;
+                push.selection_end = u32::MAX;
+                push.cursor = (random() as usize % cells.len()) as u32;
+                push.cursor_visible = (random() % 2) as u32;
+                match selection_kind {
+                    1 => {
+                        push.selection_start = push.cursor;
+                        push.selection_end = push.cursor;
+                    }
+                    2 => {
+                        push.selection_start = 0;
+                        push.selection_end = (cells.len() - 1) as u32;
+                    }
+                    3 | 4 => {
+                        let first = random() as usize % cells.len();
+                        push.selection_start = first as u32;
+                        push.selection_end = (first + (random() as usize % 30)) as u32;
+                    }
+                    5 => {
+                        push.selection_start = (cells.len() - 3) as u32;
+                        push.selection_end = u32::MAX;
+                    }
+                    6 => {
+                        push.selection_start = 14;
+                        push.selection_end = 3;
+                    }
+                    _ => {}
+                }
+                assert_eq!(
+                    coverage.mode(&cells, &push, BACKGROUND),
+                    background_mode(&cells, &push, BACKGROUND),
+                    "iteration={iteration}, selection_kind={selection_kind}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual CPU microbenchmark, not a GPU frame-time measurement"]
+    fn background_coverage_cursor_blink_microbenchmark() {
+        use std::{hint::black_box, time::Instant};
+
+        for (width, height) in [(120, 40), (240, 60), (400, 100)] {
+            let background = 0x181818;
+            let cells = vec![
+                GpuCell {
+                    glyph: 0,
+                    fg: 0xd8d8d8,
+                    bg: background,
+                    flags: 0,
+                    underline_color: u32::MAX,
+                };
+                width * height
+            ];
+            let mut coverage = BackgroundCoverage::default();
+            coverage.reset(height);
+            for row in 0..height {
+                coverage.update_row(row, &cells[row * width..(row + 1) * width], background);
+            }
+            let mut push = PushGrid::zeroed();
+            push.selection_start = u32::MAX;
+            push.selection_end = u32::MAX;
+            push.cursor_visible = 1;
+            push.cursor = (width * height / 2) as u32;
+            const ITERATIONS: usize = 20_000;
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                black_box(background_mode(
+                    black_box(&cells),
+                    black_box(&push),
+                    background,
+                ));
+            }
+            let full_scan = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..ITERATIONS {
+                black_box(coverage.mode(black_box(&cells), black_box(&push), background));
+            }
+            let cached = start.elapsed();
+            println!(
+                "background mode {width}x{height}: full={:.1} ns/call cached={:.1} ns/call",
+                full_scan.as_nanos() as f64 / ITERATIONS as f64,
+                cached.as_nanos() as f64 / ITERATIONS as f64
+            );
+        }
+    }
 
     #[test]
     fn gpu_cell_matches_five_word_storage_layout() {

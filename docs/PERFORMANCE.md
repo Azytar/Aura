@@ -62,6 +62,38 @@ fragment work can trade against more vertex work. Exact readback tests cover
 dense and sparse grids, erasure and custom palettes, including padding and
 spacing. Keep software-renderer results separate from physical GPU results.
 
+The surface renderer now caches **static background coverage per dirty row**.
+Unchanged cursor blinks no longer scan the whole grid to choose the sparse or
+dense background pass. Cursor and selection coverage is evaluated separately;
+selections covering more than one quarter of the grid select dense drawing
+immediately, while shorter selections inspect only their own cells to avoid
+double-counting already painted backgrounds. Font/palette/grid invalidation
+resets the cache; an independent full-grid reference is used in randomized
+row-update and cursor/selection differential tests. The offscreen renderer
+continues to use that reference scan.
+
+For a **CPU-only** microbenchmark (not a presentation benchmark), run:
+
+```sh
+cargo test --release -p aura-render --lib \
+  background_coverage_cursor_blink_microbenchmark -- --ignored --nocapture
+```
+
+On 2026-11-06, Linux x86-64, Rust 1.88.0 release, a single container run with
+uniform default backgrounds and one visible cursor yielded:
+
+| Grid | Full-grid background classification | Cached classification |
+| --- | ---: | ---: |
+| 120×40 | 3,762 ns/call | 2.4 ns/call |
+| 240×60 | 12,139 ns/call | 2.1 ns/call |
+| 400×100 | 29,901 ns/call | 2.1 ns/call |
+
+These isolated numbers exclude dirty-row conversion/cache updates, Vulkan work,
+swapchain waits, driver scheduling and display presentation. They are neither
+whole-frame speedups nor evidence of latency improvements on real hardware.
+Dense-output and selection-heavy cases must be checked separately, ideally on
+the same physical GPU with the existing native benchmark harness.
+
 The `AURA_PERF` `parse` interval covers `Terminal::process`; refreshing host
 query properties once before the bounded PTY drain is outside that interval.
 Older builds refreshed those properties inside each read's parse interval, so

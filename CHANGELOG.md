@@ -21,6 +21,15 @@ per commit.
 
 ## [Unreleased]
 
+### Performance
+
+- Surface rendering caches static background coverage by dirty row. Cursor
+  blinks and small selection-only updates no longer classify every unchanged
+  cell; the sparse/dense choice retains full-scan differential tests and a
+  separate CPU microbenchmark. See
+  [terminal implementation references](docs/TERMINAL_REFERENCES.md) for the
+  cross-terminal research and native Wayland integration constraints.
+
 ### Added
 
 - Benchmark launcher `--current-session` reuses the desktop X11/XWayland display
