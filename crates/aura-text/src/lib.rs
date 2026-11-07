@@ -675,7 +675,7 @@ impl Font {
         post_context: &str,
     ) -> Result<(harfrust::Buffer, u16), String> {
         let font = harfrust::Font::new(face_bytes, loaded_index as u32)
-            .map_err(|error| format!("invalid loaded font for shaping: {error:?}"))?;
+            .ok_or("invalid loaded font for shaping")?;
         let upem = font.units_per_em();
         let shaper_font = harfrust::ShaperFont::new(&font);
         let mut buffer = harfrust::Buffer::new();
@@ -683,12 +683,8 @@ impl Font {
         buffer.set_pre_context(pre_context);
         buffer.set_post_context(post_context);
         buffer.guess_segment_properties();
-        harfrust::shape(
-            &shaper_font,
-            &mut buffer,
-            harfrust::ShapeOptions::new(),
-        )
-        .map_err(|error| format!("font shaping failed: {error:?}"))?;
+        harfrust::shape(&shaper_font, &mut buffer, harfrust::ShapeOptions::new())
+            .map_err(|error| format!("font shaping failed: {error:?}"))?;
         if !buffer.allocation_successful() {
             return Err("font shaping exceeded its allocation/work limits".into());
         }
