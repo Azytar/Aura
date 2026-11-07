@@ -90,8 +90,8 @@ jobs:
           echo 'This job is best-effort only.'
           echo 'A passing job may contain explicit Vulkan/font skips and is not proof of physical-GPU correctness.'
 
-  x11-typing:
-    name: X11 typing redraw
+  x11-integration:
+    name: X11 integration contracts
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -134,6 +134,10 @@ jobs:
           fi
       - name: Build release Aura
         run: cargo build --release -p aura-app --locked
+      - name: Verify large outgoing clipboard INCR transfer
+        run: |
+          xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp' \
+            cargo test -p aura-app --bin aura clipboard_serves_large_x11_selection_using_incr --locked -- --nocapture
       - name: Verify no-echo typing redraw contract
         env:
           AURA_REQUIRE_GPU: '1'
