@@ -11,7 +11,8 @@ methodology.
 | 0 — audit | complete | workspace, CI, tests, GPU boundaries, benchmarks and architecture inspected |
 | 1 — Rust infrastructure | active | deterministic workspace CI and a separate GPU smoke gate are established |
 | 2 — selective migration | not started | Python benchmark/X11 harnesses stay until an equivalent Rust path proves a concrete benefit |
-| 3+ | not started | correctness and measurement baselines come before performance changes |
+| 3 — reliability | not started | expand only after current integration contracts are pinned |
+| 4 — performance | active | first redraw-gating vertical is isolated and CI-verified |
 
 ## Audited baseline
 
@@ -75,6 +76,26 @@ distinction.
   fonts; missing prerequisites must be reported explicitly.
 - Physical-GPU latency, power-state and presentation evidence must be collected
   separately on controlled hardware.
+
+## Stage 4 first vertical result
+
+Normal key input previously marked the terminal invalid on every accepted key
+even when the key changed no local pixels and the child had not produced output
+yet. That could queue a render of unchanged/stale terminal content immediately
+before the PTY response that would request the real frame.
+
+The key path now invalidates only when typing itself changes visible local
+state: clearing a selection, returning from scrollback, or restoring a hidden
+blinking cursor. Otherwise the child output remains the event that requests the
+next frame.
+
+The regression uses a raw, non-echoing child on an isolated Xvfb display. It
+verifies that unchanged typing produces no render calls while selection,
+viewport restoration and blink restoration still repaint. The deterministic
+workspace, offscreen Vulkan smoke and this X11 contract all pass on the branch.
+
+This is evidence of removed redundant host-side frames. It is **not** a claim
+about keyboard-to-screen latency, scanout, FPS or physical-GPU performance.
 
 ## Next work
 
