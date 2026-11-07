@@ -859,6 +859,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                             size_of::<u64>(),
                         )
                     };
+                    clipboard.expire_transfers(&connection);
                     if config.general.live_config_reload && config_watcher.changed() {
                         reload_pending = true;
                     }
