@@ -97,6 +97,42 @@ workspace, offscreen Vulkan smoke and this X11 contract all pass on the branch.
 This is evidence of removed redundant host-side frames. It is **not** a claim
 about keyboard-to-screen latency, scanout, FPS or physical-GPU performance.
 
+## Stage 4 Unicode core result
+
+The Unicode candidate was extracted selectively from the experimental
+presentation-latency branch: only `aura-core` grid/terminal changes and their
+core benchmark were taken. Renderer, clipboard, PTY-reader-thread and unrelated
+instrumentation changes were intentionally excluded.
+
+Short multi-scalar graphemes now keep up to 12 bytes of their original UTF-8
+inline in the row sidecar and fall back to `String` when they outgrow that
+space. The leading scalar remains in `Cell`; no normalization is performed and
+long clusters preserve their exact byte sequence. The associated row writer
+also batches the supported ASCII-base-plus-diacritic path while preserving the
+scalar fallback for unsupported or context-sensitive cases.
+
+Correctness tests cover short inline clusters, Inline-to-Heap growth, long emoji
+ZWJ text through grid/reflow, fragmented parsing, wide-cell and metadata
+ownership. The deterministic workspace, release build, offscreen Vulkan smoke
+and isolated X11 typing contract pass on this selectively extracted branch.
+
+Existing measurements from the original experiment compared commit
+`59aa1e9` with the candidate on the same non-Axiom host using alternating
+baseline/candidate pairs after warm-up:
+
+| CPU-only workload | Baseline | Candidate | Change |
+| --- | ---: | ---: | ---: |
+| Unicode, 1 MiB, no history | 5.53 ms | 4.39 ms | -20.6% |
+| Unicode, 1 MiB, 10k history | 7.09 ms | 5.65 ms | -20.3% |
+| UTF-8 terminal, 6144 bytes | 54.37 us | 31.55 us | -42.0% |
+| Reflow with combining marks | 564.61 us | 325.77 us | -42.3% |
+
+Those timings were **not reproduced by this CI run** and are CPU-core workload
+evidence only. The CJK-only workload had no consistent improvement and was
+sometimes slower, so this is not a blanket claim that all Unicode or native
+terminal throughput improved. GPU presentation and physical input latency
+remain unmeasured here.
+
 ## Next work
 
 1. Keep the deterministic CI green and avoid folding hardware-sensitive gates
