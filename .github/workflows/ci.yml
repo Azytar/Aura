@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'engineering/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88.0'
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslc \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb1-dev
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Deterministic library and binary tests
+        run: cargo test --workspace --lib --bins --locked
+      - name: PTY integration
+        run: cargo test -p aura-pty --test pty_terminal --locked
+      - name: Version consistency
+        run: cargo test -p aura-app --test version_consistency --locked
+      - name: Compile all integration tests
+        run: cargo test --workspace --tests --no-run --locked
+      - name: Release build
+        run: cargo build --release -p aura-app --locked
+
+  gpu-best-effort:
+    name: GPU smoke (best effort)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AURA_REQUIRE_GPU: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: false
+      - name: Install Vulkan/font/build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslc \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            fonts-dejavu-core
+      - name: Run offscreen renderer tests
+        run: cargo test -p aura-render --test offscreen_gpu --locked -- --nocapture
+      - name: GPU evidence note
+        if: always()
+        run: |
+          echo 'This job is best-effort only.'
+          echo 'A passing job may contain explicit Vulkan/font skips and is not proof of physical-GPU correctness.'
