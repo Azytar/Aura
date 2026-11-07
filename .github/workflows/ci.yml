@@ -89,3 +89,52 @@ jobs:
         run: |
           echo 'This job is best-effort only.'
           echo 'A passing job may contain explicit Vulkan/font skips and is not proof of physical-GPU correctness.'
+
+  x11-typing:
+    name: X11 typing redraw
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.88.0'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: false
+      - name: Install isolated X11/Vulkan prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            glslc \
+            fonts-dejavu-core \
+            imagemagick \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libxcb1-dev \
+            x11-apps \
+            x11-utils \
+            xauth \
+            xdotool \
+            xvfb
+          if ! command -v magick >/dev/null 2>&1; then
+            sudo tee /usr/local/bin/magick >/dev/null <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "identify" ]; then
+            shift
+            exec /usr/bin/identify "$@"
+          fi
+          exec /usr/bin/convert "$@"
+          EOF
+            sudo chmod +x /usr/local/bin/magick
+          fi
+      - name: Build release Aura
+        run: cargo build --release -p aura-app --locked
+      - name: Verify no-echo typing redraw contract
+        env:
+          AURA_REQUIRE_GPU: '1'
+        run: xvfb-run -a -s '-screen 0 1024x768x24 -nolisten tcp' python3 tests/x11_typing.py target/release/aura
