@@ -2116,7 +2116,9 @@ mod tests {
             last_progress,
         };
 
-        assert!(!make(now - (SELECTION_TRANSFER_TIMEOUT - Duration::from_millis(1))).expired_at(now));
+        assert!(
+            !make(now - (SELECTION_TRANSFER_TIMEOUT - Duration::from_millis(1))).expired_at(now)
+        );
         assert!(make(now - SELECTION_TRANSFER_TIMEOUT).expired_at(now));
         assert!(make(now - (SELECTION_TRANSFER_TIMEOUT + Duration::from_secs(1))).expired_at(now));
     }
@@ -2129,30 +2131,31 @@ mod tests {
             eprintln!("SKIP: outgoing INCR clipboard integration needs X11");
             return;
         };
-        let make_window = |connection: &XCBConnection, screen_index: usize| {
-            let screen = &connection.setup().roots[screen_index];
-            let window = connection.generate_id().unwrap();
-            connection
-                .create_window(
-                    screen.root_depth,
-                    window,
-                    screen.root,
-                    0,
-                    0,
-                    1,
-                    1,
-                    0,
-                    WindowClass::INPUT_OUTPUT,
-                    screen.root_visual,
-                    &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-                )
-                .unwrap()
-                .check()
-                .unwrap();
-            window
-        };
-        let owner_window = make_window(&owner, owner_screen);
-        let requestor_window = make_window(&recipient, recipient_screen);
+        let make_window =
+            |connection: &XCBConnection, screen_index: usize, event_mask: EventMask| {
+                let screen = &connection.setup().roots[screen_index];
+                let window = connection.generate_id().unwrap();
+                connection
+                    .create_window(
+                        screen.root_depth,
+                        window,
+                        screen.root,
+                        0,
+                        0,
+                        1,
+                        1,
+                        0,
+                        WindowClass::INPUT_OUTPUT,
+                        screen.root_visual,
+                        &CreateWindowAux::new().event_mask(event_mask),
+                    )
+                    .unwrap()
+                    .check()
+                    .unwrap();
+                window
+            };
+        let owner_window = make_window(&owner, owner_screen, EventMask::NO_EVENT);
+        let requestor_window = make_window(&recipient, recipient_screen, EventMask::NO_EVENT);
         let mut clipboard = Clipboard::new(&owner, owner_window, 64 * 1024).unwrap();
         // This test can run on a real desktop. Never replace the user's
         // CLIPBOARD contents merely to exercise the transfer protocol.
@@ -2276,6 +2279,17 @@ mod tests {
             }
             assert_eq!(received, expected);
             assert!(clipboard.outgoing.is_empty());
+            assert!(clipboard.watched_requestors.is_empty());
+            assert_eq!(
+                owner
+                    .get_window_attributes(requestor_window)
+                    .unwrap()
+                    .reply()
+                    .unwrap()
+                    .your_event_mask,
+                EventMask::NO_EVENT,
+                "Aura must restore its temporary PropertyNotify subscription",
+            );
         }
         owner.destroy_window(owner_window).unwrap().check().unwrap();
         recipient
