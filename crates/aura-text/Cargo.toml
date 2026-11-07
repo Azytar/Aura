@@ -14,7 +14,7 @@ name = "glyph_workloads"
 harness = false
 
 [dependencies]
-rustybuzz = "0.20.1"
+harfrust = "0.15.0"
 swash = "0.2.10"
 unicode-script = "0.5.8"
 
