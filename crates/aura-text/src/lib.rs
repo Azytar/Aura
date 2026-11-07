@@ -667,6 +667,34 @@ impl Font {
         self.lookup_or_rasterize_text(text, pre_context, post_context, bold, italic)
     }
 
+    fn shape_text(
+        face_bytes: &[u8],
+        loaded_index: usize,
+        text: &str,
+        pre_context: &str,
+        post_context: &str,
+    ) -> Result<(harfrust::Buffer, u16), String> {
+        let font = harfrust::Font::new(face_bytes, loaded_index as u32)
+            .map_err(|error| format!("invalid loaded font for shaping: {error:?}"))?;
+        let upem = font.units_per_em();
+        let shaper_font = harfrust::ShaperFont::new(&font);
+        let mut buffer = harfrust::Buffer::new();
+        buffer.push_str(text);
+        buffer.set_pre_context(pre_context);
+        buffer.set_post_context(post_context);
+        buffer.guess_segment_properties();
+        harfrust::shape(
+            &shaper_font,
+            &mut buffer,
+            harfrust::ShapeOptions::new(),
+        )
+        .map_err(|error| format!("font shaping failed: {error:?}"))?;
+        if !buffer.allocation_successful() {
+            return Err("font shaping exceeded its allocation/work limits".into());
+        }
+        Ok((buffer, upem))
+    }
+
     fn lookup_or_rasterize_text(
         &mut self,
         text: &str,
@@ -709,15 +737,9 @@ impl Font {
                 (&face.bytes[..], face.index)
             }
         };
-        let face = rustybuzz::Face::from_slice(face_bytes, loaded_index as u32)
-            .ok_or("invalid loaded font for shaping")?;
-        let scale = self.size / face.units_per_em() as f32;
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(text);
-        buffer.set_pre_context(pre_context);
-        buffer.set_post_context(post_context);
-        buffer.guess_segment_properties();
-        let shaped = rustybuzz::shape(&face, &[], buffer);
+        let (shaped, units_per_em) =
+            Self::shape_text(face_bytes, loaded_index, text, pre_context, post_context)?;
+        let scale = self.size / units_per_em as f32;
         let infos = shaped.glyph_infos();
         let positions = shaped.glyph_positions();
         if infos.len() > 256 {
@@ -1420,11 +1442,8 @@ mod tests {
             let selected = font.face(face_id).unwrap();
             assert!(faces::covers(selected, text) && faces::has_color(selected));
             let fallback = &font.fallbacks[face_id as usize - 1];
-            let face = rustybuzz::Face::from_slice(&fallback.bytes, fallback.index as u32).unwrap();
-            let mut buffer = rustybuzz::UnicodeBuffer::new();
-            buffer.push_str(text);
-            buffer.guess_segment_properties();
-            let shape = rustybuzz::shape(&face, &[], buffer);
+            let (shape, _) =
+                Font::shape_text(&fallback.bytes, fallback.index, text, "", "").unwrap();
             assert_eq!(
                 shape.len(),
                 1,
