@@ -23,6 +23,11 @@ per commit.
 
 ### Performance
 
+- Increase default PTY read chunks to 64 KiB with a 256 KiB scheduling budget
+  per event-loop batch. Add an experimental `AURA_PTY_READER_THREAD=1` mode:
+  a bounded (1 MiB) background PTY reader feeds the existing single-threaded
+  parser over an ordered channel and wakes the X11 `epoll` loop via `eventfd`.
+  The existing default and OSC 52/terminal behavior stay unchanged.
 - Short Unicode graphemes now use inline UTF-8 storage rather than allocating
   a separate string per common ASCII+combining-mark cluster, preserving exact
   text and falling back to owned strings for larger clusters. Core benchmarks

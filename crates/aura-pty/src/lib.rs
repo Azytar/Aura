@@ -13,6 +13,9 @@
 //! is still alive its whole process group is killed. Closing the terminal must
 //! never leave an orphaned shell behind.
 
+mod reader;
+pub use reader::{DRAIN_BUDGET_BYTES, READ_CHUNK_BYTES, ReadEvent, Reader as PtyReader};
+
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -213,6 +216,13 @@ impl Pty {
 
     pub fn master_fd(&self) -> io::Result<RawFd> {
         Ok(self.master_ref()?.as_raw_fd())
+    }
+
+    /// Duplicates the nonblocking PTY master for an optional background
+    /// reader. Drop every duplicate before closing the PTY: a duplicate also
+    /// holds the master open and delays its hangup notification to the child.
+    pub fn clone_reader(&self) -> io::Result<File> {
+        self.master_ref()?.try_clone()
     }
 
     pub fn child_id(&self) -> u32 {

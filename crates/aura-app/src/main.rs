@@ -23,7 +23,7 @@ use as_raw_xcb_connection::AsRawXcbConnection;
 use ash::vk;
 use aura_config::{AppConfig, FontGeometry, RuntimeFontSize, grid_dimensions};
 use aura_core::{MouseTracking, SelectionPoint, Terminal};
-use aura_pty::{Pty, PtySize};
+use aura_pty::{DRAIN_BUDGET_BYTES, Pty, PtyReader, PtySize, READ_CHUNK_BYTES, ReadEvent};
 use aura_render::Renderer;
 use aura_text::{CellMetrics, Font};
 use base64::Engine;
@@ -68,6 +68,7 @@ fn main() {
 fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     // Validate both flags before opening X11 or spawning a child.
     let debug_keyboard = perf::flag("AURA_DEBUG_KEYBOARD")?;
+    let threaded_pty = perf::flag("AURA_PTY_READER_THREAD")?;
     let mut stats = perf::Perf::new(perf::flag("AURA_PERF")?);
     let termination = signals::Termination::new()?;
     let config_path = options.config_path.clone().or_else(AppConfig::config_path);
@@ -264,13 +265,22 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let _autoscroll_owner = unsafe { OwnedFd::from_raw_fd(autoscroll_timer) };
     let x_fd = connection.as_raw_fd();
     let pty_fd = pty.master_fd()?;
+    let reader = if threaded_pty {
+        Some(PtyReader::start(pty.clone_reader()?)?)
+    } else {
+        None
+    };
     epoll_add(epoll, x_fd, 1, libc::EPOLLIN as u32)?;
-    epoll_add(
-        epoll,
-        pty_fd,
-        2,
-        libc::EPOLLIN as u32 | libc::EPOLLHUP as u32,
-    )?;
+    if let Some(reader) = &reader {
+        epoll_add(epoll, reader.wake_fd(), 7, libc::EPOLLIN as u32)?;
+    } else {
+        epoll_add(
+            epoll,
+            pty_fd,
+            2,
+            libc::EPOLLIN as u32 | libc::EPOLLHUP as u32,
+        )?;
+    }
     epoll_add(epoll, timer, 3, libc::EPOLLIN as u32)?;
     epoll_add(epoll, autoscroll_timer, 5, libc::EPOLLIN as u32)?;
     epoll_add(epoll, termination.fd(), 4, libc::EPOLLIN as u32)?;
@@ -300,7 +310,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_mouse_report: Option<Vec<u8>> = None;
     let mut previous_title = terminal.title().to_owned();
     let mut events = [libc::epoll_event { events: 0, u64: 0 }; 16];
-    let mut buffer = [0u8; 16 * 1024];
+    let mut buffer = [0u8; READ_CHUNK_BYTES];
 
     while running {
         let mut pending_resize = None;
@@ -775,52 +785,71 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                2 => {
+                2 | 7 => {
                     // Window, font and configuration stay fixed during this
                     // bounded drain; RIS preserves the terminal's host metadata.
                     update_host_properties(&mut terminal, &config, &font, last_winsize);
-                    for _ in 0..16 {
-                        match pty.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(length) => {
-                                stats.pty_read(length);
-                                last_mouse_report = None;
-                                let started = stats.start();
-                                let replies = terminal.process(&buffer[..length]);
-                                stats.finish("parse", started);
-                                for request in terminal.take_clipboard_requests() {
-                                    // A read request (`?`) is never honoured: the
-                                    // terminal already refuses to emit one, so a
-                                    // non-empty payload here is always a write.
-                                    if !config.security.osc52.allows_write() {
-                                        continue;
-                                    }
-                                    let selection = match request.selection.as_slice() {
-                                        b"c" => Some(clipboard.clipboard_atom),
-                                        b"p" => Some(clipboard.primary_atom),
-                                        _ => None,
-                                    };
-                                    if let Some(selection) = selection
-                                        && let Some(text) =
-                                            decode_clipboard_payload(&request.base64)
-                                    {
-                                        clipboard.set_text(
-                                            &connection,
-                                            window,
-                                            selection,
-                                            &text,
-                                        )?;
-                                    }
-                                }
-                                if !replies.is_empty() {
-                                    input.push(&replies);
-                                }
-                                invalidated = true;
+                    let mut output = PtyOutput {
+                        terminal: &mut terminal,
+                        clipboard: &mut clipboard,
+                        connection: &connection,
+                        config: &config,
+                        window,
+                        input: &mut input,
+                        stats: &mut stats,
+                    };
+                    let mut consumed = 0usize;
+                    if ready.u64 == 7 {
+                        let reader = reader.as_ref().expect("reader event requires worker");
+                        reader.clear_wakeup()?;
+                        for _ in 0..32 {
+                            if consumed >= DRAIN_BUDGET_BYTES {
+                                break;
                             }
-                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                            Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(error) => return Err(error.into()),
+                            match reader.try_next() {
+                                Some(ReadEvent::Bytes(bytes)) => {
+                                    consumed += bytes.len();
+                                    output.process(&bytes)?;
+                                    last_mouse_report = None;
+                                    invalidated = true;
+                                }
+                                Some(ReadEvent::Closed) => {
+                                    running = false;
+                                    break;
+                                }
+                                Some(ReadEvent::Error(error)) => {
+                                    return Err(error.into());
+                                }
+                                None => break,
+                            }
+                        }
+                        // Wake ourselves when more already-queued output may
+                        // remain. Future arrivals also signal this eventfd.
+                        if consumed >= DRAIN_BUDGET_BYTES {
+                            reader.wake_again()?;
+                        }
+                    } else {
+                        for _ in 0..32 {
+                            let allowance = DRAIN_BUDGET_BYTES - consumed;
+                            if allowance == 0 {
+                                break;
+                            }
+                            let read_len = allowance.min(buffer.len());
+                            match pty.read(&mut buffer[..read_len]) {
+                                Ok(0) => break,
+                                Ok(length) => {
+                                    consumed += length;
+                                    output.process(&buffer[..length])?;
+                                    last_mouse_report = None;
+                                    invalidated = true;
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                                Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                    continue;
+                                }
+                                Err(error) => return Err(error.into()),
+                            }
                         }
                     }
                 }
@@ -1034,18 +1063,39 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             input.flush(|bytes| pty.write(bytes))?;
             if watching_write != input.pending() {
                 watching_write = input.pending();
-                let mut interest = libc::epoll_event {
-                    events: (libc::EPOLLIN
-                        | libc::EPOLLHUP
-                        | if watching_write { libc::EPOLLOUT } else { 0 })
-                        as u32,
-                    u64: 2,
-                };
-                // SAFETY: epoll and pty_fd remain owned and interest is initialized.
-                if unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_MOD, pty_fd, &mut interest) }
-                    == -1
-                {
-                    return Err(io::Error::last_os_error().into());
+                if reader.is_some() {
+                    // A worker owns PTY readability. Watching EPOLLIN here too
+                    // would busy-loop while the worker has queued output.
+                    if watching_write {
+                        epoll_add(epoll, pty_fd, 2, (libc::EPOLLOUT | libc::EPOLLHUP) as u32)?;
+                    } else {
+                        // SAFETY: fd is still owned, and DEL ignores the event pointer.
+                        if unsafe {
+                            libc::epoll_ctl(
+                                epoll,
+                                libc::EPOLL_CTL_DEL,
+                                pty_fd,
+                                std::ptr::null_mut(),
+                            )
+                        } == -1
+                        {
+                            return Err(io::Error::last_os_error().into());
+                        }
+                    }
+                } else {
+                    let mut interest = libc::epoll_event {
+                        events: (libc::EPOLLIN
+                            | libc::EPOLLHUP
+                            | if watching_write { libc::EPOLLOUT } else { 0 })
+                            as u32,
+                        u64: 2,
+                    };
+                    // SAFETY: epoll and pty_fd remain owned and interest is initialized.
+                    if unsafe { libc::epoll_ctl(epoll, libc::EPOLL_CTL_MOD, pty_fd, &mut interest) }
+                        == -1
+                    {
+                        return Err(io::Error::last_os_error().into());
+                    }
                 }
             }
         }
@@ -1093,8 +1143,51 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
             running = false;
         }
     }
+    drop(reader);
     pty.close()?;
     Ok(())
+}
+
+/// The terminal, parser, and UI-owned clipboard remain on one thread.
+struct PtyOutput<'a> {
+    terminal: &'a mut Terminal,
+    clipboard: &'a mut Clipboard,
+    connection: &'a XCBConnection,
+    config: &'a AppConfig,
+    window: u32,
+    input: &'a mut input::Input,
+    stats: &'a mut perf::Perf,
+}
+
+impl PtyOutput<'_> {
+    /// Both reader modes share this path, preserving OSC 52 and parser order.
+    fn process(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        self.stats.pty_read(bytes.len());
+        let started = self.stats.start();
+        let replies = self.terminal.process(bytes);
+        self.stats.finish("parse", started);
+        for request in self.terminal.take_clipboard_requests() {
+            // The terminal refuses read requests, so a payload is a write.
+            if !self.config.security.osc52.allows_write() {
+                continue;
+            }
+            let selection = match request.selection.as_slice() {
+                b"c" => Some(self.clipboard.clipboard_atom),
+                b"p" => Some(self.clipboard.primary_atom),
+                _ => None,
+            };
+            if let Some(selection) = selection
+                && let Some(text) = decode_clipboard_payload(&request.base64)
+            {
+                self.clipboard
+                    .set_text(self.connection, self.window, selection, &text)?;
+            }
+        }
+        if !replies.is_empty() {
+            self.input.push(&replies);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]

@@ -125,13 +125,17 @@ depend on everything.
 
 ## Event loop
 
-One `epoll` with three sources:
+One `epoll` with multiple sources:
 
 | Token | Source | Effect |
 | --- | --- | --- |
 | 1 | X11 connection | key, button, motion, configure, expose, selection, client message |
-| 2 | PTY master | read to exhaustion, feed the terminal, write any replies back |
-| 3 | `timerfd`, 500 ms | cursor blink phase change |
+| 2 | PTY master | bounded reads (default) and output writes; writes only when threaded reading is enabled |
+| 3 | `timerfd` | cursor blink phase change |
+| 4 | termination signal | exit the event loop |
+| 5 | autoscroll timer | advance drag selection |
+| 6 | reload timer | check live configuration |
+| 7 | PTY reader `eventfd` (optional) | drain bounded, ordered output chunks from worker |
 
 A frame is produced only when something is marked invalid: PTY output, a
 resize, an Expose, a title change, selection changes, a font-size change, or a
@@ -143,9 +147,13 @@ exist, so the window can never accept a keystroke it has no child to deliver.
 
 ## Threading
 
-There are no worker threads. One thread runs the event loop, the parser, and
-the renderer, which is why no allocation in the frame path needs to be shared
-or synchronised.
+By default, one thread owns the event loop, PTY reads, parser and renderer.
+With `AURA_PTY_READER_THREAD=1`, `aura-pty` also runs a background reader with
+a bounded channel and an `eventfd`. The main thread remains the **only** owner
+of the terminal grid, parser, clipboard and Vulkan renderer; a background
+read never mutates UI state. The queue imposes backpressure at 1 MiB of
+pending PTY bytes, and both modes use the same ordered parser/OSC 52 path.
+See [performance experiments](PERFORMANCE.md) for measurement instructions.
 
 ## Invariants worth preserving
 
@@ -167,7 +175,7 @@ or synchronised.
 
 ## What is not here
 
-- No worker threads, and no async runtime.
+- No async runtime. The optional PTY reader is the only worker thread.
 - No dynamic linking against the font or GUI stack beyond what the system
   already provides; Vulkan is loaded at runtime.
 - No telemetry, no network access, no external services.

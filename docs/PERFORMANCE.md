@@ -36,6 +36,41 @@ Failed warmups retain their causes and stop further rounds, rather than
 repeating an invalid campaign or treating missing samples as zero.
 The tables below are historical internal benchmarks, distinct from that harness.
 
+## PTY throughput and scheduling experiment (2026-11-06)
+
+The default X11 event loop reads up to 64 KiB per PTY call, with a total
+256 KiB read-and-parse budget per `epoll` batch. Previously, each read used a
+16 KiB buffer with at most 16 reads. The byte budget keeps the UI responsive
+to keyboard, clipboard, timers and resize activity during continuous output;
+it is **not** a fixed maximum for the entire output stream.
+
+An optional `AURA_PTY_READER_THREAD=1` mode moves **only PTY reading** into a
+dedicated thread; `Terminal::process`, OSC 52 handling, X11 events, input
+writes and Vulkan presentation stay on the UI thread. The reader sends ordered
+64 KiB chunks over a 16-slot bounded channel (at most 1 MiB of payload in the
+queue), using an `eventfd` to wake `epoll`. The UI processes no more than
+256 KiB per wake before yielding. The worker blocks on a full queue instead
+of dropping output or growing memory without bound. The master is closed only
+after the reader exits, and the reader exits promptly on shutdown.
+
+This mode is **experimental and off by default** until desktop results show
+that it helps: it overlaps PTY reading with slow rendering, but it does not
+parallelize the terminal parser. More context switches and queue copies may
+make some workloads slower. Test both modes independently on the same binary,
+GPU, power profile, window size, font and scrollback configuration:
+
+```sh
+./tools/benchmark.sh --current-session --repetitions 5 --warmups 2 --payload-mib 32 --no-open
+AURA_PTY_READER_THREAD=1 ./tools/benchmark.sh --current-session --repetitions 5 --warmups 2 --payload-mib 32 --no-open
+```
+
+Use `AURA_PERF=1` only in separate diagnostic runs. Compare Unicode throughput,
+keypress-to-PTY, resize, RSS, smoothness and paste/OSC52 correctness; retain
+raw samples, identify the GPU and power mode, and don't mistake successful
+unit tests or CPU-only numbers for native performance evidence. Asynchronous
+reads change how host idle time appears in timing traces, so compare
+end-to-end measurements as well.
+
 ## Unicode storage experiment (2026-11-06)
 
 The terminal stores the leading scalar in `Cell` and retains additional
