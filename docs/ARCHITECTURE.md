@@ -1,33 +1,35 @@
 # Architecture
 
-AURA is a workspace of small crates with one strict rule: a crate may only
-depend on a crate below it in this diagram, and nothing depends on the window
-system except the top two.
+AURA is a workspace of small crates with a one-way dependency policy:
+terminal semantics stay below OS/window/GPU integration, and only `aura-app`
+owns the X11 event/window lifecycle. `aura-render` accepts the raw connection
+needed to create a Vulkan surface but does not own X11 input or window policy.
 
 ```
-                  ┌──────────────┐
-                  │  aura-app    │  window, event loop, clipboard, PTY pump
-                  └───┬───┬───┬──┘
-                      │   │   │
-        ┌─────────────┘   │   └──────────────┐
-        │                 │                  │
-┌───────▼───────┐ ┌───────▼────────┐ ┌───────▼────────┐
-│ aura-platform │ │  aura-render   │ │  aura-config   │
-│ (X11 today)   │ │ cells+glyphs   │ │ TOML + geometry│
-└───┬───────────┘ └───┬────────────┘ └───────┬────────┘
-    │                 │                      │
-    │         ┌───────▼────────┐             │
-    │         │   aura-text    │◄────────────┘
-    │         │ shaping/raster │
-    │         └───────┬────────┘
-    │                 │
-┌───▼─────────────────▼──┐
-│       aura-core        │  parser, grid, terminal state. No OS, no GPU, no I/O.
-└───────────┬───────────┘
-            │ (probe)
-        ┌───▼────┐
-        │aura-pty│  openpty, setsid, TIOCSCTTY, TIOCSWINSZ
-        └────────┘
+                    ┌──────────────┐
+                    │   aura-app   │  X11, epoll, clipboard, input, PTY pump
+                    └─┬────┬────┬─┘
+                      │    │    │
+             ┌────────┘    │    └────────────┐
+             │             │                 │
+      ┌──────▼───────┐ ┌───▼──────────┐ ┌────▼──────────┐
+      │ aura-render  │ │ aura-config  │ │   aura-pty    │
+      │ Vulkan       │ │ TOML/geometry│ │ PTY/process   │
+      └──────┬───────┘ └───┬──────────┘ └────┬──────────┘
+             │             │                 │
+             └──────┐      │                 │
+                    ▼      ▼                 │
+                ┌──────────────┐             │
+                │  aura-text   │             │
+                │ shape/raster │             │
+                └──────┬───────┘             │
+                       │                     │
+                       └────────┐   ┌────────┘
+                                ▼   ▼
+                         ┌──────────────┐
+                         │  aura-core   │
+                         │ VT/grid/state│
+                         └──────────────┘
 ```
 
 `aura-core` never calls `libc`, never touches the filesystem, and never knows
