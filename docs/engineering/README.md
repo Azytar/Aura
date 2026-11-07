@@ -133,6 +133,32 @@ sometimes slower, so this is not a blanket claim that all Unicode or native
 terminal throughput improved. GPU presentation and physical input latency
 remain unmeasured here.
 
+## Stage 5 clipboard reliability result
+
+Outgoing X11 selections larger than one ordinary ChangeProperty request now use
+the ICCCM INCR protocol instead of silently retaining the previous small copy.
+Transfers are streamed in 32 KiB chunks, announce their total size, emit the
+mandatory zero-length terminator, and retain the selected bytes through an
+`Arc<[u8]>` while the request is in flight.
+
+The implementation bounds concurrent outgoing transfers at 16. Aura temporarily
+subscribes to `PROPERTY_CHANGE` on foreign requestor windows only when needed,
+restores the connection's previous event mask after the final chunk or failure,
+and expires stalled transfers after 60 seconds using the existing one-second
+configuration timer. The timeout therefore progresses even if the requestor
+never issues another selection request.
+
+The X11 integration gate executes the INCR protocol on an isolated Xvfb display
+with payloads of 64 KiB + 1 byte and roughly 2 MiB. It verifies exact bytes,
+announcement size, chunk termination, empty transfer state, watcher cleanup and
+event-mask restoration. A separate pure test pins the 60-second timeout boundary.
+Incoming paste limits remain unchanged: oversized/partial properties are
+discarded rather than forwarding a prefix.
+
+The branch passes format, Clippy, deterministic workspace tests, PTY/version
+tests, integration compilation, release build, offscreen Vulkan smoke, the
+large INCR X11 test and the existing no-echo typing/redraw contract.
+
 ## Next work
 
 1. Keep the deterministic CI green and avoid folding hardware-sensitive gates
