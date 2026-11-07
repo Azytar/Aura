@@ -32,7 +32,7 @@ fn renderer(w: u32, h: u32) -> Option<OffscreenRenderer> {
 }
 fn ppm(path: &Path, w: u32, h: u32, rgba: &[u8]) {
     let mut data = format!("P6\n{w} {h}\n255\n").into_bytes();
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         data.extend_from_slice(&pixel[..3]);
     }
     fs::write(path, data).unwrap();

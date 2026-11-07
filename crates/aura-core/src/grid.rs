@@ -110,6 +110,84 @@ pub(crate) struct TextWrite {
     pub last_char: char,
 }
 
+/// Preserve the original UTF-8 sequence without allocating for short clusters.
+///
+/// The common ASCII-base-plus-accent sequence fits in three bytes. Larger
+/// clusters (including emoji ZWJ sequences) retain their full, unmodified text.
+const INLINE_GRAPHEME_BYTES: usize = 12;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Grapheme {
+    Inline {
+        bytes: [u8; INLINE_GRAPHEME_BYTES],
+        len: u8,
+    },
+    Heap(String),
+}
+
+impl Grapheme {
+    fn from_str(text: &str) -> Self {
+        if text.len() <= INLINE_GRAPHEME_BYTES {
+            let mut bytes = [0; INLINE_GRAPHEME_BYTES];
+            bytes[..text.len()].copy_from_slice(text.as_bytes());
+            Self::Inline {
+                bytes,
+                len: text.len() as u8,
+            }
+        } else {
+            Self::Heap(text.to_owned())
+        }
+    }
+
+    fn from_string(text: String) -> Self {
+        if text.len() <= INLINE_GRAPHEME_BYTES {
+            Self::from_str(&text)
+        } else {
+            Self::Heap(text)
+        }
+    }
+
+    fn from_ascii_base_mark(base: u8, mark: char) -> Self {
+        let mut bytes = [0; INLINE_GRAPHEME_BYTES];
+        bytes[0] = base;
+        let mark_len = mark.encode_utf8(&mut bytes[1..]).len();
+        Self::Inline {
+            bytes,
+            len: (mark_len + 1) as u8,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Inline { bytes, len } => std::str::from_utf8(&bytes[..usize::from(*len)])
+                .expect("inline grapheme contains validated UTF-8"),
+            Self::Heap(text) => text,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.as_str().len()
+    }
+
+    fn push(&mut self, ch: char) {
+        if let Self::Inline { bytes, len } = self {
+            let end = usize::from(*len);
+            if ch.len_utf8() <= INLINE_GRAPHEME_BYTES - end {
+                *len += ch.encode_utf8(&mut bytes[end..]).len() as u8;
+                return;
+            }
+        }
+        if let Self::Heap(text) = self {
+            text.push(ch);
+        } else {
+            let mut text = String::with_capacity(self.len() + ch.len_utf8());
+            text.push_str(self.as_str());
+            text.push(ch);
+            *self = Self::Heap(text);
+        }
+    }
+}
+
 /// Canonical metadata prefix: trailing empty entries never retain storage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Sidecar<T>(Vec<Option<T>>);
@@ -219,7 +297,7 @@ impl<T> Sidecar<T> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     cells: Box<[Cell]>,
-    graphemes: Sidecar<String>,
+    graphemes: Sidecar<Grapheme>,
     hyperlinks: Sidecar<u32>,
     underline_colors: Sidecar<u32>,
     wrapped: bool,
@@ -274,12 +352,12 @@ impl Row {
         }
         self.graphemes
             .get(column)
-            .cloned()
+            .map(|text| text.as_str().to_owned())
             .or_else(|| char::from_u32(cell.content).map(|ch| ch.to_string()))
     }
 
     pub fn stored_grapheme_at(&self, column: usize) -> Option<&str> {
-        self.graphemes.get(column).map(String::as_str)
+        self.graphemes.get(column).map(Grapheme::as_str)
     }
 
     /// Whether this row continues the logical line from its preceding row.
@@ -557,13 +635,13 @@ impl Grid {
         }
         let row = self.row(row)?;
         if let Some(text) = row.graphemes.get(column) {
-            return Some(text.clone());
+            return Some(text.as_str().to_owned());
         }
         char::from_u32(cell.content).map(|ch| ch.to_string())
     }
 
     pub fn stored_grapheme(&self, row: usize, column: usize) -> Option<&str> {
-        self.row(row)?.graphemes.get(column).map(String::as_str)
+        self.row(row)?.graphemes.get(column).map(Grapheme::as_str)
     }
 
     /// Retains a validated extension whose leading scalar and cell width did
@@ -574,7 +652,9 @@ impl Grid {
             text.chars().next().map(u32::from),
             Some(target.cells[column].content)
         );
-        target.graphemes.set(column, Some(text));
+        target
+            .graphemes
+            .set(column, Some(Grapheme::from_string(text)));
         target.dirty = true;
     }
 
@@ -587,10 +667,9 @@ impl Grid {
             }
         } else {
             let base = char::from_u32(target.cells[column].content).expect("ASCII base");
-            let mut text = String::with_capacity(base.len_utf8() + ch.len_utf8());
-            text.push(base);
-            text.push(ch);
-            target.graphemes.set(column, Some(text));
+            target
+                .graphemes
+                .set(column, Some(Grapheme::from_ascii_base_mark(base as u8, ch)));
             target.dirty = true;
         }
     }
@@ -701,7 +780,7 @@ impl Grid {
         row: usize,
         column: usize,
         mut leading: Cell,
-        grapheme: Option<String>,
+        grapheme: Option<Grapheme>,
     ) -> bool {
         if row >= self.height || column.checked_add(1).is_none_or(|end| end >= self.width) {
             return false;
@@ -903,7 +982,7 @@ impl Grid {
                     let end = written.bytes - chars.as_str().len();
                     target.graphemes.set(
                         column - 1,
-                        Some(text[end - ch.len_utf8() - 1..end].to_owned()),
+                        Some(Grapheme::from_str(&text[end - ch.len_utf8() - 1..end])),
                     );
                     continue;
                 }
@@ -1402,7 +1481,7 @@ impl Grid {
                     (0..used).map(move |column| {
                         (
                             row.cells[column],
-                            row.graphemes.get(column).map(String::as_str),
+                            row.graphemes.get(column).map(Grapheme::as_str),
                             row.hyperlinks.get(column).copied(),
                             row.underline_colors.get(column).copied(),
                         )
@@ -1437,7 +1516,7 @@ impl Grid {
                                 cell.bg,
                                 cell.flags().without_wide(),
                             );
-                            row.graphemes.set(0, Some("\u{fffd}".to_owned()));
+                            row.graphemes.set(0, Some(Grapheme::from_str("\u{fffd}")));
                             row.underline_colors.set(0, underline_color);
                             if cursor_position
                                 .is_some_and(|pos| (offset..offset + 2).contains(&pos))
@@ -1454,7 +1533,7 @@ impl Grid {
                             break;
                         }
                         row.cells[column] = cell;
-                        row.graphemes.set(column, grapheme.map(str::to_owned));
+                        row.graphemes.set(column, grapheme.map(Grapheme::from_str));
                         row.hyperlinks.set(column, hyperlink);
                         row.underline_colors.set(column, underline_color);
                         line.next();
@@ -1472,7 +1551,7 @@ impl Grid {
                         column += 2;
                     } else {
                         row.cells[column] = cell;
-                        row.graphemes.set(column, grapheme.map(str::to_owned));
+                        row.graphemes.set(column, grapheme.map(Grapheme::from_str));
                         row.hyperlinks.set(column, hyperlink);
                         row.underline_colors.set(column, underline_color);
                         if cursor_position == Some(offset) {
@@ -1487,7 +1566,7 @@ impl Grid {
                     let (cell, grapheme, hyperlink, underline_color) =
                         *line.peek().expect("remaining logical cell");
                     row.cells[0] = cell;
-                    row.graphemes.set(0, grapheme.map(str::to_owned));
+                    row.graphemes.set(0, grapheme.map(Grapheme::from_str));
                     row.hyperlinks.set(0, hyperlink);
                     row.underline_colors.set(0, underline_color);
                     line.next();
@@ -1677,7 +1756,7 @@ fn repair_wide_pairs(cells: &mut [Cell]) {
     }
 }
 
-fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut Sidecar<String>) {
+fn clear_orphan_graphemes(cells: &[Cell], graphemes: &mut Sidecar<Grapheme>) {
     for (cell, text) in cells.iter().zip(&mut graphemes.0) {
         if cell.content == 0 {
             *text = None;
@@ -1697,8 +1776,8 @@ fn clear_orphan_metadata(cells: &[Cell], metadata: &mut Sidecar<u32>) {
     metadata.trim();
 }
 
-fn multi_scalar_grapheme(text: &str) -> Option<String> {
-    (text.chars().count() > 1).then(|| text.to_owned())
+fn multi_scalar_grapheme(text: &str) -> Option<Grapheme> {
+    (text.chars().nth(1).is_some()).then(|| Grapheme::from_str(text))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1774,6 +1853,39 @@ impl TerminalGrid {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn short_graphemes_remain_inline_and_preserve_original_unicode() {
+        let mut cluster = Grapheme::from_str("e\u{301}");
+        assert!(matches!(cluster, Grapheme::Inline { .. }));
+        assert_eq!(cluster.as_str(), "e\u{301}");
+        cluster.push('\u{308}');
+        assert!(matches!(cluster, Grapheme::Inline { .. }));
+        assert_eq!(cluster.as_str(), "e\u{301}\u{308}");
+
+        let mut combined = Grapheme::from_ascii_base_mark(b'e', '\u{301}');
+        assert_eq!(combined.as_str(), "e\u{301}");
+        for _ in 0..8 {
+            combined.push('\u{301}');
+        }
+        assert!(matches!(combined, Grapheme::Heap(_)));
+        assert_eq!(combined.as_str(), format!("e{}", "\u{301}".repeat(9)));
+    }
+
+    #[test]
+    fn long_graphemes_preserve_bytes_through_grid_and_reflow() {
+        let original = "👩‍👩‍👧‍👦";
+        let mut grid = Grid::new(12, 3).unwrap();
+        assert!(grid.set_wide_grapheme(
+            0,
+            1,
+            original,
+            Cell::new('👩' as u32, 0, 0, CellFlags::default()),
+        ));
+        assert_eq!(grid.grapheme(0, 1).as_deref(), Some(original));
+        grid.resize(10, 3).unwrap();
+        assert_eq!(grid.grapheme(0, 1).as_deref(), Some(original));
+    }
+
     #[test]
     fn recording_scroll_moves_rows_and_matches_cloning_reference() {
         for limit in [0, 1, 2, 4, 16] {

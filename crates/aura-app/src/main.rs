@@ -783,6 +783,7 @@ fn run(options: Options) -> Result<(), Box<dyn std::error::Error>> {
                         match pty.read(&mut buffer) {
                             Ok(0) => break,
                             Ok(length) => {
+                                stats.pty_read(length);
                                 last_mouse_report = None;
                                 let started = stats.start();
                                 let replies = terminal.process(&buffer[..length]);

@@ -107,6 +107,30 @@ fn main() {
         }
     }
 
+    // Precomposed and decomposed accents look alike but exercise different
+    // storage paths. Measure an equal byte budget without PTY/GPU overhead;
+    // report bytes separately from logical graphemes when comparing results.
+    for (name, cluster) in [
+        ("precomposed e-acute", "é"),
+        ("decomposed e-acute", "e\u{301}"),
+        ("two combining marks", "e\u{301}\u{308}"),
+        ("wide CJK", "界"),
+    ] {
+        let line = format!("{}\r\n", cluster.repeat(30));
+        let payload = line
+            .repeat((1usize << 20).div_ceil(line.len()))
+            .into_bytes();
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal.set_scrollback_limit(0);
+        measure(
+            &format!("unicode isolation {name} ({} bytes)", payload.len()),
+            12,
+            || {
+                black_box(terminal.process(black_box(&payload)));
+            },
+        );
+    }
+
     let mut grid = Grid::new(120, 40).expect("fixed dimensions are valid");
     let cell = Cell {
         content: b'x' as u32,

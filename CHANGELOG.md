@@ -23,6 +23,11 @@ per commit.
 
 ### Performance
 
+- Short Unicode graphemes now use inline UTF-8 storage rather than allocating
+  a separate string per common ASCII+combining-mark cluster, preserving exact
+  text and falling back to owned strings for larger clusters. Core benchmarks
+  isolate precomposed, decomposed, multi-mark and wide-CJK output; optional
+  `AURA_PERF=1` diagnostics report PTY read volume and host parse busy time.
 - Surface rendering caches static background coverage by dirty row. Cursor
   blinks and small selection-only updates no longer classify every unchanged
   cell; the sparse/dense choice retains full-scan differential tests and a

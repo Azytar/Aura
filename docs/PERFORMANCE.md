@@ -36,6 +36,52 @@ Failed warmups retain their causes and stop further rounds, rather than
 repeating an invalid campaign or treating missing samples as zero.
 The tables below are historical internal benchmarks, distinct from that harness.
 
+## Unicode storage experiment (2026-11-06)
+
+The terminal stores the leading scalar in `Cell` and retains additional
+grapheme scalars in a sparse per-row sidecar. Short clusters now use 12 inline
+UTF-8 bytes instead of allocating a `String` for every `e` + combining mark;
+longer clusters retain a `String` and their original byte sequence. This does
+**not** perform NFC normalization or change clipboard text. The pure ASCII path
+still leaves the grapheme sidecar unallocated.
+
+The CPU-only benchmark compares the same one-MiB workload at commit
+`59aa1e9` and the candidate on the same host. The original and candidate were
+built in separate worktrees; results below are medians of **three alternating
+baseline/candidate pairs** after a warm-up run, not measurements from Axiom's
+Arch desktop. Lower is better:
+
+| CPU-only workload | Baseline | Candidate | Change |
+| --- | ---: | ---: | ---: |
+| Unicode (1 MiB, no history) | 5.53 ms | 4.39 ms | -20.6% |
+| Unicode (1 MiB, 10k history) | 7.09 ms | 5.65 ms | -20.3% |
+| UTF-8 terminal (6144 bytes) | 54.37 us | 31.55 us | -42.0% |
+| Reflow with combining marks | 564.61 us | 325.77 us | -42.3% |
+
+An additional five alternating pairs confirmed the Unicode improvement. The
+unaffected CJK-only workload fluctuated around its baseline and was sometimes
+slower, so these figures do not establish a blanket Unicode speed-up. `cargo
+bench --offline -p aura-core --bench workloads` now includes equal-byte
+precomposed (`é`), decomposed (`e` + U+0301), two-mark and wide-CJK isolation
+workloads. Equal bytes **do not** mean equal grapheme counts; record both when
+interpreting them. These core-only numbers must never be compared directly to
+the PTY/GUI throughput or attributed to Vulkan performance.
+
+For native diagnosis, `AURA_PERF=1 aura` prints every five seconds:
+
+- `pty_bytes`, `pty_reads` and `pty_mib_s`: bytes read by the host from the
+  PTY, not a graphics presentation measurement.
+- `parse_busy_pct`: sum of `Terminal::process` host intervals divided by the
+  reporting window. It is not total CPU utilization.
+- Existing parse and render-stage latency quantiles, which remain subject to
+  sampling overhead and exclude display scanout.
+
+Run opt-in diagnostics separately from uninstrumented throughput baselines;
+the extra timestamps and output can affect results. If parse busy time is
+small while native throughput remains low, investigate PTY backpressure,
+event-loop scheduling and rendering rather than changing the Unicode parser
+on speculation. Keep raw logs and exact binary hashes outside Git.
+
 Printable-output changes should be compared with separate baseline/candidate
 executables and recorded hashes, retaining unfavorable repetitions. The core
 workloads cover scalar parser output, terminal writes and bounded-history

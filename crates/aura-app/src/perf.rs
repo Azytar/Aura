@@ -73,6 +73,9 @@ pub struct Perf {
     window_start: Option<Instant>,
     stages: [Samples; 12],
     render_calls: u64,
+    pty_bytes: u64,
+    pty_reads: u64,
+    parse_elapsed: Duration,
 }
 
 impl Perf {
@@ -81,6 +84,9 @@ impl Perf {
             window_start: enabled.then(Instant::now),
             stages: std::array::from_fn(|_| Samples::default()),
             render_calls: 0,
+            pty_bytes: 0,
+            pty_reads: 0,
+            parse_elapsed: Duration::ZERO,
         }
     }
     pub fn enabled(&self) -> bool {
@@ -91,7 +97,17 @@ impl Perf {
     }
     pub fn finish(&mut self, stage: &str, start: Option<Instant>) {
         if let Some(start) = start {
-            self.add(stage, Some(start.elapsed()));
+            let elapsed = start.elapsed();
+            if stage == "parse" {
+                self.parse_elapsed += elapsed;
+            }
+            self.add(stage, Some(elapsed));
+        }
+    }
+    pub fn pty_read(&mut self, bytes: usize) {
+        if self.enabled() {
+            self.pty_bytes = self.pty_bytes.saturating_add(bytes as u64);
+            self.pty_reads = self.pty_reads.saturating_add(1);
         }
     }
     fn add(&mut self, stage: &str, elapsed: Option<Duration>) {
@@ -138,6 +154,13 @@ impl Perf {
             "aura perf: render_calls/s={:.2} host_intervals",
             self.render_calls as f64 / elapsed.as_secs_f64()
         );
+        eprintln!(
+            "aura perf: pty_bytes={} pty_reads={} pty_mib_s={:.3} parse_busy_pct={:.2}",
+            self.pty_bytes,
+            self.pty_reads,
+            self.pty_bytes as f64 / (1024.0 * 1024.0) / elapsed.as_secs_f64(),
+            100.0 * self.parse_elapsed.as_secs_f64() / elapsed.as_secs_f64()
+        );
         for (name, samples) in NAMES.iter().zip(&mut self.stages) {
             if let Some((retained, quantiles)) = samples.summary() {
                 let [p50, p95, p99] = quantiles.map(|d| d.as_secs_f64() * 1000.0);
@@ -150,6 +173,9 @@ impl Perf {
             *samples = Samples::default();
         }
         self.render_calls = 0;
+        self.pty_bytes = 0;
+        self.pty_reads = 0;
+        self.parse_elapsed = Duration::ZERO;
         self.window_start = Some(Instant::now());
     }
 }
@@ -200,5 +226,20 @@ mod tests {
             ..RenderTimings::default()
         });
         assert_eq!(off.stages[5].count, 0);
+        off.pty_read(4096);
+        assert_eq!(off.pty_bytes, 0);
+        assert_eq!(off.pty_reads, 0);
+    }
+
+    #[test]
+    fn pty_counters_are_opt_in_and_accumulate_without_overflow() {
+        let mut perf = Perf::new(true);
+        perf.pty_read(65_536);
+        perf.pty_read(32);
+        assert_eq!(perf.pty_bytes, 65_568);
+        assert_eq!(perf.pty_reads, 2);
+        perf.pty_bytes = u64::MAX;
+        perf.pty_read(1);
+        assert_eq!(perf.pty_bytes, u64::MAX);
     }
 }
