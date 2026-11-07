@@ -1570,6 +1570,10 @@ struct OutgoingSelection {
 }
 
 impl OutgoingSelection {
+    fn expired_at(&self, now: Instant) -> bool {
+        now.duration_since(self.last_progress) >= SELECTION_TRANSFER_TIMEOUT
+    }
+
     // The empty range after the last data chunk is the mandatory INCR terminator.
     fn next_chunk(&mut self) -> std::ops::Range<usize> {
         let begin = self.sent;
@@ -1800,8 +1804,7 @@ impl Clipboard {
     fn expire_transfers(&mut self, connection: &XCBConnection) {
         let now = Instant::now();
         for index in (0..self.outgoing.len()).rev() {
-            if now.duration_since(self.outgoing[index].last_progress) >= SELECTION_TRANSFER_TIMEOUT
-            {
+            if self.outgoing[index].expired_at(now) {
                 self.remove_transfer(connection, index);
             }
         }
@@ -2099,6 +2102,23 @@ mod tests {
             assert_eq!(&result, &*bytes);
             assert_eq!(transfer.sent, length);
         }
+    }
+
+    #[test]
+    fn outgoing_selection_timeout_has_an_exact_boundary() {
+        let now = Instant::now();
+        let make = |last_progress| OutgoingSelection {
+            requestor: 1,
+            property: 2,
+            target: 3,
+            contents: Arc::from([]),
+            sent: 0,
+            last_progress,
+        };
+
+        assert!(!make(now - (SELECTION_TRANSFER_TIMEOUT - Duration::from_millis(1))).expired_at(now));
+        assert!(make(now - SELECTION_TRANSFER_TIMEOUT).expired_at(now));
+        assert!(make(now - (SELECTION_TRANSFER_TIMEOUT + Duration::from_secs(1))).expired_at(now));
     }
 
     #[test]
