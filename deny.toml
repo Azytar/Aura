@@ -1,0 +1,16 @@
+[graph]
+all-features = true
+
+[advisories]
+# cargo-deny 0.20.x treats vulnerability and unsound advisories as errors.
+# Yanked versions are visible but are not an automatic failure for an existing lock.
+yanked = "warn"
+ignore = []
+
+[sources]
+# Aura currently resolves external crates only from crates.io. A future Git or
+# alternate-registry dependency must be reviewed and explicitly allowed.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
